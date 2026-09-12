@@ -215,8 +215,14 @@ class ApiService {
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
-        return list.map((e) => TableArea.fromJson(e)).toList();
+        return list
+            .whereType<Map>()
+            .map((e) => TableArea.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
       }
+      debugPrint(
+        '[Fatfox API] GetAreas HTTP ${response.statusCode}: ${response.body}',
+      );
     } catch (e) {
       debugPrint('[Fatfox API] GetAreas error: $e');
     }
@@ -237,8 +243,20 @@ class ApiService {
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
-        return list.map((e) => DineInTable.fromJson(e)).toList();
+        final tables = <DineInTable>[];
+        for (final e in list) {
+          if (e is! Map) continue;
+          try {
+            tables.add(DineInTable.fromJson(Map<String, dynamic>.from(e)));
+          } catch (err) {
+            debugPrint('[Fatfox API] Skip bad table row: $err');
+          }
+        }
+        return tables;
       }
+      debugPrint(
+        '[Fatfox API] GetTables HTTP ${response.statusCode}: ${response.body}',
+      );
     } catch (e) {
       debugPrint('[Fatfox API] GetTables error: $e');
     }
@@ -1076,9 +1094,43 @@ class ApiService {
       );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
-        return List<Map<String, dynamic>>.from(_extractList(res['data']));
+        final raw = _extractList(res['data']);
+        // Backend listallcarts is not tenant-scoped — filter client-side.
+        const active = {
+          'PENDING',
+          'RUNNING',
+          'KOT',
+          'KOT_PRINT',
+          'PRINTED',
+        };
+        final orders = <Map<String, dynamic>>[];
+        for (final e in raw) {
+          if (e is! Map) continue;
+          final order = Map<String, dynamic>.from(e);
+          final orderRest = order['restaurant_id']?.toString() ?? '';
+          // Require tenant match when we know our restaurant (API is unscoped).
+          if (restId != null && restId.isNotEmpty && orderRest != restId) {
+            continue;
+          }
+          final status = order['table_status']?.toString().toUpperCase() ?? '';
+          if (status.isNotEmpty && !active.contains(status)) continue;
+          // Room-service carts are not dine-in floor orders.
+          final service = order['service_type']?.toString() ?? '';
+          if (service.toLowerCase().contains('room')) continue;
+          orders.add(order);
+        }
+        debugPrint(
+          '[Fatfox API] Live orders: ${orders.length} for restaurant '
+          '(raw ${raw.length})',
+        );
+        return orders;
       }
-    } catch (_) {}
+      debugPrint(
+        '[Fatfox API] GetLiveOrders HTTP ${response.statusCode}: ${response.body}',
+      );
+    } catch (e) {
+      debugPrint('[Fatfox API] GetLiveOrders error: $e');
+    }
     return [];
   }
 }

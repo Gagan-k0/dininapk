@@ -955,6 +955,53 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
+  /// Safe nested map get — `table_id` is often a bare ObjectId string from the API.
+  dynamic _mapGet(dynamic value, String key) =>
+      value is Map ? value[key] : null;
+
+  double _asDouble(dynamic value, [double fallback = 0]) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  String _liveOrderTableLabel(Map<String, dynamic> order, TableProvider prov) {
+    final fromNested = _mapGet(order['table_id'], 'table_number') ??
+        _mapGet(order['table_id'], 'table_no');
+    if (fromNested != null && fromNested.toString().isNotEmpty) {
+      return fromNested.toString();
+    }
+    final direct = order['table_number'] ?? order['table_no'];
+    if (direct != null && direct.toString().isNotEmpty) {
+      return direct.toString();
+    }
+    final tableId = order['table_id'] is Map
+        ? (_mapGet(order['table_id'], '_id') ?? _mapGet(order['table_id'], 'id'))
+            ?.toString()
+        : order['table_id']?.toString();
+    if (tableId != null && tableId.isNotEmpty) {
+      for (final t in prov.tables) {
+        if (t.id == tableId) return t.tableNumber;
+      }
+    }
+    return '—';
+  }
+
+  Color _statusColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'PENDING':
+        return const Color(0xFFD97706);
+      case 'KOT':
+      case 'KOT_PRINT':
+        return const Color(0xFF2563EB);
+      case 'PRINTED':
+        return const Color(0xFF7C3AED);
+      case 'RUNNING':
+        return const Color(0xFF059669);
+      default:
+        return const Color(0xFF64748B);
+    }
+  }
+
   // --- TAB 2: LIVE ORDERS ---
   Widget _buildLiveOrdersView(TableProvider prov) {
     if (prov.liveOrders.isEmpty) {
@@ -964,7 +1011,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           children: [
             Icon(Icons.receipt_long, size: 48, color: Color(0xFFCBD5E1)),
             SizedBox(height: 12),
-            Text('No Live Active Dine-In Orders', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.bold)),
+            Text(
+              'No Live Active Dine-In Orders',
+              style: TextStyle(
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ],
         ),
       );
@@ -975,9 +1028,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       itemCount: prov.liveOrders.length,
       itemBuilder: (context, index) {
         final order = prov.liveOrders[index];
-        final orderId = order['_id'] ?? order['id'] ?? 'ORD-#${index + 100}';
-        final tableNo = order['table_id']?['table_number'] ?? order['table_number'] ?? '${(index % 25) + 1}';
-        final total = (order['grand_total'] ?? order['total_price'] ?? ((index + 1) * 150.0)).toDouble();
+        final orderId =
+            (order['_id'] ?? order['id'] ?? 'ORD-${index + 1}').toString();
+        final tableNo = _liveOrderTableLabel(order, prov);
+        final total = _asDouble(
+          order['grand_total'] ?? order['total_price'] ?? order['menu_total'],
+        );
+        final status =
+            (order['table_status'] ?? 'ACTIVE').toString().toUpperCase();
+        final guest = order['customer_name']?.toString();
+        final statusColor = _statusColor(status);
 
         return Card(
           margin: const EdgeInsets.only(bottom: 10),
@@ -994,30 +1054,64 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFEF3C7),
+                    color: statusColor.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.flash_on, color: Color(0xFFD97706)),
+                  child: Icon(Icons.flash_on, color: statusColor),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Table $tableNo', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                      Text('ID: $orderId', style: const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+                      Text(
+                        'Table $tableNo',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        guest != null && guest.isNotEmpty
+                            ? '$guest · ${orderId.length > 8 ? orderId.substring(orderId.length - 8) : orderId}'
+                            : 'Cart …${orderId.length > 8 ? orderId.substring(orderId.length - 8) : orderId}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
                     ],
                   ),
                 ),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('₹${total.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFFF97316))),
+                    Text(
+                      '₹${total.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                        color: Color(0xFFF97316),
+                      ),
+                    ),
                     const SizedBox(height: 4),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(color: const Color(0xFFDBEAFE), borderRadius: BorderRadius.circular(4)),
-                      child: const Text('ACTIVE KOT', style: TextStyle(fontSize: 10, color: Color(0xFF2563EB), fontWeight: FontWeight.bold)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        status,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ],
                 ),

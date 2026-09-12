@@ -26,8 +26,18 @@ class AuthProvider with ChangeNotifier {
 
   Future<void> checkSession() async {
     await _authService.initBaseUrl();
-    _isLoggedIn = await _authService.isLoggedIn();
     _isDemoMode = await _authService.isDemoMode();
+    // Never restore a demo session — force real login after restart.
+    if (_isDemoMode) {
+      await _authService.logout();
+      _isLoggedIn = false;
+      _isDemoMode = false;
+      _token = null;
+      _restaurantId = null;
+      notifyListeners();
+      return;
+    }
+    _isLoggedIn = await _authService.isLoggedIn();
     if (_isLoggedIn) {
       _token = await _authService.getToken();
       _restaurantId = await _authService.getRestaurantId();
@@ -76,13 +86,7 @@ class AuthProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      // Default demo credentials → local UI bypass (not superadmin, not real API).
-      if (email.trim() == AuthService.demoUsername &&
-          password == AuthService.demoPassword) {
-        return await enterDemoMode(baseUrl: baseUrl);
-      }
-
-      // Must set base URL BEFORE the HTTP call (was only saved after success).
+      // Demo is ONLY via "Skip login" button — never hijack real credentials.
       final cleaned = baseUrl.trim();
       if (cleaned.isNotEmpty) {
         ApiConfig.baseUrl = cleaned;

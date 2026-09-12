@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
-import '../../services/auth_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -13,11 +12,9 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
-  // Default demo credentials → local UI bypass (see AuthService).
-  final _emailController =
-      TextEditingController(text: AuthService.demoUsername);
-  final _passwordController =
-      TextEditingController(text: AuthService.demoPassword);
+  // Empty by default — enter real restaurant/staff credentials.
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   final _restaurantNoController = TextEditingController();
   final _urlController = TextEditingController(
     text: 'https://backend.fatfox.testfox.in/api/v1',
@@ -94,26 +91,10 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Restaurant / staff login only (same as admin panel).\n'
-                    'Superadmin cannot sign in here — no signup on this app.',
+                    'Use the same restaurant username/password as the admin panel.\n'
+                    'Staff users also need Restaurant No.',
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
-                  ),
-                  const SizedBox(height: 12),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEFF6FF),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: const Color(0xFFBFDBFE)),
-                    ),
-                    child: const Text(
-                      'Demo defaults: admin@example.com / mypassword\n'
-                      '→ opens UI without calling the API (for layout testing).\n'
-                      'For real tables/KOT/print, use a restaurant username.',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF1E40AF)),
-                    ),
                   ),
                   const SizedBox(height: 24),
 
@@ -142,7 +123,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     autocorrect: false,
                     decoration: InputDecoration(
                       labelText: 'Restaurant / Staff Username',
-                      helperText: 'Or leave demo defaults to skip API login',
+                      helperText: 'Same username as admin panel login',
                       prefixIcon: const Icon(Icons.badge_outlined),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),

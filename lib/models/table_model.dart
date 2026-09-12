@@ -44,7 +44,11 @@ class DineInTable {
   bool get isPrinted => tableStatus == 'PRINTED';
 
   factory DineInTable.fromJson(Map<String, dynamic> json) {
-    final cart = json['cart_details'] as Map<String, dynamic>?;
+    // API may return null or a plain ObjectId string — never cast blindly.
+    final rawCart = json['cart_details'] ?? json['cartDetails'];
+    final Map<String, dynamic>? cart =
+        rawCart is Map ? Map<String, dynamic>.from(rawCart) : null;
+
     double price = 0.0;
     if (cart != null && cart['total_price'] != null) {
       price = double.tryParse(cart['total_price'].toString()) ?? 0.0;
@@ -59,12 +63,25 @@ class DineInTable {
       items = (cart['cartMenuData'] as List).length;
     }
 
+    final rawArea = json['area_id'] ?? json['area'];
+    final areaId = rawArea is Map
+        ? (rawArea['_id'] ?? rawArea['id'])?.toString() ?? ''
+        : rawArea?.toString() ?? '';
+
     return DineInTable(
-      id: json['_id']?.toString() ?? json['table_id']?.toString() ?? '',
-      tableNumber: json['table_number']?.toString() ?? '0',
-      areaId: json['area_id']?.toString() ?? '',
+      id: json['_id']?.toString() ??
+          (json['table_id'] is Map
+              ? json['table_id']['_id']?.toString()
+              : json['table_id']?.toString()) ??
+          '',
+      tableNumber: json['table_number']?.toString() ??
+          json['table_no']?.toString() ??
+          '0',
+      areaId: areaId,
       noOfPeople: int.tryParse(json['no_of_people']?.toString() ?? '4') ?? 4,
-      tableStatus: json['table_status']?.toString() ?? 'BLANK',
+      tableStatus: json['table_status']?.toString() ??
+          cart?['table_status']?.toString() ??
+          'BLANK',
       status: json['status']?.toString() ?? 'available',
       totalPrice: price,
       itemCount: items,
