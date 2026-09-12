@@ -1,6 +1,8 @@
 import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+
 import '../config/api_config.dart';
 import '../models/table_model.dart';
 import '../models/menu_model.dart';
@@ -9,93 +11,132 @@ import 'auth_service.dart';
 class ApiService {
   final AuthService _authService = AuthService();
 
-  Future<Map<String, dynamic>> login(String email, String password) async {
-    final payload = jsonEncode({
+  Future<Map<String, dynamic>> login(
+    String email,
+    String password, {
+    String? restaurantNo,
+  }) async {
+    final targetBase = ApiConfig.cleanBaseUrl;
+    debugPrint(
+      '[Fatfox Login] Attempting login with baseUrl: $targetBase, user: $email',
+    );
+
+    // 1) Restaurant owner/admin login (same as fatfox-admin-panel)
+    final restaurantPayload = jsonEncode({
       'username': email,
-      'email': email,
       'password': password,
     });
-
-    final targetBase = ApiConfig.cleanBaseUrl;
-    debugPrint('[Fatfox Login] Attempting login with baseUrl: $targetBase, user: $email');
-
-    // 1. Try Restaurant Login endpoint first (with 5s timeout)
     try {
       final restUrl = Uri.parse('$targetBase${ApiConfig.restaurantLogin}');
       debugPrint('[Fatfox Login] Calling endpoint: $restUrl');
       final responseRest = await http
-          .post(restUrl, headers: ApiConfig.headers(null, null), body: payload)
-          .timeout(const Duration(seconds: 5));
+          .post(
+            restUrl,
+            headers: ApiConfig.headers(null, null),
+            body: restaurantPayload,
+          )
+          .timeout(const Duration(seconds: 20));
 
-      debugPrint('[Fatfox Login] Response status: ${responseRest.statusCode}, body: ${responseRest.body}');
+      debugPrint(
+        '[Fatfox Login] Response status: ${responseRest.statusCode}, body: ${responseRest.body}',
+      );
       if (responseRest.statusCode == 200) {
         final dataRest = jsonDecode(responseRest.body);
         if (_isSuccessResponse(dataRest)) {
-          return dataRest;
+          return dataRest as Map<String, dynamic>;
         }
         final errMsg = _extractErrorMessage(dataRest);
-        if (errMsg != null) {
+        // Invalid credentials → try staff login if restaurant_no provided
+        if (errMsg != null &&
+            (restaurantNo == null || restaurantNo.trim().isEmpty)) {
           throw Exception(errMsg);
         }
       }
     } catch (e) {
       debugPrint('[Fatfox Login] Restaurant login error: $e');
-      if (e.toString().contains('Invalid Credentials') || e.toString().contains('User Blocked')) {
-        rethrow;
+      if (restaurantNo == null || restaurantNo.trim().isEmpty) {
+        throw Exception(_friendlyNetworkError(e, targetBase) ?? e.toString().replaceAll('Exception: ', ''));
+      }
+      // Staff path still tries staff-login unless this was clearly a network outage
+      // for the whole device — still try staff; staff catch will surface network too.
+      final net = _friendlyNetworkError(e, targetBase);
+      if (net != null) {
+        // Same DNS failure will hit staff too — fail fast with clear message.
+        throw Exception(net);
       }
     }
 
-    // 2. Try Admin Login endpoint as fallback
+    // 2) Staff login (needs restaurant_no — same as staff accounts in admin)
+    final no = restaurantNo?.trim() ?? '';
+    if (no.isEmpty) {
+      throw Exception(
+        'Invalid Credentials. For staff users, enter Restaurant No. as well.',
+      );
+    }
+
     try {
-      final adminUrl = Uri.parse('$targetBase/admin/login');
-      debugPrint('[Fatfox Login] Fallback calling admin endpoint: $adminUrl');
-      final responseAdmin = await http
-          .post(adminUrl, headers: ApiConfig.headers(null, null), body: payload)
-          .timeout(const Duration(seconds: 5));
-
-      debugPrint('[Fatfox Login] Admin response status: ${responseAdmin.statusCode}, body: ${responseAdmin.body}');
-      if (responseAdmin.statusCode == 200) {
-        final dataAdmin = jsonDecode(responseAdmin.body);
-        if (_isSuccessResponse(dataAdmin)) {
-          return dataAdmin;
-        }
+      final staffUrl = Uri.parse('$targetBase${ApiConfig.staffLogin}');
+      final staffPayload = jsonEncode({
+        'restaurant_no': no,
+        'username': email,
+        'password': password,
+      });
+      debugPrint('[Fatfox Login] Staff login: $staffUrl');
+      final responseStaff = await http
+          .post(
+            staffUrl,
+            headers: ApiConfig.headers(null, null),
+            body: staffPayload,
+          )
+          .timeout(const Duration(seconds: 20));
+      debugPrint(
+        '[Fatfox Login] Staff status: ${responseStaff.statusCode}, body: ${responseStaff.body}',
+      );
+      final dataStaff = jsonDecode(responseStaff.body);
+      if (responseStaff.statusCode == 200 && _isSuccessResponse(dataStaff)) {
+        return dataStaff as Map<String, dynamic>;
       }
+      throw Exception(
+        _extractErrorMessage(dataStaff) ??
+            'Staff login failed. Check Restaurant No., username, and password.',
+      );
     } catch (e) {
-      debugPrint('[Fatfox Login] Admin login error: $e');
+      debugPrint('[Fatfox Login] Staff login error: $e');
+      throw Exception(
+        _friendlyNetworkError(e, targetBase) ??
+            e.toString().replaceAll('Exception: ', ''),
+      );
     }
+  }
 
-    // 3. Try User Login endpoint as final fallback
-    try {
-      final userUrl = Uri.parse('$targetBase${ApiConfig.login}');
-      debugPrint('[Fatfox Login] Fallback calling user endpoint: $userUrl');
-      final responseUser = await http
-          .post(userUrl, headers: ApiConfig.headers(null, null), body: payload)
-          .timeout(const Duration(seconds: 5));
-
-      debugPrint('[Fatfox Login] User response status: ${responseUser.statusCode}, body: ${responseUser.body}');
-      final dataUser = jsonDecode(responseUser.body);
-      if (responseUser.statusCode == 200 && _isSuccessResponse(dataUser)) {
-        return dataUser;
-      }
-      final errMsg = _extractErrorMessage(dataUser);
-      throw Exception(errMsg ?? 'Login failed. Please check your staff username & password.');
-    } catch (e) {
-      debugPrint('[Fatfox Login] Final login error: $e');
-      throw Exception(e.toString().replaceAll('Exception: ', ''));
+  /// Clear message when tablet Wi‑Fi/DNS cannot resolve the API host.
+  String? _friendlyNetworkError(Object e, String targetBase) {
+    final s = e.toString();
+    if (s.contains('Failed host lookup') ||
+        s.contains('SocketException') ||
+        s.contains('ClientException') ||
+        s.contains('TimeoutException') ||
+        s.contains('Network is unreachable')) {
+      return 'No internet / DNS on this device.\n'
+          'Cannot reach $targetBase\n'
+          'Connect tablet to working Wi‑Fi, open that URL in Chrome on the tablet, '
+          'then retry. Credentials are not the problem until the host resolves.';
     }
+    return null;
   }
 
   bool _isSuccessResponse(dynamic data) {
     if (data is! Map) return false;
+    // FatFox API: success is status.code == 200 (errors often still HTTP 200
+    // with status.code 403/422/500). Never treat code 0/1 as success.
     final status = data['status'];
-    if (status == 1 || status == true) return true;
     if (status is Map) {
       final code = status['code'];
-      if (code == 200 || code == 1 || code == 0) return true;
+      if (code == 200) return true;
     }
-    // Check if token exists directly inside data object
     final resData = data['data'];
-    if (resData is Map && (resData['access_token'] != null || resData['token'] != null)) {
+    if (resData is Map &&
+        (resData['access_token'] != null || resData['token'] != null)) {
       return true;
     }
     return false;
@@ -107,7 +148,9 @@ class ApiService {
       return data['message'].toString();
     }
     final status = data['status'];
-    if (status is Map && status['message'] != null && status['message'].toString().isNotEmpty) {
+    if (status is Map &&
+        status['message'] != null &&
+        status['message'].toString().isNotEmpty) {
       return status['message'].toString();
     }
     if (status is String && status.isNotEmpty) {
@@ -122,6 +165,38 @@ class ApiService {
     return [];
   }
 
+  String? _stringValue(dynamic value) {
+    if (value == null) return null;
+    final text = value.toString();
+    return text.isEmpty ? null : text;
+  }
+
+  String? _extractCartId(Map<String, dynamic>? data) {
+    if (data == null) return null;
+
+    final directCartId =
+        _stringValue(data['cart_id']) ?? _stringValue(data['cartId']);
+    if (directCartId != null) return directCartId;
+
+    final cartDetails = data['cart_details'] ?? data['cartDetails'];
+    if (cartDetails is Map) {
+      return _stringValue(cartDetails['_id']) ??
+          _stringValue(cartDetails['cart_id']) ??
+          _stringValue(cartDetails['cartId']);
+    }
+
+    final nestedTable = data['table'];
+    if (nestedTable is Map<String, dynamic>) {
+      return _extractCartId(nestedTable);
+    }
+
+    return null;
+  }
+
+  bool _isSuccessStatus(int statusCode, dynamic data) {
+    return statusCode >= 200 && statusCode < 300 && _isSuccessResponse(data);
+  }
+
   // ============================================================
   // Table Management
   // ============================================================
@@ -133,7 +208,10 @@ class ApiService {
     debugPrint('[Fatfox API] Fetching Areas: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -152,7 +230,10 @@ class ApiService {
     debugPrint('[Fatfox API] Fetching Tables: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -169,14 +250,21 @@ class ApiService {
   Future<Map<String, dynamic>?> viewTableById(String tableId) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.viewTable}/$tableId');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.viewTable}/$tableId',
+    );
     debugPrint('[Fatfox API] ViewTable: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
-        return res['data'] is Map<String, dynamic> ? res['data'] as Map<String, dynamic> : null;
+        return res['data'] is Map<String, dynamic>
+            ? res['data'] as Map<String, dynamic>
+            : null;
       }
     } catch (e) {
       debugPrint('[Fatfox API] ViewTable error: $e');
@@ -193,11 +281,16 @@ class ApiService {
   Future<List<MenuCategory>> getActiveCategories({String search = ''}) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getActiveCategories}$search');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.getActiveCategories}$search',
+    );
     debugPrint('[Fatfox API] Fetching Active Categories: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -213,11 +306,16 @@ class ApiService {
   Future<List<MenuCategory>> getCategories() async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getCategories}');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.getCategories}',
+    );
     debugPrint('[Fatfox API] Fetching Categories: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -248,7 +346,10 @@ class ApiService {
     debugPrint('[Fatfox API] Fetching Menu By Category: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -265,11 +366,16 @@ class ApiService {
   Future<Map<String, dynamic>?> getMenuById(String menuId) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.viewMenuById}/$menuId');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.viewMenuById}/$menuId',
+    );
     debugPrint('[Fatfox API] ViewMenu: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         // This endpoint returns data in status.message[0]
@@ -277,7 +383,9 @@ class ApiService {
           final list = res['status']['message'] as List;
           if (list.isNotEmpty) return list[0] as Map<String, dynamic>;
         }
-        if (res['data'] is Map<String, dynamic>) return res['data'] as Map<String, dynamic>;
+        if (res['data'] is Map<String, dynamic>) {
+          return res['data'] as Map<String, dynamic>;
+        }
       }
     } catch (e) {
       debugPrint('[Fatfox API] GetMenuById error: $e');
@@ -293,7 +401,10 @@ class ApiService {
     debugPrint('[Fatfox API] Fetching Menu Items: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final List list = _extractList(res['data']);
@@ -314,11 +425,16 @@ class ApiService {
   Future<List<Map<String, dynamic>>> getTaxConfig() async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getTaxConfig}?area_id=&area_type=dinein');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.getTaxConfig}?area_id=&area_type=dinein',
+    );
     debugPrint('[Fatfox API] Fetching Tax Config: $url');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         if (res['data'] is List) {
@@ -337,14 +453,21 @@ class ApiService {
 
   /// Fetch cart items for a table.
   /// Mirrors web: GET /restaurant/cart/listallcartmenus?tableId=
-  Future<List<Map<String, dynamic>>> getCartItemsByTableId(String tableId) async {
+  Future<List<Map<String, dynamic>>> getCartItemsByTableId(
+    String tableId,
+  ) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getCartDetails}?tableId=$tableId');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.getCartDetails}?tableId=$tableId',
+    );
     debugPrint('[Fatfox API] Fetching Cart Items for table: $tableId');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         if (res['data'] is List) {
@@ -417,7 +540,9 @@ class ApiService {
       return jsonDecode(response.body);
     } catch (e) {
       debugPrint('[Fatfox API] CreateCart error: $e');
-      return {'status': {'code': 500, 'message': e.toString()}};
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
     }
   }
 
@@ -439,7 +564,9 @@ class ApiService {
   }) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.updateCartQty}');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.updateCartQty}',
+    );
 
     final body = {
       'cartId': cartId,
@@ -456,7 +583,9 @@ class ApiService {
       'container_price': containerPrice,
     };
 
-    debugPrint('[Fatfox API] UpdateCartQty: cartId=$cartId, menuId=$cartmenuId, qty=$quantity');
+    debugPrint(
+      '[Fatfox API] UpdateCartQty: cartId=$cartId, menuId=$cartmenuId, qty=$quantity',
+    );
 
     try {
       final response = await http.post(
@@ -467,7 +596,9 @@ class ApiService {
       return jsonDecode(response.body);
     } catch (e) {
       debugPrint('[Fatfox API] UpdateCartQty error: $e');
-      return {'status': {'code': 500, 'message': e.toString()}};
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
     }
   }
 
@@ -500,11 +631,16 @@ class ApiService {
     debugPrint('[Fatfox API] DeleteCartMenu: $url');
 
     try {
-      final response = await http.delete(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.delete(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       return jsonDecode(response.body);
     } catch (e) {
       debugPrint('[Fatfox API] DeleteCartMenu error: $e');
-      return {'status': {'code': 500, 'message': e.toString()}};
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
     }
   }
 
@@ -512,22 +648,45 @@ class ApiService {
   // KOT & Bill Operations
   // ============================================================
 
-  /// Create a KOT order.
-  /// Mirrors web: POST /restaurant/cart/createorder
-  Future<Map<String, dynamic>> createKotOrder({
-    required String tableId,
+  /// Normalize waiter payment labels to admin POS enums (CASH / CARD / ONLINE).
+  static String normalizePaymentType(String paymentType) {
+    switch (paymentType.trim().toLowerCase()) {
+      case 'cash':
+        return 'CASH';
+      case 'card':
+        return 'CARD';
+      case 'upi':
+      case 'online':
+        return 'ONLINE';
+      default:
+        final upper = paymentType.trim().toUpperCase();
+        if (upper == 'CASH' || upper == 'CARD' || upper == 'ONLINE') {
+          return upper;
+        }
+        return 'CASH';
+    }
+  }
+
+  /// Set dine-in cart kitchen/print status.
+  /// Mirrors admin: POST /restaurant/cart/setcartstatus
+  Future<Map<String, dynamic>> setCartStatus({
     required String cartId,
+    required String tableStatus,
   }) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.createKot}');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.setCartStatus}',
+    );
 
     final body = {
-      'table_id': tableId,
-      'cart_id': cartId,
+      'cartId': cartId,
+      'table_status': tableStatus,
     };
 
-    debugPrint('[Fatfox API] CreateKOT: table=$tableId cart=$cartId');
+    debugPrint(
+      '[Fatfox API] SetCartStatus: cart=$cartId status=$tableStatus',
+    );
 
     try {
       final response = await http.post(
@@ -537,8 +696,225 @@ class ApiService {
       );
       return jsonDecode(response.body);
     } catch (e) {
-      debugPrint('[Fatfox API] CreateKOT error: $e');
-      return {'status': {'code': 500, 'message': e.toString()}};
+      debugPrint('[Fatfox API] SetCartStatus error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Fire kitchen (PENDING→KOT / accept). Live path — not offline createorder.
+  Future<Map<String, dynamic>> sendKotToKitchen({
+    required String cartId,
+  }) async {
+    return setCartStatus(cartId: cartId, tableStatus: 'KOT');
+  }
+
+  /// Deprecated wrapper: live KOT uses setcartstatus, not createorder.
+  @Deprecated('Use sendKotToKitchen / setCartStatus instead of createorder')
+  Future<Map<String, dynamic>> createKotOrder({
+    required String tableId,
+    required String cartId,
+  }) async {
+    debugPrint(
+      '[Fatfox API] createKotOrder deprecated → setCartStatus(KOT) '
+      '(ignored tableId=$tableId)',
+    );
+    return sendKotToKitchen(cartId: cartId);
+  }
+
+  /// KOT print lines for a table.
+  /// Mirrors admin: GET /restaurant/cart/viewmenu?tableId=&status=kot
+  Future<List<Map<String, dynamic>>> getKotViewMenu({
+    required String tableId,
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.kotPrintView}'
+      '?tableId=$tableId&status=kot',
+    );
+    debugPrint('[Fatfox API] GetKotViewMenu: $url');
+
+    try {
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
+      if (response.statusCode == 200) {
+        final res = jsonDecode(response.body);
+        if (res is Map && _isSuccessResponse(res)) {
+          return List<Map<String, dynamic>>.from(_extractList(res['data']));
+        }
+        // Some success payloads still put the list in data without status.code
+        final list = _extractList(res is Map ? res['data'] : null);
+        if (list.isNotEmpty) {
+          return List<Map<String, dynamic>>.from(list);
+        }
+      }
+    } catch (e) {
+      debugPrint('[Fatfox API] GetKotViewMenu error: $e');
+    }
+    return [];
+  }
+
+  /// List discounts applicable to a dine-in order amount.
+  /// GET /restaurant/discount/avaliable?orderType=dinein&orderAmount=&searchName=
+  Future<List<Map<String, dynamic>>> listAvailableDiscounts({
+    required double orderAmount,
+    String searchName = '',
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.availableDiscounts}'
+      '?orderType=dinein&orderAmount=$orderAmount&searchName=$searchName',
+    );
+    debugPrint('[Fatfox API] ListAvailableDiscounts: $url');
+
+    try {
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
+      if (response.statusCode == 200) {
+        final res = jsonDecode(response.body);
+        return List<Map<String, dynamic>>.from(_extractList(res['data']));
+      }
+    } catch (e) {
+      debugPrint('[Fatfox API] ListAvailableDiscounts error: $e');
+    }
+    return [];
+  }
+
+  /// Apply a discount to the cart.
+  /// POST /restaurant/cart/setcartdiscount { cartId, discount_id }
+  Future<Map<String, dynamic>> setCartDiscount({
+    required String cartId,
+    required String discountId,
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.setCartDiscount}',
+    );
+    final body = {'cartId': cartId, 'discount_id': discountId};
+
+    debugPrint(
+      '[Fatfox API] SetCartDiscount: cart=$cartId discount=$discountId',
+    );
+
+    try {
+      final response = await http.post(
+        url,
+        headers: ApiConfig.headers(token, restId),
+        body: jsonEncode(body),
+      );
+      return jsonDecode(response.body);
+    } catch (e) {
+      debugPrint('[Fatfox API] SetCartDiscount error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Remove discount from the cart.
+  /// POST /restaurant/cart/removecartdiscount { cartId }
+  Future<Map<String, dynamic>> removeCartDiscount({
+    required String cartId,
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.removeCartDiscount}',
+    );
+    final body = {'cartId': cartId};
+
+    debugPrint('[Fatfox API] RemoveCartDiscount: cart=$cartId');
+
+    try {
+      final response = await http.post(
+        url,
+        headers: ApiConfig.headers(token, restId),
+        body: jsonEncode(body),
+      );
+      return jsonDecode(response.body);
+    } catch (e) {
+      debugPrint('[Fatfox API] RemoveCartDiscount error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Settle a dine-in bill.
+  /// Mirrors web: POST /restaurant/cart/setcarttobill
+  Future<Map<String, dynamic>> settleBill({
+    required String cartId,
+    String? tableId,
+    String paymentType = 'CASH',
+    Map<String, dynamic>? paymentFields,
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.settleBill}');
+
+    final normalized = normalizePaymentType(paymentType);
+    final body = <String, dynamic>{
+      'cartId': cartId,
+      'cart_id': cartId,
+      if (tableId != null && tableId.isNotEmpty) 'table_id': tableId,
+      'paymentType': normalized,
+      'payment_type': normalized,
+      ...?paymentFields,
+    };
+
+    debugPrint('[Fatfox API] SettleBill: $url body: ${jsonEncode(body)}');
+
+    try {
+      final response = await http.post(
+        url,
+        headers: ApiConfig.headers(token, restId),
+        body: jsonEncode(body),
+      );
+      return jsonDecode(response.body);
+    } catch (e) {
+      debugPrint('[Fatfox API] SettleBill error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
+    }
+  }
+
+  /// Move an active cart to another table.
+  /// Mirrors web: PATCH /restaurant/cart/switchtable/{cartId}
+  Future<Map<String, dynamic>> switchTable({
+    required String cartId,
+    required String tableId,
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.switchTable}/$cartId',
+    );
+
+    final body = {'table_id': tableId};
+
+    debugPrint('[Fatfox API] SwitchTable: cart=$cartId table=$tableId');
+
+    try {
+      final response = await http.patch(
+        url,
+        headers: ApiConfig.headers(token, restId),
+        body: jsonEncode(body),
+      );
+      return jsonDecode(response.body);
+    } catch (e) {
+      debugPrint('[Fatfox API] SwitchTable error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
     }
   }
 
@@ -549,10 +925,15 @@ class ApiService {
   Future<Map<String, dynamic>> getPrinterSettings() async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getRestaurantView}');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.getRestaurantView}',
+    );
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         final data = res['data'] ?? {};
@@ -574,10 +955,7 @@ class ApiService {
     final response = await http.post(
       url,
       headers: ApiConfig.headers(token, restId),
-      body: jsonEncode({
-        'table_id': tableId,
-        'cartmenu': menuItems,
-      }),
+      body: jsonEncode({'table_id': tableId, 'cartmenu': menuItems}),
     );
 
     return jsonDecode(response.body);
@@ -587,25 +965,47 @@ class ApiService {
     required String tableId,
     required String cartId,
   }) async {
-    return createKotOrder(tableId: tableId, cartId: cartId);
+    debugPrint(
+      '[Fatfox API] createKot → sendKotToKitchen (ignored tableId=$tableId)',
+    );
+    return sendKotToKitchen(cartId: cartId);
   }
 
-  Future<bool> releaseTable(String tableId) async {
+  Future<bool> releaseTable(String tableIdOrCartId) async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.releaseTable}');
 
     try {
-      final response = await http.post(
+      var cartId = tableIdOrCartId;
+
+      final tableDetails = await viewTableById(tableIdOrCartId);
+      cartId = _extractCartId(tableDetails) ?? cartId;
+
+      if (cartId == tableIdOrCartId) {
+        final tables = await getTables();
+        for (final table in tables) {
+          if (table.id == tableIdOrCartId) {
+            cartId = _extractCartId(table.cartDetails) ?? cartId;
+            break;
+          }
+        }
+      }
+
+      final url = Uri.parse(
+        '${ApiConfig.cleanBaseUrl}${ApiConfig.releaseTable}/$cartId',
+      );
+      debugPrint('[Fatfox API] ReleaseTable: $url');
+
+      final response = await http.delete(
         url,
         headers: ApiConfig.headers(token, restId),
-        body: jsonEncode({'table_id': tableId}),
       );
 
       final data = jsonDecode(response.body);
-      return response.statusCode == 200 && (data['status'] == 1 || data['status'] == true);
-    } catch (_) {
-      return true; // Optimistic release fallback
+      return _isSuccessStatus(response.statusCode, data);
+    } catch (e) {
+      debugPrint('[Fatfox API] ReleaseTable error: $e');
+      return false;
     }
   }
 
@@ -616,10 +1016,15 @@ class ApiService {
   Future<List<Map<String, dynamic>>> getReservations() async {
     final token = await _authService.getToken();
     final restId = await _authService.getRestaurantId();
-    final url = Uri.parse('${ApiConfig.cleanBaseUrl}/restaurant/reservation/all');
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}/restaurant/reservation/all',
+    );
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         return List<Map<String, dynamic>>.from(_extractList(res['data']));
@@ -634,7 +1039,10 @@ class ApiService {
     final url = Uri.parse('${ApiConfig.cleanBaseUrl}${ApiConfig.getLiveCarts}');
 
     try {
-      final response = await http.get(url, headers: ApiConfig.headers(token, restId));
+      final response = await http.get(
+        url,
+        headers: ApiConfig.headers(token, restId),
+      );
       if (response.statusCode == 200) {
         final res = jsonDecode(response.body);
         return List<Map<String, dynamic>>.from(_extractList(res['data']));

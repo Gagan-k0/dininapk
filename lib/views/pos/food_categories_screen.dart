@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
 
@@ -20,13 +21,16 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     super.didChangeDependencies();
     if (!_initialized) {
       _initialized = true;
-      final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+      final args =
+          ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
       final tableId = args?['tableId']?.toString() ?? '';
       final areaId = args?['areaId']?.toString() ?? '';
 
       if (tableId.isNotEmpty) {
-        Provider.of<PosProvider>(context, listen: false)
-            .loadTableAndMenu(tableId, areaId);
+        Provider.of<PosProvider>(
+          context,
+          listen: false,
+        ).loadTableAndMenu(tableId, areaId);
       }
     }
   }
@@ -54,7 +58,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 children: [
                   CircularProgressIndicator(color: Color(0xFFF97316)),
                   SizedBox(height: 16),
-                  Text('Loading menu...', style: TextStyle(color: Color(0xFF64748B))),
+                  Text(
+                    'Loading menu...',
+                    style: TextStyle(color: Color(0xFF64748B)),
+                  ),
                 ],
               ),
             )
@@ -64,9 +71,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 _buildCategoryBar(pos),
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
                 // Menu grid + Cart panel
-                Expanded(
-                  child: _buildMainContent(pos, tableStatus),
-                ),
+                Expanded(child: _buildMainContent(pos, tableStatus)),
               ],
             ),
       // Cart FAB showing item count
@@ -77,7 +82,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               icon: const Icon(Icons.shopping_cart, color: Colors.white),
               label: Text(
                 '${pos.totalItemCount} items  •  ₹${pos.grandTotal.toStringAsFixed(2)}',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             )
           : null,
@@ -122,8 +130,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
                   hintText: 'Search food or short code...',
-                  hintStyle: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
-                  prefixIcon: const Icon(Icons.search, size: 18, color: Color(0xFF94A3B8)),
+                  hintStyle: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF94A3B8),
+                  ),
+                  prefixIcon: const Icon(
+                    Icons.search,
+                    size: 18,
+                    color: Color(0xFF94A3B8),
+                  ),
                   suffixIcon: _searchController.text.isNotEmpty
                       ? IconButton(
                           icon: const Icon(Icons.close, size: 16),
@@ -133,7 +148,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           },
                         )
                       : null,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
+                  contentPadding: const EdgeInsets.symmetric(
+                    vertical: 0,
+                    horizontal: 12,
+                  ),
                   filled: true,
                   fillColor: const Color(0xFFF1F5F9),
                   border: OutlineInputBorder(
@@ -187,12 +205,19 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFFF97316) : const Color(0xFFF1F5F9),
+                  color: isSelected
+                      ? const Color(0xFFF97316)
+                      : const Color(0xFFF1F5F9),
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: isSelected ? const Color(0xFFF97316) : const Color(0xFFE2E8F0),
+                    color: isSelected
+                        ? const Color(0xFFF97316)
+                        : const Color(0xFFE2E8F0),
                     width: 1,
                   ),
                 ),
@@ -202,7 +227,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     style: TextStyle(
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
-                      color: isSelected ? Colors.white : const Color(0xFF475569),
+                      color: isSelected
+                          ? Colors.white
+                          : const Color(0xFF475569),
                       letterSpacing: 0.3,
                     ),
                   ),
@@ -250,7 +277,6 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final isVeg = item.attribute.toUpperCase() == 'VEG';
     final isNonVeg = item.attribute.toUpperCase() == 'NONVEG';
     final isEgg = item.attribute.toUpperCase() == 'EGG';
 
@@ -259,7 +285,8 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     if (isEgg) attrColor = const Color(0xFFD97706);
 
     final displayName = item.displayName ?? item.name;
-    final hasImage = item.image != null && item.image!.isNotEmpty && item.image != 'null';
+    final hasImage =
+        item.image != null && item.image!.isNotEmpty && item.image != 'null';
 
     // Check if item is already in cart
     final inCart = pos.cartMenuItems.any((ci) {
@@ -300,7 +327,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: const Color(0xFFF8FAFC),
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(13)),
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(13),
+                  ),
                   image: hasImage
                       ? DecorationImage(
                           image: NetworkImage(item.image!),
@@ -370,7 +399,8 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        if (item.shortCode != null && item.shortCode!.isNotEmpty)
+                        if (item.shortCode != null &&
+                            item.shortCode!.isNotEmpty)
                           Text(
                             item.shortCode!,
                             style: const TextStyle(
@@ -381,9 +411,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           ),
                         const Spacer(),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFF97316).withValues(alpha: 0.1),
+                            color: const Color(0xFFF97316)
+                                .withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(
@@ -408,10 +442,27 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
-    // Show a quick loading indicator
     if (pos.isLoading) return;
 
-    final success = await pos.addItemToCart(item);
+    if (item.hasVariants || item.hasAddons) {
+      await _showItemCustomisationSheet(pos, item);
+      return;
+    }
+
+    await _addItemAndShowResult(pos, item);
+  }
+
+  Future<void> _addItemAndShowResult(
+    PosProvider pos,
+    MenuItem item, {
+    String? variantId,
+    List<Map<String, dynamic>>? addons,
+  }) async {
+    final success = await pos.addItemToCart(
+      item,
+      variantId: variantId,
+      addons: addons,
+    );
     if (mounted) {
       if (success) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -420,7 +471,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
             duration: const Duration(milliseconds: 800),
             backgroundColor: const Color(0xFF16A34A),
             behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
           ),
         );
       } else {
@@ -434,6 +487,299 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
         );
       }
     }
+  }
+
+  Future<void> _showItemCustomisationSheet(
+    PosProvider pos,
+    MenuItem item,
+  ) async {
+    String? selectedVariantId;
+    final selectedAddons = <String, MenuAddon>{};
+    bool showVariantError = false;
+
+    double selectedTotal() {
+      MenuVariant? variant;
+      for (final candidate in item.variants) {
+        if (candidate.id == selectedVariantId) {
+          variant = candidate;
+          break;
+        }
+      }
+      final basePrice = variant?.price ?? item.price;
+      final addonTotal = selectedAddons.values.fold<double>(
+        0,
+        (sum, addon) => sum + addon.price,
+      );
+      return basePrice + addonTotal;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.82,
+              ),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      margin: const EdgeInsets.only(top: 10),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.tune,
+                            color: Color(0xFFF97316),
+                            size: 22,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              item.displayName ?? item.name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1E293B),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1, color: Color(0xFFE2E8F0)),
+                    Flexible(
+                      child: ListView(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                        children: [
+                          if (item.hasVariants) ...[
+                            _sectionTitle('Choose Variant', required: true),
+                            if (showVariantError)
+                              const Padding(
+                                padding: EdgeInsets.only(bottom: 6),
+                                child: Text(
+                                  'Please select a variant',
+                                  style: TextStyle(
+                                    color: Color(0xFFDC2626),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ...item.variants.map((variant) {
+                              final selected = selectedVariantId == variant.id;
+                              return InkWell(
+                                onTap: () {
+                                  setSheetState(() {
+                                    selectedVariantId = variant.id;
+                                    showVariantError = false;
+                                  });
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        selected
+                                            ? Icons.radio_button_checked
+                                            : Icons.radio_button_unchecked,
+                                        color: selected
+                                            ? const Color(0xFFF97316)
+                                            : const Color(0xFF94A3B8),
+                                        size: 22,
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Text(
+                                          variant.name.isNotEmpty
+                                              ? variant.name
+                                              : 'Variant',
+                                          style: const TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                      Text(
+                                        '₹${variant.price.toStringAsFixed(2)}',
+                                        style: const TextStyle(
+                                          color: Color(0xFFF97316),
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }),
+                            const SizedBox(height: 8),
+                          ],
+                          if (item.hasAddons) ...[
+                            _sectionTitle('Add-ons'),
+                            ...item.addons.map((addon) {
+                              final addonKey = '${addon.addonId}:${addon.id}';
+                              return CheckboxListTile(
+                                value: selectedAddons.containsKey(addonKey),
+                                activeColor: const Color(0xFFF97316),
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                title: Text(
+                                  addon.valueName.isNotEmpty
+                                      ? addon.valueName
+                                      : addon.name,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                secondary: addon.price > 0
+                                    ? Text(
+                                        '+₹${addon.price.toStringAsFixed(2)}',
+                                        style: const TextStyle(
+                                          color: Color(0xFFF97316),
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      )
+                                    : null,
+                                onChanged: (checked) {
+                                  setSheetState(() {
+                                    if (checked == true) {
+                                      selectedAddons[addonKey] = addon;
+                                    } else {
+                                      selectedAddons.remove(addonKey);
+                                    }
+                                  });
+                                },
+                              );
+                            }),
+                          ],
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFFAFAFA),
+                        border: Border(
+                          top: BorderSide(color: Color(0xFFE2E8F0)),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text(
+                                  'Total',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF64748B),
+                                  ),
+                                ),
+                                Text(
+                                  '₹${selectedTotal().toStringAsFixed(2)}',
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFFF97316),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          ElevatedButton.icon(
+                            onPressed: () async {
+                              if (item.hasVariants &&
+                                  selectedVariantId == null) {
+                                setSheetState(() => showVariantError = true);
+                                return;
+                              }
+                              Navigator.pop(sheetContext);
+                              await _addItemAndShowResult(
+                                pos,
+                                item,
+                                variantId: selectedVariantId,
+                                addons: selectedAddons.values
+                                    .map((addon) => addon.toCartAddonJson())
+                                    .toList(),
+                              );
+                            },
+                            icon: const Icon(Icons.add_shopping_cart, size: 18),
+                            label: const Text('ADD'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFF97316),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 22,
+                                vertical: 13,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _sectionTitle(String title, {bool required = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+          if (required)
+            const Text(
+              ' *',
+              style: TextStyle(
+                color: Color(0xFFDC2626),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   void _showCartBottomSheet(BuildContext context, PosProvider pos) {
@@ -492,7 +838,11 @@ class _CartBottomSheet extends StatelessWidget {
                     children: [
                       Row(
                         children: [
-                          const Icon(Icons.shopping_cart, color: Color(0xFFF97316), size: 22),
+                          const Icon(
+                            Icons.shopping_cart,
+                            color: Color(0xFFF97316),
+                            size: 22,
+                          ),
                           const SizedBox(width: 8),
                           Text(
                             'Cart (${pos.totalItemCount} items)',
@@ -506,7 +856,10 @@ class _CartBottomSheet extends StatelessWidget {
                       ),
                       // Table badge
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
                           color: const Color(0xFFFFECE5),
                           borderRadius: BorderRadius.circular(6),
@@ -530,14 +883,24 @@ class _CartBottomSheet extends StatelessWidget {
                   child: items.isEmpty
                       ? const Padding(
                           padding: EdgeInsets.all(32),
-                          child: Text('Cart is empty', style: TextStyle(color: Color(0xFF94A3B8))),
+                          child: Text(
+                            'Cart is empty',
+                            style: TextStyle(color: Color(0xFF94A3B8)),
+                          ),
                         )
                       : ListView.separated(
                           shrinkWrap: true,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
                           itemCount: items.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                          itemBuilder: (ctx, i) => _buildCartItem(ctx, pos, items[i], cartObj),
+                          separatorBuilder: (_, index) => const Divider(
+                            height: 1,
+                            color: Color(0xFFF1F5F9),
+                          ),
+                          itemBuilder: (ctx, i) =>
+                              _buildCartItem(ctx, pos, items[i], cartObj),
                         ),
                 ),
 
@@ -563,13 +926,18 @@ class _CartBottomSheet extends StatelessWidget {
   ) {
     final menuData = item['menuData'];
     final menuName = menuData is List && menuData.isNotEmpty
-        ? (menuData[0]['displayname'] ?? menuData[0]['name'] ?? 'Item').toString()
+        ? (menuData[0]['displayname'] ?? menuData[0]['name'] ?? 'Item')
+              .toString()
         : (item['menu_name'] ?? 'Item').toString();
 
     final qty = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
     final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
-    final unitPrice = double.tryParse(
-            item['individual_price']?.toString() ?? item['originalPrice']?.toString() ?? '0') ??
+    final unitPrice =
+        double.tryParse(
+          item['individual_price']?.toString() ??
+              item['originalPrice']?.toString() ??
+              '0',
+        ) ??
         (qty > 0 ? price / qty : 0);
 
     final cartItemId = cartObj?['_id']?.toString() ?? '';
@@ -603,19 +971,29 @@ class _CartBottomSheet extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   '₹${unitPrice.toStringAsFixed(2)} each',
-                  style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF94A3B8),
+                  ),
                 ),
                 if (isKot)
                   Container(
                     margin: const EdgeInsets.only(top: 2),
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFFFEF3C7),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: const Text(
                       'KOT',
-                      style: TextStyle(fontSize: 9, color: Color(0xFFD97706), fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Color(0xFFD97706),
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
               ],
@@ -631,7 +1009,11 @@ class _CartBottomSheet extends StatelessWidget {
                   icon: Icons.remove,
                   onTap: () async {
                     if (qty > 1) {
-                      await pos.updateItemQuantity(cartItemId, cartmenuId, qty - 1);
+                      await pos.updateItemQuantity(
+                        cartItemId,
+                        cartmenuId,
+                        qty - 1,
+                      );
                     } else {
                       await pos.removeCartItem(cartItemId, cartmenuId);
                     }
@@ -652,7 +1034,11 @@ class _CartBottomSheet extends StatelessWidget {
                 _qtyButton(
                   icon: Icons.add,
                   onTap: () async {
-                    await pos.updateItemQuantity(cartItemId, cartmenuId, qty + 1);
+                    await pos.updateItemQuantity(
+                      cartItemId,
+                      cartmenuId,
+                      qty + 1,
+                    );
                   },
                 ),
               ],
@@ -696,8 +1082,10 @@ class _CartBottomSheet extends StatelessWidget {
     final subTotal = pos.subTotal;
     final taxPrice = pos.taxAmount;
     final grandTotal = pos.grandTotal;
-    final discountPrice = double.tryParse(cartObj?['discount_price']?.toString() ?? '0') ?? 0;
-    final roundOff = double.tryParse(cartObj?['round_off']?.toString() ?? '0') ?? 0;
+    final discountPrice =
+        double.tryParse(cartObj?['discount_price']?.toString() ?? '0') ?? 0;
+    final roundOff =
+        double.tryParse(cartObj?['round_off']?.toString() ?? '0') ?? 0;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -705,20 +1093,34 @@ class _CartBottomSheet extends StatelessWidget {
       child: Column(
         children: [
           _totalRow('Sub Total', '₹${subTotal.toStringAsFixed(2)}'),
-          if (discountPrice > 0) _totalRow('Discount', '-₹${discountPrice.toStringAsFixed(2)}', valueColor: const Color(0xFF16A34A)),
+          if (discountPrice > 0)
+            _totalRow(
+              'Discount',
+              '-₹${discountPrice.toStringAsFixed(2)}',
+              valueColor: const Color(0xFF16A34A),
+            ),
           if (taxPrice > 0) _totalRow('Tax', '₹${taxPrice.toStringAsFixed(2)}'),
-          if (roundOff != 0) _totalRow('Round Off', '₹${roundOff.toStringAsFixed(2)}'),
+          if (roundOff != 0)
+            _totalRow('Round Off', '₹${roundOff.toStringAsFixed(2)}'),
           const Divider(height: 8, color: Color(0xFFE2E8F0)),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
                 'Grand Total',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF0F172A),
+                ),
               ),
               Text(
                 '₹${grandTotal.toStringAsFixed(2)}',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFFF97316)),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFFF97316),
+                ),
               ),
             ],
           ),
@@ -733,11 +1135,310 @@ class _CartBottomSheet extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: const TextStyle(fontSize: 13, color: Color(0xFF64748B))),
-          Text(value, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: valueColor ?? const Color(0xFF1E293B))),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+          ),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: valueColor ?? const Color(0xFF1E293B),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  /// Settle bill: pick payment method (+ optional discount), then settleAndPrintBill.
+  Future<void> _showSettlePaymentSheet(
+    BuildContext context,
+    PosProvider pos,
+  ) async {
+    String paymentType = 'CASH'; // CASH | CARD | ONLINE (UPI → ONLINE)
+    List<Map<String, dynamic>> discounts = [];
+    String? selectedDiscountId;
+    var discountsLoaded = false;
+
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            if (!discountsLoaded) {
+              discountsLoaded = true;
+              pos.listDiscounts().then((list) {
+                if (sheetContext.mounted) {
+                  setSheetState(() => discounts = list);
+                }
+              });
+            }
+
+            return Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    left: 16,
+                    right: 16,
+                    top: 10,
+                    bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      const Row(
+                        children: [
+                          Icon(
+                            Icons.receipt_long,
+                            color: Color(0xFFF97316),
+                            size: 22,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            'Settle & Print Bill',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF1E293B),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFAFAFA),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFE2E8F0)),
+                        ),
+                        child: Column(
+                          children: [
+                            _totalRow(
+                              'Sub Total',
+                              '₹${pos.subTotal.toStringAsFixed(2)}',
+                            ),
+                            if (pos.taxAmount > 0)
+                              _totalRow(
+                                'Tax',
+                                '₹${pos.taxAmount.toStringAsFixed(2)}',
+                              ),
+                            const Divider(height: 12, color: Color(0xFFE2E8F0)),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Grand Total',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF0F172A),
+                                  ),
+                                ),
+                                Text(
+                                  '₹${pos.grandTotal.toStringAsFixed(2)}',
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFFF97316),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (discounts.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Discount',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF475569),
+                                ),
+                              ),
+                            ),
+                            if (selectedDiscountId != null)
+                              TextButton(
+                                onPressed: () async {
+                                  final ok = await pos.clearDiscount();
+                                  if (ok) {
+                                    setSheetState(
+                                      () => selectedDiscountId = null,
+                                    );
+                                  }
+                                },
+                                child: const Text(
+                                  'Clear',
+                                  style: TextStyle(fontSize: 12),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        SizedBox(
+                          height: 40,
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: discounts.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(width: 8),
+                            itemBuilder: (_, i) {
+                              final d = discounts[i];
+                              final id = d['_id']?.toString() ??
+                                  d['id']?.toString() ??
+                                  '';
+                              final name = d['title']?.toString() ??
+                                  d['name']?.toString() ??
+                                  d['discount_name']?.toString() ??
+                                  'Discount';
+                              final selected = selectedDiscountId == id;
+                              return ChoiceChip(
+                                label: Text(name),
+                                selected: selected,
+                                selectedColor: const Color(0xFFF97316),
+                                labelStyle: TextStyle(
+                                  color: selected
+                                      ? Colors.white
+                                      : Colors.black87,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                ),
+                                onSelected: (_) async {
+                                  final ok = await pos.applyDiscount(id);
+                                  if (ok) {
+                                    setSheetState(
+                                      () => selectedDiscountId = id,
+                                    );
+                                  }
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Payment Method',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF475569),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final option in const [
+                            ('Cash', 'CASH'),
+                            ('Card', 'CARD'),
+                            ('UPI', 'ONLINE'),
+                          ])
+                            ChoiceChip(
+                              label: Text(option.$1),
+                              selected: paymentType == option.$2,
+                              selectedColor: const Color(0xFFF97316),
+                              labelStyle: TextStyle(
+                                color: paymentType == option.$2
+                                    ? Colors.white
+                                    : Colors.black87,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              onSelected: (_) => setSheetState(
+                                () => paymentType = option.$2,
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 18),
+                      ElevatedButton.icon(
+                        onPressed: () =>
+                            Navigator.of(sheetContext).pop(true),
+                        icon: const Icon(Icons.check, size: 18),
+                        label: const Text(
+                          'Confirm & Print',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFF97316),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    final success = await pos.settleAndPrintBill(paymentType: paymentType);
+    if (!context.mounted) return;
+    if (success) {
+      final printNote = pos.printError;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            printNote == null
+                ? 'Bill settled + printed ✓'
+                : 'Bill settled. Print failed: $printNote',
+          ),
+          backgroundColor: printNote == null
+              ? const Color(0xFF16A34A)
+              : const Color(0xFFD97706),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(pos.errorMessage ?? 'Settle failed'),
+          backgroundColor: const Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Widget _buildActionButtons(BuildContext context, PosProvider pos) {
@@ -746,66 +1447,74 @@ class _CartBottomSheet extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
         child: Row(
           children: [
-            // KOT Button
             Expanded(
               child: ElevatedButton.icon(
                 onPressed: pos.isLoading
                     ? null
                     : () async {
                         final success = await pos.sendKotOrder();
-                        if (context.mounted) {
-                          if (success) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: const Text('KOT sent to kitchen ✓'),
-                                backgroundColor: const Color(0xFF16A34A),
-                                behavior: SnackBarBehavior.floating,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        if (!context.mounted) return;
+                        if (success) {
+                          final printNote = pos.printError;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                printNote == null
+                                    ? 'KOT sent + printed ✓'
+                                    : 'KOT sent to kitchen. Print failed: $printNote',
                               ),
-                            );
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(pos.errorMessage ?? 'KOT failed'),
-                                backgroundColor: const Color(0xFFDC2626),
-                                behavior: SnackBarBehavior.floating,
+                              backgroundColor: printNote == null
+                                  ? const Color(0xFF16A34A)
+                                  : const Color(0xFFD97706),
+                              behavior: SnackBarBehavior.floating,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
                               ),
-                            );
-                          }
+                            ),
+                          );
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(pos.errorMessage ?? 'KOT failed'),
+                              backgroundColor: const Color(0xFFDC2626),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
                         }
                       },
                 icon: const Icon(Icons.print, size: 18),
-                label: const Text('KOT PRINT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                label: const Text(
+                  'KOT PRINT',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF2563EB),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ),
             const SizedBox(width: 10),
-            // Save & Print Bill Button
             Expanded(
               child: ElevatedButton.icon(
                 onPressed: pos.isLoading
                     ? null
-                    : () {
-                        // For now, show a message — settle flow can be added later
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Bill print coming soon'),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      },
+                    : () => _showSettlePaymentSheet(context, pos),
                 icon: const Icon(Icons.receipt_long, size: 18),
-                label: const Text('SAVE & PRINT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                label: const Text(
+                  'SAVE & PRINT',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ),

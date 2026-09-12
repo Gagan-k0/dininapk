@@ -132,6 +132,34 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       ),
       body: Column(
         children: [
+          if (auth.isDemoMode)
+            Material(
+              color: const Color(0xFFFEF3C7),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Color(0xFF92400E), size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Demo mode — UI only. Tables/KOT/print need a real restaurant login (not superadmin).',
+                        style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        await auth.logout();
+                        if (context.mounted) {
+                          Navigator.of(context).pushReplacementNamed('/login');
+                        }
+                      },
+                      child: const Text('Exit', style: TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
@@ -220,9 +248,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     onPressed: () async {
                       final auth = Provider.of<AuthProvider>(context, listen: false);
                       await auth.logout();
-                      if (context.mounted) {
-                        Navigator.pushReplacementNamed(context, '/login');
-                      }
+                      if (!mounted) return;
+                      Navigator.pushReplacementNamed(context, '/login');
                     },
                   ),
                 ],
@@ -409,6 +436,144 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
+  String? _cartIdForTable(DineInTable table) {
+    final cart = table.cartDetails;
+    if (cart == null) return null;
+    final id = cart['_id']?.toString() ??
+        cart['cart_id']?.toString() ??
+        cart['cartId']?.toString();
+    if (id == null || id.isEmpty) return null;
+    return id;
+  }
+
+  Future<void> _showShiftTableDialog(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable source,
+  ) async {
+    final cartId = _cartIdForTable(source);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final blankSameArea = tableProv.tables
+        .where((t) => t.isAvailable && t.id != source.id && t.areaId == source.areaId)
+        .toList();
+    final blankOthers = tableProv.tables
+        .where((t) => t.isAvailable && t.id != source.id && t.areaId != source.areaId)
+        .toList();
+    final targets = [...blankSameArea, ...blankOthers];
+
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No blank tables available to shift to'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    String? selectedId = targets.first.id;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: Text('Shift Table ${source.tableNumber}'),
+              content: SizedBox(
+                width: 320,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Move this order to a blank table:',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+                    ),
+                    const SizedBox(height: 12),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: targets.length,
+                        itemBuilder: (_, i) {
+                          final t = targets[i];
+                          final sameArea = t.areaId == source.areaId;
+                          final selected = selectedId == t.id;
+                          return ListTile(
+                            dense: true,
+                            selected: selected,
+                            selectedTileColor: const Color(0xFFF97316).withValues(alpha: 0.08),
+                            leading: Icon(
+                              selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                              color: const Color(0xFFF97316),
+                              size: 20,
+                            ),
+                            title: Text(
+                              'Table ${t.tableNumber}',
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                            ),
+                            subtitle: Text(
+                              sameArea ? 'Same area' : 'Other area',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: sameArea ? const Color(0xFF16A34A) : const Color(0xFF64748B),
+                              ),
+                            ),
+                            onTap: () => setDialogState(() => selectedId = t.id),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedId == null ? null : () => Navigator.pop(ctx, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF97316),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Shift'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (confirmed != true || selectedId == null || !context.mounted) return;
+
+    final ok = await tableProv.shiftTable(cartId: cartId, newTableId: selectedId!);
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Table shifted successfully'
+              : (tableProv.errorMessage ?? 'Failed to shift table'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+  }
+
   Widget _buildTableCard(BuildContext context, TableProvider tableProv, DineInTable table) {
     Color cardBg = Colors.white;
     Color borderCol = const Color(0xFFE2E8F0);
@@ -429,6 +594,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     final covers = table.cartDetails?['covers'] ?? 4;
     final timeMins = table.cartDetails?['time_mins'] ?? '';
+    final cartId = _cartIdForTable(table);
+    final canShift = table.isOccupied && cartId != null;
 
     return InkWell(
       onTap: () {
@@ -441,6 +608,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           },
         );
       },
+      onLongPress: canShift
+          ? () => _showShiftTableDialog(context, tableProv, table)
+          : null,
       child: Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
@@ -484,7 +654,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ] else
               const Text('Tap to Order', style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8))),
 
-            // Quick Action Buttons on Cards (Eye, Printer, Release)
+            // Quick Action Buttons on Cards (Shift, Printer, Release)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -502,6 +672,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 if (table.isOccupied)
                   Row(
                     children: [
+                      if (canShift) ...[
+                        IconButton(
+                          icon: const Icon(Icons.swap_horiz, size: 16, color: Color(0xFFF97316)),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: 'Shift Table',
+                          onPressed: () => _showShiftTableDialog(context, tableProv, table),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       IconButton(
                         icon: const Icon(Icons.print, size: 16, color: Color(0xFF2563EB)),
                         padding: EdgeInsets.zero,
@@ -510,19 +690,36 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         onPressed: () async {
                           final auth = Provider.of<AuthProvider>(context, listen: false);
                           final printerService = ThermalPrinterService();
-                          await printerService.generateBillBytes(
-                            table: table,
-                            items: [],
-                            subTotal: table.totalPrice,
-                            taxAmount: table.totalPrice * 0.05,
-                            grandTotal: table.totalPrice * 1.05,
-                            restaurantName: auth.restaurantName,
-                            paperSize: '80mm',
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Bill sent to printer!'), backgroundColor: Colors.blue),
+                          try {
+                            final bytes = await printerService.generateBillBytes(
+                              table: table,
+                              items: const [],
+                              subTotal: table.totalPrice,
+                              taxAmount: 0,
+                              grandTotal: table.totalPrice,
+                              restaurantName: auth.restaurantName,
+                              paperSize: '80mm',
                             );
+                            await printerService.printBytes(bytes);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Bill sent to printer'),
+                                  backgroundColor: Color(0xFF2563EB),
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    e.toString().replaceAll('Exception: ', ''),
+                                  ),
+                                  backgroundColor: const Color(0xFFEF4444),
+                                ),
+                              );
+                            }
                           }
                         },
                       ),

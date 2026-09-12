@@ -28,13 +28,13 @@ This document presents a **feature-by-feature comparative audit** between the An
 | **Food Categories & Menu Grid** | `/#/dineIn-food-categories?tableId=...&areaId=...` | `FoodCategoriesScreen` (`/pos`) | `[x] COMPLETED` | Dynamic category tabs & 235+ menu items |
 | **Food Item Search & Filters** | Instant text search + Veg/Non-Veg filter chips | Integrated Search Bar + Veg/Non-Veg filter | `[x] COMPLETED` | Instant client-side & API search filtering |
 | **Live Backend Cart Sync** | Add to cart, update qty (+/-), remove item via REST API | Live synchronization via `PosProvider` | `[x] COMPLETED` | Calls `/cart/add-to-cart`, `/cart/update-quantity`, `/cart/remove-item` |
-| **KOT Order Submission** | "Print KOT" / "Create Order" button | "Print KOT" action button on Cart panel | `[x] COMPLETED` | Calls `/cart/kot-or-print` with live print flag |
+| **KOT Order Submission** | "Print KOT" / "Create Order" button | KOT PRINT via setcartstatus | `[x] COMPLETED` | Live path: KOT → print → KOT_PRINT |
 | **Thermal Printer Integration** | Web browser `window.print()` / ESC-POS service | `ThermalPrinterService` (Bluetooth / Sunmi / ESC-POS) | `[x] COMPLETED` | Native ESC/POS printing over Bluetooth & USB |
-| **Variants & Addons Selection** | Modal popup when tapping items with variants/addons | Basic item tap adds default variant | `[/] PENDING` | Need to add variant/addon selection dialog on tap |
-| **Payment Settlement & Billing** | Settlement modal: Cash, Card, UPI, Room Charge, Split Pay | Basic Checkout trigger | `[/] PENDING` | Full Payment Settle Dialog with Payment Method options needed |
+| **Variants & Addons Selection** | Modal popup when tapping items with variants/addons | Bottom sheet on item tap | `[x] COMPLETED` | Wired 2026-09-12 |
+| **Payment Settlement & Billing** | Settlement modal: Cash, Card, UPI, Room Charge, Split Pay | Settle sheet Cash/Card/UPI→ONLINE + discount | `[x] COMPLETED` | Room Charge / split still deferred |
 | **Split Bill Functionality** | `dinein-split-bill` modal (split by seat/equal) | Not yet exposed in UI | `[ ] PENDING` | Backend API `/cart/split-bill` needs Flutter UI screen |
-| **Table Shift / Merge Table** | Move cart items from Table A to Table B | Not yet implemented | `[ ] PENDING` | Table shift dialog needed on table context menu |
-| **Discounts & Coupon Codes** | Apply percentage/flat discount to cart | Tax calculated, custom discount field pending | `[ ] PENDING` | Add discount input field in cart bottom sheet |
+| **Table Shift / Merge Table** | Move cart items from Table A to Table B | Shift via long-press / swap icon | `[/] PARTIAL` | Shift done; merge deferred |
+| **Discounts & Coupon Codes** | Apply percentage/flat discount to cart | Available-discount chips on settle sheet | `[x] COMPLETED` | Uses setcartdiscount |
 | **Pre-Booking / Reservations** | `dinein-prebooking` list & booking modal | Pre-booking tab with live list count | `[/] PARTIAL` | Pre-booking list displayed, new booking creation pending |
 | **Live Orders Full View** | Dedicated `live-orders` page with order management | Live Orders tab inside `DineInTableScreen` | `[/] PARTIAL` | Displays live order list, detail view modal pending |
 | **Table QR Code Generation** | `generate-dinein-qrcode` (prints table QR code) | Not present | `[ ] LOW PRIORITY` | Desktop/Web feature only |
@@ -91,23 +91,18 @@ Dineinapk/lib/
 
 ## 📋 Comprehensive Pending Roadmap for Next AI Agent / Developer
 
-### 🟢 Priority 1: Item Variant & Addons Modal (`food_categories_screen.dart`)
-* **Goal**: When a waiter taps a menu item that has `hasVariants == true` or `hasAddons == true`, open a bottom sheet modal allowing the user to select:
-  * Variant (e.g. Half / Full, Small / Medium / Large)
-  * Addons checkboxes (e.g. Extra Cheese, Spicy, Sauce)
-* **API Call**: Pass `variantId` and selected `addons` array into `addItemToCart(item, variantId, addons)`.
+### ✅ Priority 1: Item Variant & Addons Modal — DONE
+### ✅ Priority 2: Payment Settlement Modal — DONE (Cash/Card/UPI)
+### ✅ Priority 3: Table Shift — DONE (merge still pending)
 
-### 🟢 Priority 2: Payment Settlement Modal (`food_categories_screen.dart` / `dinein_table_screen.dart`)
-* **Goal**: When clicking "Settle / Checkout" on an occupied table or active cart:
-  * Show Settlement Dialog with total breakdown (Subtotal, SGST, CGST, Grand Total).
-  * Allow selecting Payment Method: `Cash`, `Card`, `UPI / QR Code`, `Room Charge`.
-  * Allow entering optional Flat / Percentage Discount.
-  * API Endpoint: `/restaurant/cart/settle-payment` or `/restaurant/cart/createorder`.
+### ~~🟢 Priority 1 OLD~~
+* Done — see food_categories_screen variant sheet.
 
-### 🟢 Priority 3: Table Shift & Table Merge (`dinein_table_screen.dart`)
-* **Goal**: Allow long-pressing or tapping an occupied table to select "Shift Table" or "Merge Table".
-* **UI**: Dropdown listing available (`BLANK`) destination tables.
-* **API Endpoint**: `/restaurant/table/shift-table` (from backend `table.controller.js`).
+### ~~🟢 Priority 2 OLD~~
+* Done — settle payment sheet.
+
+### ~~🟢 Priority 3 OLD~~
+* Shift done; merge deferred.
 
 ### 🟡 Priority 4: Split Bill Dialog (`dinein_split_bill`)
 * **Goal**: Implement split bill interface allowing waiters to split a table's bill equally or by item selection.

@@ -30,7 +30,11 @@ class MenuVariant {
 
   factory MenuVariant.fromJson(Map<String, dynamic> json) {
     return MenuVariant(
-      id: json['_id']?.toString() ?? json['value_id']?.toString() ?? '',
+      id:
+          json['_id']?.toString() ??
+          json['variant_id']?.toString() ??
+          json['value_id']?.toString() ??
+          '',
       name: json['valuename']?.toString() ?? json['name']?.toString() ?? '',
       price: double.tryParse(json['price']?.toString() ?? '0') ?? 0.0,
     );
@@ -38,12 +42,14 @@ class MenuVariant {
 }
 
 class MenuAddon {
+  final String addonId;
   final String id;
   final String name;
   final String valueName;
   final double price;
 
   MenuAddon({
+    required this.addonId,
     required this.id,
     required this.name,
     required this.valueName,
@@ -51,12 +57,42 @@ class MenuAddon {
   });
 
   factory MenuAddon.fromJson(Map<String, dynamic> json) {
+    final value = json['value'] is Map<String, dynamic>
+        ? json['value'] as Map<String, dynamic>
+        : null;
     return MenuAddon(
-      id: json['_id']?.toString() ?? '',
+      addonId: json['addon_id']?.toString() ?? '',
+      id:
+          json['addonvalue_id']?.toString() ??
+          json['value_id']?.toString() ??
+          value?['_id']?.toString() ??
+          json['_id']?.toString() ??
+          '',
       name: json['name']?.toString() ?? '',
-      valueName: json['valuename']?.toString() ?? json['value_name']?.toString() ?? '',
-      price: double.tryParse(json['price']?.toString() ?? '0') ?? 0.0,
+      valueName:
+          json['valuename']?.toString() ??
+          json['value_name']?.toString() ??
+          value?['valuename']?.toString() ??
+          value?['name']?.toString() ??
+          '',
+      price:
+          double.tryParse(
+            json['addon_price']?.toString() ??
+                json['price']?.toString() ??
+                value?['price']?.toString() ??
+                '0',
+          ) ??
+          0.0,
     );
+  }
+
+  Map<String, dynamic> toCartAddonJson() {
+    return {
+      'addon_id': addonId,
+      'addonvalue_id': id,
+      'addon_price': price,
+      'value': {'_id': id, 'valuename': valueName, 'price': price},
+    };
   }
 }
 
@@ -72,6 +108,9 @@ class MenuItem {
   final List<MenuVariant> variants;
   final List<MenuAddon> addons;
 
+  bool get hasVariants => variants.isNotEmpty;
+  bool get hasAddons => addons.isNotEmpty;
+
   MenuItem({
     required this.id,
     required this.categoryId,
@@ -86,10 +125,13 @@ class MenuItem {
   });
 
   factory MenuItem.fromJson(Map<String, dynamic> json) {
+    bool isActive(dynamic status) =>
+        status == null || status == 1 || status == '1';
+
     final varList = <MenuVariant>[];
     if (json['variants'] is List) {
       for (var v in (json['variants'] as List)) {
-        if (v is Map<String, dynamic>) {
+        if (v is Map<String, dynamic> && isActive(v['status'])) {
           varList.add(MenuVariant.fromJson(v));
         }
       }
@@ -103,13 +145,38 @@ class MenuItem {
         }
       }
     }
+    if (json['addOns'] is List) {
+      for (var group in (json['addOns'] as List)) {
+        if (group is Map<String, dynamic>) {
+          final addonId =
+              group['addon_id']?.toString() ?? group['_id']?.toString() ?? '';
+          final values = group['value'];
+          if (values is List) {
+            for (var value in values) {
+              if (value is Map<String, dynamic> && isActive(value['status'])) {
+                addList.add(
+                  MenuAddon.fromJson({
+                    ...value,
+                    'addon_id': addonId,
+                    'name': group['displayname'] ?? group['name'],
+                  }),
+                );
+              }
+            }
+          } else {
+            addList.add(MenuAddon.fromJson(group));
+          }
+        }
+      }
+    }
 
     return MenuItem(
       id: json['_id']?.toString() ?? '',
       categoryId: json['category_id']?.toString() ?? '',
       name: json['name']?.toString() ?? 'Menu Item',
       displayName: json['displayname']?.toString(),
-      shortCode: json['shortCode']?.toString() ?? json['short_code']?.toString(),
+      shortCode:
+          json['shortCode']?.toString() ?? json['short_code']?.toString(),
       attribute: (json['attribute']?.toString() ?? 'VEG').toUpperCase(),
       price: double.tryParse(json['price']?.toString() ?? '0') ?? 0.0,
       image: json['image']?.toString(),
