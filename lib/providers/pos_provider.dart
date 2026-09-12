@@ -1,43 +1,54 @@
-import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/table_model.dart';
 import '../models/menu_model.dart';
 import '../models/cart_model.dart';
 import '../services/api_service.dart';
+import '../services/bill_builder.dart';
 import '../services/thermal_printer_service.dart';
 
+/// Ordering screen state for ONE open table. Mirrors the admin
+/// `dinein-food-categories` contract:
+/// * every cart write goes to the live backend and repaints from the response;
+/// * `container_price` is echoed on every write (the server resets it to 0 otherwise);
+/// * quantity is locked once a line is KOT'd — removal is `cancelmenu` with a reason;
+/// * KOT = `setcartstatus KOT` → print → `KOT_PRINT` only after a successful print;
+/// * Bill = print → `setcartstatus PRINTED`; Settle = `setcarttobill` (deletes the cart).
 class PosProvider with ChangeNotifier {
-  final ApiService _apiService = ApiService();
-  final ThermalPrinterService _printer = ThermalPrinterService();
+  final ApiService _apiService;
+  final ThermalPrinterService _printer;
 
-  // ── Table State ──
+  PosProvider({ApiService? api, ThermalPrinterService? printer})
+    : _apiService = api ?? ApiService(),
+      _printer = printer ?? ThermalPrinterService();
+
+  // ── Table ──
   String? _activeTableId;
   String? _activeAreaId;
   Map<String, dynamic>? _tableDetails;
   DineInTable? _activeTable;
 
-  // ── Menu State ──
+  // ── Menu ──
   List<MenuCategory> _categories = [];
   List<MenuItem> _allItems = [];
   String? _selectedCategoryId; // null = 'ALL'
   String _searchQuery = '';
 
-  // ── Cart State (fetched live from backend) ──
-  List<Map<String, dynamic>> _cartData = []; // Raw backend cart data
-  final List<CartLineItem> _cartLines = []; // Legacy local cart lines
+  // ── Cart (live backend snapshot) ──
+  List<Map<String, dynamic>> _cartData = [];
+  String? _cartError;
 
-  // ── Tax State ──
+  // ── Tax ──
   List<Map<String, dynamic>> _taxConfig = [];
-  Map<String, dynamic>? _consolidatedTax; // Merged tax entry
+  Map<String, dynamic>? _consolidatedTax;
 
-  // ── Loading ──
-  bool _isLoading = false;
+  // ── State ──
+  bool _isLoading = false; // screen-level load
+  bool _isBusy = false; // a cart write / print in flight
+  bool _sessionExpired = false;
   String? _errorMessage;
-
-  // ── Printer ──
-  Map<String, dynamic> _printerSettings = {};
+  String? printError;
+  ReceiptPrefs? _receiptPrefs;
 
   // ============================================================
   // Getters
@@ -51,12 +62,27 @@ class PosProvider with ChangeNotifier {
   List<MenuCategory> get categories => _categories;
   String? get selectedCategoryId => _selectedCategoryId;
   String get searchQuery => _searchQuery;
-  List<CartLineItem> get cartLines => _cartLines;
   bool get isLoading => _isLoading;
+  bool get isBusy => _isBusy;
+  bool get sessionExpired => _sessionExpired;
   String? get errorMessage => _errorMessage;
-  Map<String, dynamic> get printerSettings => _printerSettings;
+  String? get cartError => _cartError;
   List<Map<String, dynamic>> get cartData => _cartData;
+  Map<String, dynamic>? get cart => _cartData.isEmpty ? null : _cartData.first;
   Map<String, dynamic>? get consolidatedTax => _consolidatedTax;
+  List<Map<String, dynamic>> get taxConfig => _taxConfig;
+  ReceiptPrefs? get receiptPrefs => _receiptPrefs;
+
+  String get tableNumber =>
+      _tableDetails?['table_number']?.toString() ??
+      _activeTable?.tableNumber ??
+      '';
+
+  /// Live cart status (BLANK when there is no cart yet).
+  String get tableStatus =>
+      cart?['table_status']?.toString() ??
+      _tableDetails?['table_status']?.toString() ??
+      'BLANK';
 
   /// The table_id as stored in the backend (from tableDetails or model).
   String get resolvedTableId {
@@ -66,24 +92,13 @@ class PosProvider with ChangeNotifier {
         '';
   }
 
-  // ── Filtered menu items ──
   List<MenuItem> get filteredMenuItems {
     var result = List<MenuItem>.from(_allItems);
 
     if (_selectedCategoryId != null && _selectedCategoryId!.isNotEmpty) {
-      // Filter by category name match (web uses valuename/displayname)
-      final selectedCat = _categories.firstWhere(
-        (c) => c.id == _selectedCategoryId,
-        orElse: () => MenuCategory(id: '', categoryName: ''),
-      );
-      if (selectedCat.id.isNotEmpty) {
-        result = result.where((item) {
-          // Match by categoryId first, then by name
-          if (item.categoryId == _selectedCategoryId) return true;
-          // Also match by category name in item's categories array
-          return false;
-        }).toList();
-      }
+      result = result
+          .where((i) => i.categoryId == _selectedCategoryId)
+          .toList();
     }
 
     if (_searchQuery.trim().isNotEmpty) {
@@ -97,70 +112,71 @@ class PosProvider with ChangeNotifier {
       }).toList();
     }
 
-    // Sort alphabetically by display name
     result.sort(
       (a, b) => (a.displayName ?? a.name).compareTo(b.displayName ?? b.name),
     );
-
     return result;
   }
 
-  // ── Cart computed values from backend data ──
+  // ── Cart computed values (cancelled rows excluded everywhere) ──
   List<Map<String, dynamic>> get cartMenuItems {
-    if (_cartData.isEmpty) return [];
-    final cart = _cartData[0];
-    final items = cart['cartMenuData'];
-    if (items is List) {
-      return List<Map<String, dynamic>>.from(
-        items.where((i) => i['cancel_status'] != 1),
-      );
+    final items = cart?['cartMenuData'];
+    if (items is! List) return const [];
+    return items
+        .whereType<Map>()
+        .where((i) => i['cancel_status'] != 1 && i['cancel_status'] != '1')
+        .map((i) => Map<String, dynamic>.from(i))
+        .toList();
+  }
+
+  bool get hasUnsentKotItems =>
+      cartMenuItems.any((i) => i['kot_status'] != 1 && i['kot_status'] != '1');
+
+  /// KOT reached the kitchen but has not been confirmed as physically printed.
+  /// This remains true after a printer failure so KOT PRINT can be retried.
+  bool get hasUnprintedItems => cartMenuItems.any(
+    (i) => i['kotprint_status'] != 1 && i['kotprint_status'] != '1',
+  );
+
+  bool get hasKotItems =>
+      cartMenuItems.any((i) => i['kot_status'] == 1 || i['kot_status'] == '1');
+
+  double get subTotal => _num(cart?['food_subtotal']) > 0
+      ? _num(cart?['food_subtotal'])
+      : _num(cart?['menu_total']);
+  double get taxAmount => _num(cart?['tax_price']);
+  double get discountAmount => _num(cart?['discount_price']);
+  String? get discountName => cart?['discount_name']?.toString();
+  double get containerCharge => _num(cart?['container_price']);
+  double get areaCharge => _num(cart?['area_charge']);
+  double get roundOff => _num(cart?['round_off']);
+  double get grandTotal => _num(cart?['total_price']);
+
+  int get totalItemCount => cartMenuItems.fold(
+    0,
+    (sum, item) =>
+        sum + (int.tryParse(item['quantity']?.toString() ?? '1') ?? 1),
+  );
+
+  String get cartId => cart?['_id']?.toString() ?? '';
+
+  /// Phase 1 safety rule: Release only after the bill status is durable.
+  bool get canRelease {
+    if (cartId.isEmpty || cartMenuItems.isEmpty) return false;
+    final s = tableStatus;
+    return (s == 'PRINTED' || s == 'PAID') &&
+        !hasUnsentKotItems &&
+        !hasUnprintedItems;
+  }
+
+  String get releaseBlockedReason {
+    if (cartId.isEmpty || cartMenuItems.isEmpty) {
+      return 'No items on this table';
     }
-    return [];
+    if (hasUnsentKotItems) return 'Send KOT for the new items first';
+    if (hasUnprintedItems) return 'Print KOT before printing the bill';
+    return 'Print the bill before releasing the table';
   }
-
-  double get subTotal {
-    if (_cartData.isEmpty) return 0.0;
-    final cart = _cartData[0];
-    return double.tryParse(cart['menu_total']?.toString() ?? '0') ?? 0.0;
-  }
-
-  double get taxAmount {
-    if (_cartData.isEmpty) return 0.0;
-    final cart = _cartData[0];
-    return double.tryParse(cart['tax_price']?.toString() ?? '0') ?? 0.0;
-  }
-
-  double get grandTotal {
-    if (_cartData.isEmpty) return 0.0;
-    final cart = _cartData[0];
-    return double.tryParse(
-          cart['grand_total']?.toString() ??
-              cart['bill_total']?.toString() ??
-              '0',
-        ) ??
-        0.0;
-  }
-
-  int get totalItemCount {
-    return cartMenuItems.fold(
-      0,
-      (sum, item) =>
-          sum + (int.tryParse(item['quantity']?.toString() ?? '1') ?? 1),
-    );
-  }
-
-  String get cartId {
-    if (_cartData.isEmpty) return '';
-    return _cartData[0]['_id']?.toString() ?? '';
-  }
-
-  /// Bill Totals for display
-  double get subTotalLegacy =>
-      _cartLines.fold(0.0, (sum, line) => sum + line.lineTotal);
-  double get taxAmountLegacy => subTotalLegacy * 0.05;
-  double get grandTotalLegacy => subTotalLegacy + taxAmountLegacy;
-  int get totalItemCountLegacy =>
-      _cartLines.fold(0, (sum, line) => sum + line.quantity);
 
   // ============================================================
   // Actions
@@ -170,7 +186,6 @@ class PosProvider with ChangeNotifier {
     _activeTable = table;
     _activeTableId = table.id;
     _activeAreaId = table.areaId;
-    _cartLines.clear();
     _cartData = [];
     notifyListeners();
   }
@@ -178,19 +193,6 @@ class PosProvider with ChangeNotifier {
   void selectCategory(String? categoryId) {
     _selectedCategoryId = categoryId;
     notifyListeners();
-
-    // Background fetch for the selected category (like web's clickcategory)
-    if (categoryId != null && categoryId.isNotEmpty) {
-      _apiService
-          .getMenuItemsByCategory(categoryId: categoryId, search: _searchQuery)
-          .then((items) {
-            // Only update if the category hasn't changed while fetching
-            if (_selectedCategoryId == categoryId && items.isNotEmpty) {
-              // Merge with existing items (don't replace the full cache)
-              notifyListeners();
-            }
-          });
-    }
   }
 
   void setSearchQuery(String q) {
@@ -199,141 +201,186 @@ class PosProvider with ChangeNotifier {
   }
 
   // ============================================================
-  // Data Loading (matching web panel's ngOnInit flow)
+  // Loading (admin ngOnInit chain)
   // ============================================================
 
-  /// Load everything needed for the food categories screen.
-  /// Called when user taps a table — mirrors web's ngOnInit chain.
+  /// Load everything the ordering screen needs. Table + categories + menu are
+  /// mandatory; tax config is best-effort; the cart is loaded last and its
+  /// failure is reported separately so the menu still renders.
   Future<void> loadTableAndMenu(String tableId, String areaId) async {
     _isLoading = true;
     _errorMessage = null;
+    _cartError = null;
+    _sessionExpired = false;
     _activeTableId = tableId;
     _activeAreaId = areaId;
     notifyListeners();
 
     try {
-      // Parallel fetch: categories + menu items + table details + tax
-      final results = await Future.wait([
-        _apiService.getActiveCategories(), // 0: categories
-        _apiService.getMenuItemsByCategory(), // 1: all dinein menu items
-        _apiService.viewTableById(tableId), // 2: table details
-        _apiService.getTaxConfig(), // 3: tax config
-        _apiService.getPrinterSettings(), // 4: printer settings
+      _receiptPrefs = await ReceiptPrefs.load();
+      final results = await Future.wait<Object?>([
+        _apiService.viewTableById(tableId),
+        _apiService.getActiveCategories(),
+        _apiService.getMenuItemsByCategory(),
+        _bestEffortTax(),
       ]);
-
-      _categories = results[0] as List<MenuCategory>;
-      _allItems = results[1] as List<MenuItem>;
-      _tableDetails = results[2] as Map<String, dynamic>?;
+      _tableDetails = results[0] as Map<String, dynamic>?;
+      _categories = results[1] as List<MenuCategory>;
+      _allItems = results[2] as List<MenuItem>;
       _taxConfig = results[3] as List<Map<String, dynamic>>;
-      _printerSettings = results[4] as Map<String, dynamic>;
+      _buildConsolidatedTax();
 
-      // Build consolidated tax (sum all tax values — matches web's setTax logic)
-      if (_taxConfig.isNotEmpty) {
-        double totalTaxValue = 0;
-        for (var t in _taxConfig) {
-          totalTaxValue +=
-              double.tryParse(t['value_amount']?.toString() ?? '0') ?? 0;
-        }
-        _consolidatedTax = {
-          ..._taxConfig[0],
-          'value_amount': totalTaxValue.toString(),
-        };
+      if (_tableDetails == null ||
+          (_tableDetails!['table_id'] ?? _tableDetails!['_id']) == null) {
+        _errorMessage = 'This table no longer exists. Go back to the floor.';
+      } else {
+        debugPrint(
+          '[Fatfox POS] Loaded table ${_tableDetails?['table_number']}: '
+          '${_categories.length} categories, ${_allItems.length} items, '
+          '${_taxConfig.length} tax rows',
+        );
+        await _reloadCartData();
       }
-
-      debugPrint(
-        '[Fatfox POS] Loaded: ${_categories.length} categories, '
-        '${_allItems.length} menu items, '
-        'table: ${_tableDetails?['table_number']}, '
-        '${_taxConfig.length} tax entries',
-      );
-
-      // Now fetch cart items using the resolved table_id
-      final resolvedId = _tableDetails?['table_id']?.toString() ?? tableId;
-      await _reloadCartData(resolvedId);
+    } on ApiException catch (e) {
+      debugPrint('[Fatfox POS] Load refused: $e');
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
     } catch (e) {
       debugPrint('[Fatfox POS] Load error: $e');
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
+      _errorMessage = friendlyError(e);
     }
 
     _isLoading = false;
     notifyListeners();
   }
 
-  /// Legacy loadMenuData for backward compat with PosOrderingScreen
-  Future<void> loadMenuData() async {
-    _isLoading = true;
-    _errorMessage = null;
-    notifyListeners();
-
+  Future<List<Map<String, dynamic>>> _bestEffortTax() async {
     try {
-      final catList = await _apiService.getCategories();
-      final itemList = await _apiService.getMenuItems();
-      final pSettings = await _apiService.getPrinterSettings();
-      _categories = catList;
-      _allItems = itemList;
-      _printerSettings = pSettings;
-    } catch (e) {
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
+      return await _apiService.getTaxConfig();
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      return const [];
     }
+  }
 
-    _isLoading = false;
-    notifyListeners();
+  /// Admin sums every `settax` row into one `tax_value_amount`.
+  void _buildConsolidatedTax() {
+    if (_taxConfig.isEmpty) {
+      _consolidatedTax = null;
+      return;
+    }
+    double total = 0;
+    for (final t in _taxConfig) {
+      total += _num(t['value_amount']);
+    }
+    _consolidatedTax = {..._taxConfig.first, 'value_amount': total.toString()};
   }
 
   // ============================================================
-  // Cart Operations (live backend — matching web panel)
+  // Cart
   // ============================================================
 
-  /// Reload cart data from backend.
-  Future<void> _reloadCartData(String tableId) async {
+  Future<void> _reloadCartData() async {
+    final tid = resolvedTableId;
+    if (tid.isEmpty) return;
     try {
-      _cartData = await _apiService.getCartItemsByTableId(tableId);
+      _cartData = await _apiService.getCartItemsByTableId(tid);
+      _cartError = null;
       debugPrint(
-        '[Fatfox POS] Cart reloaded: ${_cartData.length} carts, '
-        '${cartMenuItems.length} items, total: ₹$grandTotal',
+        '[Fatfox POS] Cart: ${cartMenuItems.length} lines, total ₹$grandTotal, '
+        'status $tableStatus',
       );
+    } on ApiException catch (e) {
+      _cartError = e.message;
+      _sessionExpired = e.isAuth;
+      debugPrint('[Fatfox POS] Cart reload refused: $e');
     } catch (e) {
+      _cartError = friendlyError(e);
       debugPrint('[Fatfox POS] Cart reload error: $e');
     }
   }
 
-  /// Reload cart (public, uses resolved table ID).
+  /// Public reload (used by the screen's refresh + after each write).
   Future<void> reloadCart() async {
-    final tid = resolvedTableId;
-    if (tid.isEmpty) return;
-    await _reloadCartData(tid);
+    await _reloadCartData();
     notifyListeners();
   }
 
-  /// Add a menu item to cart via backend (mirrors web's addItem flow).
+  /// Paints the cart from a write response when it carries the full snapshot
+  /// (createcart / updatecartmenuquantity / deletemenu / cancelmenu all do),
+  /// otherwise refetches.
+  Future<void> _paintFromWrite(ApiEnvelope env) async {
+    final list = env.mapList;
+    final looksLikeSnapshot =
+        list.isNotEmpty &&
+        list.first.containsKey('cartMenuData') &&
+        list.first.containsKey('total_price');
+    if (looksLikeSnapshot) {
+      _cartData = list;
+      _cartError = null;
+      return;
+    }
+    if (env.data == null || list.isEmpty) {
+      // Cart may have been emptied (last line deleted) — confirm with a refetch.
+      await _reloadCartData();
+      return;
+    }
+    await _reloadCartData();
+  }
+
+  String get _containerPriceArg =>
+      containerCharge > 0 ? containerCharge.toString() : '0';
+
+  Future<bool> _write(Future<ApiEnvelope> Function() call) async {
+    _isBusy = true;
+    _errorMessage = null;
+    notifyListeners();
+    try {
+      final env = await call();
+      await _paintFromWrite(env);
+      _isBusy = false;
+      notifyListeners();
+      return true;
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+    } catch (e) {
+      _errorMessage = friendlyError(e);
+    }
+    _isBusy = false;
+    notifyListeners();
+    return false;
+  }
+
+  /// Add a menu item (admin `addItem` → createcart). The server merges into a
+  /// matching un-KOT'd line, so re-adding a KOT'd item creates a NEW line for
+  /// the next KOT — exactly as admin does.
   Future<bool> addItemToCart(
     MenuItem item, {
     String? variantId,
     List<Map<String, dynamic>>? addons,
+    int quantity = 1,
+    String? description,
   }) async {
     final tid = resolvedTableId;
-    if (tid.isEmpty) return false;
+    if (tid.isEmpty) {
+      _errorMessage = 'Table not loaded';
+      notifyListeners();
+      return false;
+    }
 
-    _isLoading = true;
-    notifyListeners();
+    MenuVariant? selectedVariant;
+    for (final v in item.variants) {
+      if (v.id == variantId) selectedVariant = v;
+    }
+    final addonTotal = (addons ?? []).fold<double>(
+      0,
+      (sum, a) => sum + _num(a['addon_price']),
+    );
+    final menuPrice = (selectedVariant?.price ?? item.price) + addonTotal;
 
-    try {
-      MenuVariant? selectedVariant;
-      for (final variant in item.variants) {
-        if (variant.id == variantId) {
-          selectedVariant = variant;
-          break;
-        }
-      }
-      final addonTotal = (addons ?? []).fold<double>(
-        0,
-        (sum, addon) =>
-            sum +
-            (double.tryParse(addon['addon_price']?.toString() ?? '0') ?? 0),
-      );
-      final menuPrice = (selectedVariant?.price ?? item.price) + addonTotal;
-
-      final result = await _apiService.createCartItem(
+    return _write(
+      () => _apiService.createCartItem(
         tableId: tid,
         menuId: item.id,
         menuPrice: menuPrice,
@@ -343,515 +390,447 @@ class PosProvider with ChangeNotifier {
         taxName: _consolidatedTax?['name']?.toString(),
         taxValueType: _consolidatedTax?['value_type']?.toString(),
         taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
-      );
-
-      final statusCode = result['status']?['code'];
-      if (statusCode == 200) {
-        await _reloadCartData(tid);
-        _isLoading = false;
-        notifyListeners();
-        return true;
-      } else {
-        _errorMessage =
-            result['status']?['message']?.toString() ?? 'Failed to add item';
-      }
-    } catch (e) {
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
-    }
-
-    _isLoading = false;
-    notifyListeners();
-    return false;
+        containerPrice: _containerPriceArg,
+        quantity: quantity,
+        description: description,
+      ),
+    );
   }
 
-  /// Update quantity of a cart menu item via backend.
-  Future<bool> updateItemQuantity(
-    String cartItemId,
-    String cartmenuId,
-    int newQty,
-  ) async {
-    try {
-      if (newQty <= 0) {
-        return await removeCartItem(cartItemId, cartmenuId);
-      }
+  /// Open-price / extra add-on line (admin "+ Custom"): no menu_id, typed price.
+  Future<bool> addExtraItem({required String name, required double price}) {
+    final tid = resolvedTableId;
+    if (tid.isEmpty || name.trim().isEmpty || price <= 0) {
+      return Future.value(false);
+    }
+    return _write(
+      () => _apiService.createCartItem(
+        tableId: tid,
+        menuId: null,
+        menuPrice: price,
+        isExtraAddon: true,
+        menuName: name.trim(),
+        taxId: _consolidatedTax?['_id']?.toString(),
+        taxName: _consolidatedTax?['name']?.toString(),
+        taxValueType: _consolidatedTax?['value_type']?.toString(),
+        taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
+        containerPrice: _containerPriceArg,
+      ),
+    );
+  }
 
-      final result = await _apiService.updateCartItemQuantity(
-        cartId: cartItemId,
+  static bool isKotLine(Map<String, dynamic> line) =>
+      line['kot_status'] == 1 ||
+      line['kot_status'] == '1' ||
+      line['kotprint_status'] == 1 ||
+      line['kotprint_status'] == '1';
+
+  Map<String, dynamic>? _line(String cartmenuId) {
+    for (final l in cartMenuItems) {
+      if (l['_id']?.toString() == cartmenuId) return l;
+    }
+    return null;
+  }
+
+  /// Quantity change — refused on KOT'd lines (admin hard-locks them).
+  Future<bool> updateItemQuantity(String cartmenuId, int newQty) async {
+    final line = _line(cartmenuId);
+    if (line != null && isKotLine(line)) {
+      _errorMessage =
+          'This item is already sent to the kitchen. Cancel it instead.';
+      notifyListeners();
+      return false;
+    }
+    if (newQty <= 0) return removeCartItem(cartmenuId);
+    final cid = cartId;
+    if (cid.isEmpty) return false;
+    return _write(
+      () => _apiService.updateCartItemQuantity(
+        cartId: cid,
         cartmenuId: cartmenuId,
         quantity: newQty,
         taxId: _consolidatedTax?['_id']?.toString(),
         taxValueType: _consolidatedTax?['value_type']?.toString(),
         taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
-      );
-
-      final statusCode = result['status']?['code'];
-      if (statusCode == 200) {
-        await reloadCart();
-        return true;
-      }
-    } catch (e) {
-      debugPrint('[Fatfox POS] UpdateQty error: $e');
-    }
-    return false;
+        containerPrice: _containerPriceArg,
+      ),
+    );
   }
 
-  /// Remove a cart menu item via backend.
-  Future<bool> removeCartItem(String cartItemId, String cartmenuId) async {
-    try {
-      final result = await _apiService.deleteCartMenuItem(
-        cartId: cartItemId,
+  /// Remove an un-KOT'd line (hard delete). For a KOT'd line use [cancelKotLine].
+  Future<bool> removeCartItem(String cartmenuId) async {
+    final line = _line(cartmenuId);
+    if (line != null && isKotLine(line)) {
+      return cancelKotLine(cartmenuId, reason: 'Removed from order');
+    }
+    final cid = cartId;
+    if (cid.isEmpty) return false;
+    return _write(
+      () => _apiService.deleteCartMenuItem(
+        cartId: cid,
         cartmenuId: cartmenuId,
         taxId: _consolidatedTax?['_id']?.toString(),
         taxValueType: _consolidatedTax?['value_type']?.toString(),
         taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
+        containerPrice: _containerPriceArg,
+      ),
+    );
+  }
+
+  /// Cancel a KOT'd line with a reason (row kept, excluded from pricing).
+  Future<bool> cancelKotLine(String cartmenuId, {required String reason}) {
+    final cid = cartId;
+    if (cid.isEmpty) return Future.value(false);
+    return _write(
+      () => _apiService.cancelCartMenuItem(
+        cartId: cid,
+        cartmenuId: cartmenuId,
+        reason: reason.trim().isEmpty ? 'Removed from order' : reason.trim(),
+        taxId: _consolidatedTax?['_id']?.toString(),
+        taxValueType: _consolidatedTax?['value_type']?.toString(),
+        taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
+        containerPrice: _containerPriceArg,
+      ),
+    );
+  }
+
+  // ============================================================
+  // Print helpers
+  // ============================================================
+
+  /// Cart lines shaped for ESC/POS (from the live cart).
+  List<CartLineItem> get printCartLines => _kotLinesFromMaps(cartMenuItems);
+
+  DineInTable get _printTable =>
+      _activeTable ??
+      DineInTable(
+        id: resolvedTableId,
+        tableNumber: tableNumber.isEmpty ? resolvedTableId : tableNumber,
+        areaId: _activeAreaId ?? '',
+        noOfPeople: 0,
+        tableStatus: tableStatus,
+        status: '1',
+        totalPrice: grandTotal,
+        itemCount: totalItemCount,
       );
-
-      final statusCode = result['status']?['code'];
-      if (statusCode == 200) {
-        await reloadCart();
-        return true;
-      }
-    } catch (e) {
-      debugPrint('[Fatfox POS] RemoveItem error: $e');
-    }
-    return false;
-  }
-
-  /// Cart lines shaped for ESC/POS (from live backend cart).
-  List<CartLineItem> get printCartLines {
-    return cartMenuItems.map((m) {
-      final name =
-          m['menu_name']?.toString() ??
-          m['name']?.toString() ??
-          m['displayname']?.toString() ??
-          'Item';
-      final variantName = m['variant_name']?.toString() ??
-          m['valuename']?.toString();
-      return CartLineItem(
-        id: m['_id']?.toString() ?? '',
-        item: MenuItem(
-          id: m['menu_id']?.toString() ?? '',
-          categoryId: m['category_id']?.toString() ?? '',
-          name: name,
-          attribute: m['attribute']?.toString() ?? 'VEG',
-          price:
-              double.tryParse(m['menu_price']?.toString() ?? '0') ?? 0.0,
-        ),
-        quantity: int.tryParse(m['quantity']?.toString() ?? '1') ?? 1,
-        selectedVariant: (variantName != null && variantName.isNotEmpty)
-            ? MenuVariant(
-                id: m['variant_id']?.toString() ?? '',
-                name: variantName,
-                price:
-                    double.tryParse(m['menu_price']?.toString() ?? '0') ??
-                    0.0,
-              )
-            : null,
-        instruction: m['description']?.toString(),
-      );
-    }).toList();
-  }
-
-  Future<PaperSize> _paperSizeFromPrefs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final paper = prefs.getString('printer_paper') ?? '80mm';
-    return paper.contains('58') ? PaperSize.mm58 : PaperSize.mm80;
-  }
-
-  String get _restaurantHeader {
-    final fromApi = _printerSettings['restaurant_name']?.toString();
-    if (fromApi != null && fromApi.isNotEmpty) return fromApi;
-    return 'THE FAT FOX';
-  }
 
   /// Map viewmenu / cartmenu rows into ESC/POS cart lines.
   List<CartLineItem> _kotLinesFromMaps(List<Map<String, dynamic>> items) {
     return items.map((m) {
-      final menu = m['menu'];
+      final menu =
+          m['menu'] ??
+          (m['menuData'] is List && (m['menuData'] as List).isNotEmpty
+              ? (m['menuData'] as List).first
+              : null);
       final menuMap = menu is Map ? Map<String, dynamic>.from(menu) : null;
-      final name = m['menu_name']?.toString() ??
+      final name =
           menuMap?['displayname']?.toString() ??
           menuMap?['name']?.toString() ??
+          m['menu_name']?.toString() ??
           m['name']?.toString() ??
-          m['displayname']?.toString() ??
           'Item';
       final variant = m['variant'];
-      final variantMap =
-          variant is Map ? Map<String, dynamic>.from(variant) : null;
-      final variantName = m['variant_name']?.toString() ??
+      final variantMap = variant is Map
+          ? Map<String, dynamic>.from(variant)
+          : (variant is List && variant.isNotEmpty && variant.first is Map
+                ? Map<String, dynamic>.from(variant.first as Map)
+                : null);
+      final variantName =
           variantMap?['valuename']?.toString() ??
           variantMap?['name']?.toString() ??
-          m['valuename']?.toString();
+          m['variant_name']?.toString();
+      final addons = <MenuAddon>[];
+      final addonRaw = m['addon'] ?? m['addonData'];
+      if (addonRaw is List) {
+        for (final a in addonRaw) {
+          if (a is Map) {
+            addons.add(MenuAddon.fromJson(Map<String, dynamic>.from(a)));
+          }
+        }
+      }
+      final unit = _num(m['individual_price'] ?? m['menu_price']);
       return CartLineItem(
         id: m['_id']?.toString() ?? '',
         item: MenuItem(
           id: m['menu_id']?.toString() ?? menuMap?['_id']?.toString() ?? '',
           categoryId: m['category_id']?.toString() ?? '',
           name: name,
-          attribute: m['attribute']?.toString() ??
-              menuMap?['attribute']?.toString() ??
-              'VEG',
-          price: double.tryParse(
-                m['menu_price']?.toString() ??
-                    m['individual_price']?.toString() ??
-                    '0',
-              ) ??
-              0.0,
+          attribute: menuMap?['attribute']?.toString() ?? 'VEG',
+          price: unit,
         ),
         quantity: int.tryParse(m['quantity']?.toString() ?? '1') ?? 1,
         selectedVariant: (variantName != null && variantName.isNotEmpty)
             ? MenuVariant(
-                id: m['variant_id']?.toString() ??
+                id:
                     variantMap?['_id']?.toString() ??
+                    m['variant_id']?.toString() ??
                     '',
                 name: variantName,
-                price: double.tryParse(
-                      m['menu_price']?.toString() ??
-                          m['individual_price']?.toString() ??
-                          '0',
-                    ) ??
-                    0.0,
+                price: unit,
               )
             : null,
+        selectedAddons: addons,
         instruction: m['description']?.toString(),
+        cancelStatus: (m['cancel_status'] == 1 || m['cancel_status'] == '1')
+            ? 1
+            : 0,
       );
     }).toList();
   }
 
-  /// Send KOT to kitchen via setcartstatus, then silent-print LAN ESC/POS.
-  /// Returns true if KOT API succeeded. [printError] set if API ok but print failed.
-  /// KOT_PRINT is only sent after a successful print.
-  String? printError;
+  // ============================================================
+  // KOT
+  // ============================================================
 
+  /// Send KOT via setcartstatus, then silent-print the un-printed lines
+  /// (`viewmenu?status=kot`), then KOT_PRINT only after a successful print.
+  /// Returns true when the KOT reached the kitchen; [printError] set if the
+  /// print failed afterwards.
   Future<bool> sendKotOrder() async {
     final tid = resolvedTableId;
     final cid = cartId;
-    if (tid.isEmpty || cid.isEmpty) return false;
+    if (tid.isEmpty || cid.isEmpty) {
+      _errorMessage = 'No items on this table yet';
+      notifyListeners();
+      return false;
+    }
 
-    _isLoading = true;
+    _isBusy = true;
+    _errorMessage = null;
     printError = null;
     notifyListeners();
 
     try {
-      // 1) Fire kitchen / accept PENDING→KOT
-      final result = await _apiService.sendKotToKitchen(cartId: cid);
-      final statusCode = result['status']?['code'];
-      if (statusCode != 200) {
-        _errorMessage =
-            result['status']?['message']?.toString() ?? 'KOT failed';
-        _isLoading = false;
-        notifyListeners();
-        return false;
-      }
-
-      // 2) Reload cart after KOT step
-      await reloadCart();
-
-      // 3) Print lines from viewmenu status=kot (fallback to live cart lines)
+      // Un-printed lines BEFORE the status flip (KOT sets kot_status on all rows;
+      // kotprint_status stays 0 until KOT_PRINT, so this is safe either way).
       List<CartLineItem> kotItems = [];
       try {
-        final kotRows = await _apiService.getKotViewMenu(tableId: tid);
-        if (kotRows.isNotEmpty) {
-          kotItems = _kotLinesFromMaps(kotRows);
-        }
-      } catch (e) {
-        debugPrint('[Fatfox POS] getKotViewMenu error: $e');
+        final rows = await _apiService.getViewMenu(tableId: tid, status: 'kot');
+        kotItems = _kotLinesFromMaps(rows);
+      } on ApiException catch (e) {
+        if (e.isAuth) rethrow;
+        debugPrint(
+          '[Fatfox POS] viewmenu kot failed, falling back to cart lines: $e',
+        );
       }
       if (kotItems.isEmpty) {
-        kotItems = printCartLines;
+        kotItems = _kotLinesFromMaps(
+          cartMenuItems.where((i) => i['kotprint_status'] != 1).toList(),
+        );
+      }
+      if (kotItems.isEmpty) kotItems = printCartLines;
+
+      // 1) Fire only new lines. A printer retry must not create another KOT.
+      if (hasUnsentKotItems) {
+        await _apiService.sendKotToKitchen(cartId: cid);
+        await _reloadCartData();
       }
 
-      // 4) LAN print
+      // 2) LAN print
       var printOk = false;
       try {
-        final table = _activeTable ??
-            DineInTable(
-              id: tid,
-              tableNumber: _tableDetails?['table_number']?.toString() ??
-                  _tableDetails?['name']?.toString() ??
-                  tid,
-              areaId: _activeAreaId ?? '',
-              noOfPeople: 0,
-              tableStatus: 'KOT',
-              status: '1',
-              totalPrice: grandTotal,
-              itemCount: totalItemCount,
-            );
-        final prefs = await SharedPreferences.getInstance();
-        final header =
-            prefs.getString('printer_header') ?? _restaurantHeader;
+        final prefs = await ReceiptPrefs.load();
         final bytes = await _printer.generateKotBytes(
-          table: table,
+          table: _printTable,
           items: kotItems,
-          restaurantName: header,
-          paperSize: await _paperSizeFromPrefs(),
+          restaurantName: prefs.header,
+          paperSize: prefs.paperSize,
         );
         await _printer.printBytes(bytes);
         printOk = true;
       } catch (e) {
-        printError = e.toString().replaceAll('Exception: ', '');
+        printError = friendlyError(e);
         debugPrint('[Fatfox POS] KOT print error: $e');
       }
 
-      // 5) Mark KOT_PRINT only after successful print
+      // 3) KOT_PRINT only after a successful print
       if (printOk) {
         try {
-          final printStatus = await _apiService.setCartStatus(
+          await _apiService.setCartStatus(
             cartId: cid,
             tableStatus: 'KOT_PRINT',
           );
-          final printCode = printStatus['status']?['code'];
-          if (printCode != 200) {
-            debugPrint(
-              '[Fatfox POS] KOT_PRINT status failed: '
-              '${printStatus['status']?['message']}',
-            );
-          } else {
-            await reloadCart();
-          }
-        } catch (e) {
-          debugPrint('[Fatfox POS] KOT_PRINT error: $e');
+          await _reloadCartData();
+        } on ApiException catch (e) {
+          if (e.isAuth) rethrow;
+          debugPrint('[Fatfox POS] KOT_PRINT status failed: $e');
         }
       }
 
-      _isLoading = false;
+      _isBusy = false;
       notifyListeners();
       return true;
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
     } catch (e) {
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
+      _errorMessage = friendlyError(e);
     }
 
-    _isLoading = false;
+    _isBusy = false;
     notifyListeners();
     return false;
   }
 
-  /// Available dine-in discounts for the current cart total.
+  // ============================================================
+  // Discounts
+  // ============================================================
+
   Future<List<Map<String, dynamic>>> listDiscounts({
     String searchName = '',
   }) async {
-    final amount = grandTotal > 0 ? grandTotal : subTotal;
+    final amount = subTotal > 0 ? subTotal : grandTotal;
     try {
       return await _apiService.listAvailableDiscounts(
         orderAmount: amount,
         searchName: searchName,
       );
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        _sessionExpired = true;
+        notifyListeners();
+      }
+      debugPrint('[Fatfox POS] listDiscounts refused: $e');
+      return [];
     } catch (e) {
       debugPrint('[Fatfox POS] listDiscounts error: $e');
       return [];
     }
   }
 
-  /// Apply discount then reload cart.
-  Future<bool> applyDiscount(String discountId) async {
+  Future<bool> applyDiscount(String discountId) {
     final cid = cartId;
-    if (cid.isEmpty || discountId.isEmpty) return false;
-
-    try {
-      final result = await _apiService.setCartDiscount(
-        cartId: cid,
-        discountId: discountId,
-      );
-      final statusCode = result['status']?['code'];
-      if (statusCode == 200) {
-        await reloadCart();
-        return true;
-      }
-      _errorMessage =
-          result['status']?['message']?.toString() ?? 'Discount failed';
-      notifyListeners();
-    } catch (e) {
-      debugPrint('[Fatfox POS] applyDiscount error: $e');
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
-      notifyListeners();
-    }
-    return false;
+    if (cid.isEmpty || discountId.isEmpty) return Future.value(false);
+    return _write(
+      () => _apiService.setCartDiscount(cartId: cid, discountId: discountId),
+    );
   }
 
-  /// Remove cart discount then reload cart.
-  Future<bool> clearDiscount() async {
+  Future<bool> clearDiscount() {
     final cid = cartId;
-    if (cid.isEmpty) return false;
-
-    try {
-      final result = await _apiService.removeCartDiscount(cartId: cid);
-      final statusCode = result['status']?['code'];
-      if (statusCode == 200) {
-        await reloadCart();
-        return true;
-      }
-      _errorMessage =
-          result['status']?['message']?.toString() ?? 'Remove discount failed';
-      notifyListeners();
-    } catch (e) {
-      debugPrint('[Fatfox POS] clearDiscount error: $e');
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
-      notifyListeners();
-    }
-    return false;
+    if (cid.isEmpty) return Future.value(false);
+    return _write(() => _apiService.removeCartDiscount(cartId: cid));
   }
 
-  /// Settle bill via API then silent-print customer receipt.
-  Future<bool> settleAndPrintBill({String paymentType = 'CASH'}) async {
+  // ============================================================
+  // Bill + settle
+  // ============================================================
+
+  /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
+  /// Returns null on success, else the error text. Un-printed items are sent
+  /// to the kitchen first so the bill never disagrees with the kitchen.
+  Future<String?> printBill({String? paymentMode}) async {
     final tid = resolvedTableId;
     final cid = cartId;
-    if (tid.isEmpty || cid.isEmpty) {
+    if (tid.isEmpty || cid.isEmpty) return 'No items on this table yet';
+
+    _isBusy = true;
+    _errorMessage = null;
+    printError = null;
+    notifyListeners();
+
+    String? failure;
+    try {
+      if (hasUnprintedItems) {
+        failure = hasUnsentKotItems
+            ? 'Send and print KOT before printing the bill'
+            : 'Print KOT before printing the bill';
+      }
+      if (failure == null) {
+        final data = await BillBuilder(_apiService).build(
+          tableId: tid,
+          tableNumber: tableNumber,
+          paymentMode: paymentMode,
+          cartSnapshot: cart,
+          taxRows: _taxConfig,
+        );
+        if (data == null) {
+          failure = 'No active cart found for this table';
+        } else {
+          final prefs = await ReceiptPrefs.load();
+          final bytes = await _printer.generateBillBytes(
+            bill: data,
+            paperSize: prefs.paperSize,
+          );
+          await _printer.printBytes(bytes);
+          await _markPrintedWithRetry(cid);
+          await _reloadCartData();
+        }
+      }
+    } on ApiException catch (e) {
+      failure = e.message;
+      _sessionExpired = e.isAuth;
+    } catch (e) {
+      failure = friendlyError(e);
+      printError = failure;
+    }
+
+    _isBusy = false;
+    notifyListeners();
+    return failure;
+  }
+
+  /// PRINTED is what unlocks Release — retry transport failures like admin.
+  Future<void> _markPrintedWithRetry(String cid) async {
+    Object? last;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await _apiService.setCartStatus(cartId: cid, tableStatus: 'PRINTED');
+        return;
+      } on ApiException catch (e) {
+        if (e.isAuth || !e.isNetwork) rethrow;
+        last = e;
+        await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+      }
+    }
+    if (last != null) throw last;
+  }
+
+  /// SETTLE: `setcarttobill { cartId, paymentType }` — creates the Order and
+  /// deletes the cart. The caller must print the bill first.
+  Future<bool> settleAndPrintBill({String paymentType = 'CASH'}) async {
+    final cid = cartId;
+    if (cid.isEmpty) {
       _errorMessage = 'No active cart for this table';
       notifyListeners();
       return false;
     }
+    final mode = ApiService.normalizePaymentType(paymentType);
 
-    _isLoading = true;
-    printError = null;
-    notifyListeners();
-
-    try {
-      final result = await _apiService.settleBill(
-        cartId: cid,
-        tableId: tid,
-        paymentType: paymentType,
-      );
-      final statusCode = result['status']?['code'];
-      final ok = statusCode == 200 || statusCode == null && result.isNotEmpty;
-      if (!ok && statusCode != null && statusCode != 200) {
-        _errorMessage =
-            result['status']?['message']?.toString() ?? 'Settle failed';
-        _isLoading = false;
-        notifyListeners();
-        return false;
-      }
-
-      try {
-        final table = _activeTable ??
-            DineInTable(
-              id: tid,
-              tableNumber: _tableDetails?['table_number']?.toString() ??
-                  _tableDetails?['name']?.toString() ??
-                  tid,
-              areaId: _activeAreaId ?? '',
-              noOfPeople: 0,
-              tableStatus: 'PRINTED',
-              status: '1',
-              totalPrice: grandTotal,
-              itemCount: totalItemCount,
-            );
-        final prefs = await SharedPreferences.getInstance();
-        final header =
-            prefs.getString('printer_header') ?? _restaurantHeader;
-        final bytes = await _printer.generateBillBytes(
-          table: table,
-          items: printCartLines,
-          subTotal: subTotal,
-          taxAmount: taxAmount,
-          grandTotal: grandTotal > 0 ? grandTotal : (subTotal + taxAmount),
-          restaurantName: header,
-          paperSize: await _paperSizeFromPrefs(),
-        );
-        await _printer.printBytes(bytes);
-      } catch (e) {
-        printError = e.toString().replaceAll('Exception: ', '');
-        debugPrint('[Fatfox POS] Bill print error: $e');
-      }
-
-      await reloadCart();
-      _isLoading = false;
+    if (!canRelease) {
+      _errorMessage = releaseBlockedReason;
       notifyListeners();
-      return true;
-    } catch (e) {
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
+      return false;
     }
 
-    _isLoading = false;
+    _isBusy = true;
+    _errorMessage = null;
+    notifyListeners();
+    try {
+      await _apiService.settleBill(cartId: cid, paymentType: mode);
+      _cartData = [];
+      _isBusy = false;
+      notifyListeners();
+      return true;
+    } on ApiException catch (e) {
+      // e.g. split_not_fully_paid / qr_order_awaiting_approval — show verbatim.
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+    } catch (e) {
+      _errorMessage = friendlyError(e);
+    }
+    _isBusy = false;
     notifyListeners();
     return false;
   }
 
-  // ============================================================
-  // Legacy Cart Operations (for PosOrderingScreen backward compat)
-  // ============================================================
-
-  void addToCart(
-    MenuItem item, {
-    MenuVariant? variant,
-    List<MenuAddon>? addons,
-    String? instruction,
-  }) {
-    final existingIndex = _cartLines.indexWhere(
-      (line) =>
-          line.item.id == item.id &&
-          line.selectedVariant?.id == variant?.id &&
-          !line.isKotPrinted,
-    );
-
-    if (existingIndex >= 0) {
-      _cartLines[existingIndex].quantity += 1;
-    } else {
-      _cartLines.add(
-        CartLineItem(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          item: item,
-          quantity: 1,
-          selectedVariant: variant,
-          selectedAddons: addons ?? [],
-          instruction: instruction,
-        ),
-      );
-    }
-    notifyListeners();
-  }
-
-  void updateQuantity(CartLineItem line, int newQty) {
-    if (newQty <= 0) {
-      _cartLines.removeWhere((l) => l.id == line.id);
-    } else {
-      line.quantity = newQty;
-    }
-    notifyListeners();
-  }
-
-  void removeLine(CartLineItem line) {
-    _cartLines.removeWhere((l) => l.id == line.id);
-    notifyListeners();
-  }
-
   void clearCart() {
-    _cartLines.clear();
     _cartData = [];
     notifyListeners();
   }
 
-  Future<bool> sendKot() async {
-    if (_activeTable == null || _cartLines.isEmpty) return false;
-
-    _isLoading = true;
-    notifyListeners();
-
-    try {
-      final payloadItems = _cartLines.map((l) => l.toCartJson()).toList();
-      final addRes = await _apiService.addToCart(
-        tableId: _activeTable!.id,
-        menuItems: payloadItems,
-      );
-
-      final cId = addRes['data']?['_id'] ?? addRes['cart_id'];
-      if (cId != null) {
-        await _apiService.createKot(
-          tableId: _activeTable!.id,
-          cartId: cId.toString(),
-        );
-        for (var line in _cartLines) {
-          line.isKotPrinted = true;
-        }
-        _isLoading = false;
-        notifyListeners();
-        return true;
-      }
-    } catch (e) {
-      _errorMessage = e.toString().replaceAll('Exception: ', '');
-    }
-
-    _isLoading = false;
-    notifyListeners();
-    return false;
+  static double _num(dynamic v) {
+    if (v is num) return v.toDouble();
+    return double.tryParse(v?.toString() ?? '') ?? 0.0;
   }
 }

@@ -7,6 +7,108 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/table_model.dart';
 import '../models/cart_model.dart';
 
+/// Device-local receipt preferences (admin keeps receipt customization in
+/// localStorage per till too — it is not server data a waiter can read).
+class ReceiptPrefs {
+  final String header;
+  final PaperSize paperSize;
+  final String printerIp;
+  final int printerPort;
+
+  /// Admin POS rule: allow "Release" at KOT_PRINT/RUNNING without a printed bill.
+  final bool kotEnableReleaseTable;
+
+  const ReceiptPrefs({
+    required this.header,
+    required this.paperSize,
+    required this.printerIp,
+    required this.printerPort,
+    required this.kotEnableReleaseTable,
+  });
+
+  bool get printerConfigured => printerIp.isNotEmpty;
+
+  static Future<ReceiptPrefs> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final paper = prefs.getString('printer_paper') ?? '80mm';
+    return ReceiptPrefs(
+      header: prefs.getString('printer_header') ?? 'THE FAT FOX',
+      paperSize: paper.contains('58') ? PaperSize.mm58 : PaperSize.mm80,
+      printerIp: prefs.getString('printer_ip') ?? '',
+      printerPort: int.tryParse(prefs.getString('printer_port') ?? '9100') ?? 9100,
+      kotEnableReleaseTable: prefs.getBool('kot_enable_release_table') ?? false,
+    );
+  }
+}
+
+/// One printed bill line.
+class BillLine {
+  final String name;
+  final String? variant;
+  final List<String> addons;
+  final String? note;
+  final int quantity;
+  final double lineTotal;
+  final bool cancelled;
+
+  const BillLine({
+    required this.name,
+    this.variant,
+    this.addons = const [],
+    this.note,
+    required this.quantity,
+    required this.lineTotal,
+    this.cancelled = false,
+  });
+}
+
+/// Everything the customer bill shows (mirrors admin print-dinein-save).
+class BillPrintData {
+  final String restaurantName;
+  final String? address;
+  final String? phone;
+  final String? gstin;
+  final String tableNumber;
+  final String? paymentMode;
+  final String? customerName;
+  final String? customerMobile;
+  final List<BillLine> lines;
+  final double subTotal; // food_subtotal (pre-surge)
+  final double discount;
+  final String? discountName;
+  final double containerCharge;
+  final double areaCharge;
+  final String? areaChargeLabel;
+  final List<MapEntry<String, double>> taxBreakdown; // e.g. CGST (2.5%) → 10.95
+  final double taxTotal;
+  final double roundOff;
+  final double grandTotal;
+  final String? footer;
+
+  const BillPrintData({
+    required this.restaurantName,
+    this.address,
+    this.phone,
+    this.gstin,
+    required this.tableNumber,
+    this.paymentMode,
+    this.customerName,
+    this.customerMobile,
+    required this.lines,
+    required this.subTotal,
+    this.discount = 0,
+    this.discountName,
+    this.containerCharge = 0,
+    this.areaCharge = 0,
+    this.areaChargeLabel,
+    this.taxBreakdown = const [],
+    required this.taxTotal,
+    this.roundOff = 0,
+    required this.grandTotal,
+    this.footer,
+  });
+}
+
 class ThermalPrinterService {
   final NumberFormat _currencyFormat = NumberFormat.currency(
     symbol: '₹',
@@ -32,15 +134,13 @@ class ThermalPrinterService {
     }
   }
 
+  /// Direct LAN ESC/POS over TCP :9100 (silent — no system dialog).
   Future<void> printBytes(List<int> bytes) async {
-    final prefs = await SharedPreferences.getInstance();
-    final host = prefs.getString('printer_ip') ?? '';
-    final port =
-        int.tryParse(prefs.getString('printer_port') ?? '9100') ?? 9100;
-    if (host.isEmpty) {
+    final prefs = await ReceiptPrefs.load();
+    if (!prefs.printerConfigured) {
       throw Exception('Printer IP not configured. Open Printer Settings.');
     }
-    await sendRaw(bytes, host: host, port: port);
+    await sendRaw(bytes, host: prefs.printerIp, port: prefs.printerPort);
   }
 
   Future<List<int>> generateTestBytes({
@@ -89,12 +189,12 @@ class ThermalPrinterService {
     required List<CartLineItem> items,
     required String restaurantName,
     PaperSize paperSize = PaperSize.mm80,
+    String? department,
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
     List<int> bytes = [];
 
-    // Header
     bytes += generator.text(
       'KITCHEN ORDER TICKET (KOT)',
       styles: const PosStyles(
@@ -109,6 +209,12 @@ class ThermalPrinterService {
       restaurantName,
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
+    if (department != null && department.isNotEmpty) {
+      bytes += generator.text(
+        'DEPARTMENT : $department',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      );
+    }
 
     bytes += generator.feed(1);
     bytes += generator.text(
@@ -118,7 +224,6 @@ class ThermalPrinterService {
     bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
     bytes += generator.hr();
 
-    // Column Headers
     bytes += generator.row([
       PosColumn(
         text: 'Item Name',
@@ -133,12 +238,12 @@ class ThermalPrinterService {
     ]);
     bytes += generator.hr();
 
-    // Line items
     for (var line in items) {
       String name = line.item.name;
       if (line.selectedVariant != null) {
         name += ' (${line.selectedVariant!.name})';
       }
+      if (line.cancelStatus == 1) name += ' (cancelled)';
       bytes += generator.row([
         PosColumn(text: name, width: 9),
         PosColumn(
@@ -147,7 +252,9 @@ class ThermalPrinterService {
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
       ]);
-
+      for (final addon in line.selectedAddons) {
+        bytes += generator.text('   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}');
+      }
       if (line.instruction != null && line.instruction!.isNotEmpty) {
         bytes += generator.text('   Note: ${line.instruction}');
       }
@@ -160,25 +267,19 @@ class ThermalPrinterService {
     return bytes;
   }
 
-  // Generate Customer Bill Byte Stream
+  /// Customer bill — same rows as the admin printed bill: items at BASE price,
+  /// then Subtotal → Discount → Container → AC/Area charge → tax rows →
+  /// Round Off → Grand Total.
   Future<List<int>> generateBillBytes({
-    required DineInTable table,
-    required List<CartLineItem> items,
-    required double subTotal,
-    required double taxAmount,
-    required double grandTotal,
-    required String restaurantName,
-    dynamic paperSize = PaperSize.mm80,
+    required BillPrintData bill,
+    PaperSize paperSize = PaperSize.mm80,
   }) async {
-    final size = (paperSize is String && paperSize.contains('58'))
-        ? PaperSize.mm58
-        : (paperSize is PaperSize ? paperSize : PaperSize.mm80);
     final profile = await CapabilityProfile.load();
-    final generator = Generator(size, profile);
+    final generator = Generator(paperSize, profile);
     List<int> bytes = [];
 
     bytes += generator.text(
-      restaurantName,
+      bill.restaurantName,
       styles: const PosStyles(
         align: PosAlign.center,
         height: PosTextSize.size2,
@@ -186,18 +287,30 @@ class ThermalPrinterService {
         bold: true,
       ),
     );
+    if (bill.address != null && bill.address!.isNotEmpty) {
+      bytes += generator.text(bill.address!, styles: const PosStyles(align: PosAlign.center));
+    }
+    if (bill.phone != null && bill.phone!.isNotEmpty) {
+      bytes += generator.text('Ph: ${bill.phone}', styles: const PosStyles(align: PosAlign.center));
+    }
+    if (bill.gstin != null && bill.gstin!.isNotEmpty) {
+      bytes += generator.text('GSTIN: ${bill.gstin}', styles: const PosStyles(align: PosAlign.center));
+    }
+    bytes += generator.hr();
+    bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
     bytes += generator.text(
-      'DINE-IN CUSTOMER RECEIPT',
-      styles: const PosStyles(align: PosAlign.center),
+      'Table No : ${bill.tableNumber}',
+      styles: const PosStyles(bold: true),
     );
-    bytes += generator.text(
-      'Table #: ${table.tableNumber}',
-      styles: const PosStyles(align: PosAlign.center, bold: true),
-    );
-    bytes += generator.text(
-      'Date: ${_dateFormat.format(DateTime.now())}',
-      styles: const PosStyles(align: PosAlign.center),
-    );
+    if (bill.paymentMode != null && bill.paymentMode!.isNotEmpty) {
+      bytes += generator.text('Payment : ${bill.paymentMode}');
+    }
+    if (bill.customerName != null && bill.customerName!.isNotEmpty) {
+      bytes += generator.text('Name : ${bill.customerName}');
+    }
+    if (bill.customerMobile != null && bill.customerMobile!.isNotEmpty) {
+      bytes += generator.text('Mobile : ${bill.customerMobile}');
+    }
     bytes += generator.hr();
 
     bytes += generator.row([
@@ -215,9 +328,12 @@ class ThermalPrinterService {
     ]);
     bytes += generator.hr();
 
-    for (var line in items) {
+    for (final line in bill.lines) {
+      var name = line.name;
+      if (line.variant != null && line.variant!.isNotEmpty) name += ' (${line.variant})';
+      if (line.cancelled) name += ' (cancelled)';
       bytes += generator.row([
-        PosColumn(text: line.item.name, width: 6),
+        PosColumn(text: name, width: 6),
         PosColumn(
           text: '${line.quantity}',
           width: 2,
@@ -229,29 +345,44 @@ class ThermalPrinterService {
           styles: const PosStyles(align: PosAlign.right),
         ),
       ]);
+      for (final a in line.addons) {
+        bytes += generator.text('   + $a');
+      }
+      if (line.note != null && line.note!.isNotEmpty) {
+        bytes += generator.text('   (${line.note})');
+      }
     }
 
     bytes += generator.hr();
-    bytes += generator.row([
-      PosColumn(
-        text: 'Subtotal',
-        width: 8,
-        styles: const PosStyles(bold: true),
-      ),
-      PosColumn(
-        text: _currencyFormat.format(subTotal),
-        width: 4,
-        styles: const PosStyles(align: PosAlign.right, bold: true),
-      ),
-    ]);
-    bytes += generator.row([
-      PosColumn(text: 'Taxes (GST)', width: 8),
-      PosColumn(
-        text: _currencyFormat.format(taxAmount),
-        width: 4,
-        styles: const PosStyles(align: PosAlign.right),
-      ),
-    ]);
+    bytes += _amountRow(generator, 'Subtotal', bill.subTotal, bold: true);
+    if (bill.discount > 0) {
+      final label = bill.discountName == null || bill.discountName!.isEmpty
+          ? 'Discount'
+          : 'Discount (${bill.discountName})';
+      bytes += _amountRow(generator, label, -bill.discount);
+    }
+    if (bill.containerCharge > 0) {
+      bytes += _amountRow(generator, 'Container Charge', bill.containerCharge);
+    }
+    if (bill.areaCharge > 0) {
+      bytes += _amountRow(
+        generator,
+        bill.areaChargeLabel == null || bill.areaChargeLabel!.isEmpty
+            ? 'AC / Area Charge'
+            : 'AC / Area Charge (${bill.areaChargeLabel})',
+        bill.areaCharge,
+      );
+    }
+    if (bill.taxBreakdown.isNotEmpty) {
+      for (final t in bill.taxBreakdown) {
+        bytes += _amountRow(generator, t.key, t.value);
+      }
+    } else if (bill.taxTotal > 0) {
+      bytes += _amountRow(generator, 'Tax', bill.taxTotal);
+    }
+    if (bill.roundOff != 0) {
+      bytes += _amountRow(generator, 'Round Off', bill.roundOff);
+    }
     bytes += generator.hr();
 
     bytes += generator.row([
@@ -261,7 +392,7 @@ class ThermalPrinterService {
         styles: const PosStyles(bold: true, height: PosTextSize.size2),
       ),
       PosColumn(
-        text: _currencyFormat.format(grandTotal),
+        text: _currencyFormat.format(bill.grandTotal),
         width: 5,
         styles: const PosStyles(
           bold: true,
@@ -273,12 +404,23 @@ class ThermalPrinterService {
 
     bytes += generator.hr();
     bytes += generator.text(
-      'Thank You! Please Visit Again',
+      bill.footer ?? 'THANKS FOR VISITING US',
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.feed(2);
     bytes += generator.cut();
 
     return bytes;
+  }
+
+  List<int> _amountRow(Generator g, String label, double amount, {bool bold = false}) {
+    return g.row([
+      PosColumn(text: label, width: 8, styles: PosStyles(bold: bold)),
+      PosColumn(
+        text: _currencyFormat.format(amount),
+        width: 4,
+        styles: PosStyles(align: PosAlign.right, bold: bold),
+      ),
+    ]);
   }
 }

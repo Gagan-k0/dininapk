@@ -36,6 +36,7 @@ class ApiConfig {
   static String getCategories = '/restaurant/category/all';
   static String getActiveCategories =
       '/restaurant/category/active-all?searchName=';
+  static String getActiveCategoriesPath = '/restaurant/category/active-all';
   static String getAllMenu = '/restaurant/menu/all';
   static String getMenuByCategory = '/restaurant/menu/by-category-itemin'; // ?categoryId=&searchItemIn=dinein&searchName=
   static String viewMenuById = '/restaurant/menu/getmenu'; // + /{menuId}
@@ -59,14 +60,18 @@ class ApiConfig {
   /// Live dine-in kitchen / print status (PENDING→KOT, then KOT_PRINT).
   static String setCartStatus = '/restaurant/cart/setcartstatus';
   static String kotPrintView =
-      '/restaurant/cart/viewmenu'; // ?tableId=&status=kot
+      '/restaurant/cart/viewmenu'; // ?tableId=&status=kot|all|reprint
+  /// Cart header + restaurant doc for the printed bill.
+  static String billView = '/restaurant/cart/vieworder-save'; // ?tableId=
+  /// Cancel (not delete) a KOT'd line — keeps the row with cancel_status=1.
+  static String cancelCartMenu = '/restaurant/cart/cancelmenu';
   static String settleBill = '/restaurant/cart/setcarttobill';
   static String setCartDiscount = '/restaurant/cart/setcartdiscount';
   static String removeCartDiscount = '/restaurant/cart/removecartdiscount';
   /// Backend spelling is "avaliable" (not "available").
   static String availableDiscounts = '/restaurant/discount/avaliable';
   static String getLiveCarts = '/restaurant/cart/listallcarts';
-  static String getReservations = '/restaurant/reservation/all';
+  static String getReservations = '/restaurant/reservation/all'; // ?accepted_status=
   /// Staff accept/reject first QR dine-in order awaiting approval.
   static String qrApproval = '/restaurant/cart/qr-approval';
 
