@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
-import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/thermal_printer_service.dart';
 
@@ -102,10 +101,15 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               leading: const Icon(Icons.restaurant, color: Color(0xFF10B981)),
               title: const Text('Food Categories & Menu'),
               onTap: () {
+                // Real POS is table → /food-categories; do not open legacy /pos.
+                tableProv.setSelectedTab(0);
+                final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(context);
-                final posProv = Provider.of<PosProvider>(context, listen: false);
-                posProv.loadMenuData();
-                Navigator.pushNamed(context, '/pos');
+                messenger.showSnackBar(
+                  const SnackBar(
+                    content: Text('Open a table from the floor to take orders'),
+                  ),
+                );
               },
             ),
             const Divider(),
@@ -132,6 +136,34 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       ),
       body: Column(
         children: [
+          if (auth.isDemoMode)
+            Material(
+              color: const Color(0xFFFEF3C7),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Color(0xFF92400E), size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Demo mode — UI only. Tables/KOT/print need a real restaurant login (not superadmin).',
+                        style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        await auth.logout();
+                        if (context.mounted) {
+                          Navigator.of(context).pushReplacementNamed('/login');
+                        }
+                      },
+                      child: const Text('Exit', style: TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
@@ -220,9 +252,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     onPressed: () async {
                       final auth = Provider.of<AuthProvider>(context, listen: false);
                       await auth.logout();
-                      if (context.mounted) {
-                        Navigator.pushReplacementNamed(context, '/login');
-                      }
+                      if (!mounted) return;
+                      Navigator.pushReplacementNamed(context, '/login');
                     },
                   ),
                 ],
@@ -409,13 +440,254 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
+  String? _cartIdForTable(DineInTable table) {
+    final cart = table.cartDetails;
+    if (cart == null) return null;
+    final id = cart['_id']?.toString() ??
+        cart['cart_id']?.toString() ??
+        cart['cartId']?.toString();
+    if (id == null || id.isEmpty) return null;
+    return id;
+  }
+
+  Future<void> _showShiftTableDialog(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable source,
+  ) async {
+    final cartId = _cartIdForTable(source);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final blankSameArea = tableProv.tables
+        .where((t) => t.isAvailable && t.id != source.id && t.areaId == source.areaId)
+        .toList();
+    final blankOthers = tableProv.tables
+        .where((t) => t.isAvailable && t.id != source.id && t.areaId != source.areaId)
+        .toList();
+    final targets = [...blankSameArea, ...blankOthers];
+
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No blank tables available to shift to'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    String? selectedId = targets.first.id;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              title: Text('Shift Table ${source.tableNumber}'),
+              content: SizedBox(
+                width: 320,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Move this order to a blank table:',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+                    ),
+                    const SizedBox(height: 12),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: targets.length,
+                        itemBuilder: (_, i) {
+                          final t = targets[i];
+                          final sameArea = t.areaId == source.areaId;
+                          final selected = selectedId == t.id;
+                          return ListTile(
+                            dense: true,
+                            selected: selected,
+                            selectedTileColor: const Color(0xFFF97316).withValues(alpha: 0.08),
+                            leading: Icon(
+                              selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                              color: const Color(0xFFF97316),
+                              size: 20,
+                            ),
+                            title: Text(
+                              'Table ${t.tableNumber}',
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                            ),
+                            subtitle: Text(
+                              sameArea ? 'Same area' : 'Other area',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: sameArea ? const Color(0xFF16A34A) : const Color(0xFF64748B),
+                              ),
+                            ),
+                            onTap: () => setDialogState(() => selectedId = t.id),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedId == null ? null : () => Navigator.pop(ctx, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF97316),
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Shift'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (confirmed != true || selectedId == null || !context.mounted) return;
+
+    final ok = await tableProv.shiftTable(cartId: cartId, newTableId: selectedId!);
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Table shifted successfully'
+              : (tableProv.errorMessage ?? 'Failed to shift table'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+  }
+
+  Future<void> _acceptQrOrder(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final cartId = _cartIdForTable(table);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'ACCEPT');
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Order accepted — sent to kitchen'
+              : (tableProv.errorMessage ?? 'Failed to accept QR order'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+
+    if (!ok) return;
+
+    Navigator.pushNamed(
+      context,
+      '/food-categories',
+      arguments: {
+        'tableId': table.id,
+        'areaId': table.areaId,
+      },
+    );
+  }
+
+  Future<void> _rejectQrOrder(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final cartId = _cartIdForTable(table);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Reject Table ${table.tableNumber}?'),
+        content: const Text(
+          'This deletes the QR order and frees the table. The diner must re-order.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Reject order'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !context.mounted) return;
+
+    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'REJECT');
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Order rejected — table freed'
+              : (tableProv.errorMessage ?? 'Failed to reject QR order'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+  }
+
   Widget _buildTableCard(BuildContext context, TableProvider tableProv, DineInTable table) {
     Color cardBg = Colors.white;
     Color borderCol = const Color(0xFFE2E8F0);
     String statusText = 'AVAILABLE';
     Color badgeColor = const Color(0xFF64748B);
 
-    if (table.isKot) {
+    if (table.isPending) {
+      cardBg = const Color(0xFFF3E8FF); // soft purple
+      borderCol = const Color(0xFFF59E0B); // amber border
+      statusText = 'PENDING';
+      badgeColor = const Color(0xFF7C3AED); // purple badge
+    } else if (table.isKot) {
       cardBg = const Color(0xFFFEF3C7);
       borderCol = const Color(0xFFFCD34D);
       statusText = 'KOT RUNNING';
@@ -429,9 +701,20 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     final covers = table.cartDetails?['covers'] ?? 4;
     final timeMins = table.cartDetails?['time_mins'] ?? '';
+    final cartId = _cartIdForTable(table);
+    final canShift = table.isOccupied && !table.isPending && cartId != null;
 
     return InkWell(
       onTap: () {
+        if (table.isPending) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Accept the QR order first to open POS'),
+              backgroundColor: Color(0xFF7C3AED),
+            ),
+          );
+          return;
+        }
         Navigator.pushNamed(
           context,
           '/food-categories',
@@ -441,6 +724,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           },
         );
       },
+      onLongPress: canShift
+          ? () => _showShiftTableDialog(context, tableProv, table)
+          : null,
       child: Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
@@ -484,7 +770,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ] else
               const Text('Tap to Order', style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8))),
 
-            // Quick Action Buttons on Cards (Eye, Printer, Release)
+            // Quick Action Buttons on Cards (Accept/Reject, Shift, Printer, Release)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -499,9 +785,39 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: badgeColor),
                   ),
                 ),
-                if (table.isOccupied)
+                if (table.isPending && cartId != null)
                   Row(
                     children: [
+                      IconButton(
+                        icon: const Icon(Icons.check, size: 16, color: Color(0xFF16A34A)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        tooltip: 'Accept QR order',
+                        onPressed: () => _acceptQrOrder(context, tableProv, table),
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 16, color: Color(0xFFDC2626)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        tooltip: 'Reject QR order',
+                        onPressed: () => _rejectQrOrder(context, tableProv, table),
+                      ),
+                    ],
+                  )
+                else if (table.isOccupied)
+                  Row(
+                    children: [
+                      if (canShift) ...[
+                        IconButton(
+                          icon: const Icon(Icons.swap_horiz, size: 16, color: Color(0xFFF97316)),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: 'Shift Table',
+                          onPressed: () => _showShiftTableDialog(context, tableProv, table),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       IconButton(
                         icon: const Icon(Icons.print, size: 16, color: Color(0xFF2563EB)),
                         padding: EdgeInsets.zero,
@@ -510,19 +826,36 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         onPressed: () async {
                           final auth = Provider.of<AuthProvider>(context, listen: false);
                           final printerService = ThermalPrinterService();
-                          await printerService.generateBillBytes(
-                            table: table,
-                            items: [],
-                            subTotal: table.totalPrice,
-                            taxAmount: table.totalPrice * 0.05,
-                            grandTotal: table.totalPrice * 1.05,
-                            restaurantName: auth.restaurantName,
-                            paperSize: '80mm',
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Bill sent to printer!'), backgroundColor: Colors.blue),
+                          try {
+                            final bytes = await printerService.generateBillBytes(
+                              table: table,
+                              items: const [],
+                              subTotal: table.totalPrice,
+                              taxAmount: 0,
+                              grandTotal: table.totalPrice,
+                              restaurantName: auth.restaurantName,
+                              paperSize: '80mm',
                             );
+                            await printerService.printBytes(bytes);
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Bill sent to printer'),
+                                  backgroundColor: Color(0xFF2563EB),
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    e.toString().replaceAll('Exception: ', ''),
+                                  ),
+                                  backgroundColor: const Color(0xFFEF4444),
+                                ),
+                              );
+                            }
                           }
                         },
                       ),
@@ -622,6 +955,53 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
+  /// Safe nested map get — `table_id` is often a bare ObjectId string from the API.
+  dynamic _mapGet(dynamic value, String key) =>
+      value is Map ? value[key] : null;
+
+  double _asDouble(dynamic value, [double fallback = 0]) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  String _liveOrderTableLabel(Map<String, dynamic> order, TableProvider prov) {
+    final fromNested = _mapGet(order['table_id'], 'table_number') ??
+        _mapGet(order['table_id'], 'table_no');
+    if (fromNested != null && fromNested.toString().isNotEmpty) {
+      return fromNested.toString();
+    }
+    final direct = order['table_number'] ?? order['table_no'];
+    if (direct != null && direct.toString().isNotEmpty) {
+      return direct.toString();
+    }
+    final tableId = order['table_id'] is Map
+        ? (_mapGet(order['table_id'], '_id') ?? _mapGet(order['table_id'], 'id'))
+            ?.toString()
+        : order['table_id']?.toString();
+    if (tableId != null && tableId.isNotEmpty) {
+      for (final t in prov.tables) {
+        if (t.id == tableId) return t.tableNumber;
+      }
+    }
+    return '—';
+  }
+
+  Color _statusColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'PENDING':
+        return const Color(0xFFD97706);
+      case 'KOT':
+      case 'KOT_PRINT':
+        return const Color(0xFF2563EB);
+      case 'PRINTED':
+        return const Color(0xFF7C3AED);
+      case 'RUNNING':
+        return const Color(0xFF059669);
+      default:
+        return const Color(0xFF64748B);
+    }
+  }
+
   // --- TAB 2: LIVE ORDERS ---
   Widget _buildLiveOrdersView(TableProvider prov) {
     if (prov.liveOrders.isEmpty) {
@@ -631,7 +1011,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           children: [
             Icon(Icons.receipt_long, size: 48, color: Color(0xFFCBD5E1)),
             SizedBox(height: 12),
-            Text('No Live Active Dine-In Orders', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.bold)),
+            Text(
+              'No Live Active Dine-In Orders',
+              style: TextStyle(
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ],
         ),
       );
@@ -642,9 +1028,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       itemCount: prov.liveOrders.length,
       itemBuilder: (context, index) {
         final order = prov.liveOrders[index];
-        final orderId = order['_id'] ?? order['id'] ?? 'ORD-#${index + 100}';
-        final tableNo = order['table_id']?['table_number'] ?? order['table_number'] ?? '${(index % 25) + 1}';
-        final total = (order['grand_total'] ?? order['total_price'] ?? ((index + 1) * 150.0)).toDouble();
+        final orderId =
+            (order['_id'] ?? order['id'] ?? 'ORD-${index + 1}').toString();
+        final tableNo = _liveOrderTableLabel(order, prov);
+        final total = _asDouble(
+          order['grand_total'] ?? order['total_price'] ?? order['menu_total'],
+        );
+        final status =
+            (order['table_status'] ?? 'ACTIVE').toString().toUpperCase();
+        final guest = order['customer_name']?.toString();
+        final statusColor = _statusColor(status);
 
         return Card(
           margin: const EdgeInsets.only(bottom: 10),
@@ -661,30 +1054,64 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFEF3C7),
+                    color: statusColor.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.flash_on, color: Color(0xFFD97706)),
+                  child: Icon(Icons.flash_on, color: statusColor),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Table $tableNo', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                      Text('ID: $orderId', style: const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+                      Text(
+                        'Table $tableNo',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                      ),
+                      Text(
+                        guest != null && guest.isNotEmpty
+                            ? '$guest · ${orderId.length > 8 ? orderId.substring(orderId.length - 8) : orderId}'
+                            : 'Cart …${orderId.length > 8 ? orderId.substring(orderId.length - 8) : orderId}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
                     ],
                   ),
                 ),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Text('₹${total.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFFF97316))),
+                    Text(
+                      '₹${total.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 15,
+                        color: Color(0xFFF97316),
+                      ),
+                    ),
                     const SizedBox(height: 4),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(color: const Color(0xFFDBEAFE), borderRadius: BorderRadius.circular(4)),
-                      child: const Text('ACTIVE KOT', style: TextStyle(fontSize: 10, color: Color(0xFF2563EB), fontWeight: FontWeight.bold)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        status,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ],
                 ),

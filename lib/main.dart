@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import 'providers/auth_provider.dart';
 import 'providers/table_provider.dart';
@@ -36,13 +35,15 @@ class FatfoxDineInApp extends StatelessWidget {
             theme: ThemeData(
               useMaterial3: true,
               colorSchemeSeed: const Color(0xFFF97316),
-              textTheme: GoogleFonts.interTextTheme(Theme.of(context).textTheme),
+              // System fonts only — google_fonts downloads from fonts.gstatic.com
+              // and throws on tablets with no DNS / blocked Google domains.
               scaffoldBackgroundColor: const Color(0xFFF8FAFC),
             ),
             initialRoute: auth.isLoggedIn ? '/tables' : '/login',
             routes: {
               '/login': (context) => const LoginScreen(),
               '/tables': (context) => const DineInTableScreen(),
+              // Legacy route kept registered; real waiter POS is /food-categories (open a table from the floor).
               '/pos': (context) => const PosOrderingScreen(),
               '/food-categories': (context) => const FoodCategoriesScreen(),
               '/settings/printer': (context) => const PrinterSettingsScreen(),

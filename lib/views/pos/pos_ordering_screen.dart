@@ -235,19 +235,36 @@ class PosOrderingScreen extends StatelessWidget {
                                     : () async {
                                         final printerService = ThermalPrinterService();
                                         final paperConfig = pos.printerSettings['paper_size']?.toString() ?? '80mm';
-                                        await printerService.generateBillBytes(
-                                          table: table,
-                                          items: pos.cartLines,
-                                          subTotal: pos.subTotal,
-                                          taxAmount: pos.taxAmount,
-                                          grandTotal: pos.grandTotal,
-                                          restaurantName: pos.printerSettings['header_title']?.toString() ?? auth.restaurantName,
-                                          paperSize: paperConfig,
-                                        );
-                                        if (context.mounted) {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            const SnackBar(content: Text('Receipt sent to Thermal Printer!'), backgroundColor: Colors.blue),
+                                        try {
+                                          final bytes = await printerService.generateBillBytes(
+                                            table: table,
+                                            items: pos.cartLines,
+                                            subTotal: pos.subTotal,
+                                            taxAmount: pos.taxAmount,
+                                            grandTotal: pos.grandTotal,
+                                            restaurantName: pos.printerSettings['header_title']?.toString() ?? auth.restaurantName,
+                                            paperSize: paperConfig,
                                           );
+                                          await printerService.printBytes(bytes);
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(
+                                                content: Text('Receipt sent to thermal printer'),
+                                                backgroundColor: Color(0xFF2563EB),
+                                              ),
+                                            );
+                                          }
+                                        } catch (e) {
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                content: Text(
+                                                  e.toString().replaceAll('Exception: ', ''),
+                                                ),
+                                                backgroundColor: const Color(0xFFEF4444),
+                                              ),
+                                            );
+                                          }
                                         }
                                       },
                               ),

@@ -19,20 +19,23 @@ class ApiConfig {
     return url;
   }
 
-  // Authentication
-  static String login = '/user/login';
+  // Authentication (same endpoints as fatfox-admin-panel)
   static String restaurantLogin = '/restaurant/login';
+  static String staffLogin = '/restaurant/staff-login';
+  static String login = '/user/login'; // not used for waiter POS
 
   // Table Management & Areas — search parameters are required by backend regex match
   static String getAllTables = '/restaurant/table/all?searchNumber=';
-  static String getAreaList = '/restaurant/table/area/all-avaliable?searchName=';
-  static String releaseTable = '/restaurant/cart/deletecart';
-  static String switchTable = '/restaurant/cart/switchtable';
+  static String getAreaList =
+      '/restaurant/table/area/all-avaliable?searchName=';
+  static String releaseTable = '/restaurant/cart/deletecart'; // + /{cartId}
+  static String switchTable = '/restaurant/cart/switchtable'; // + /{cartId}
   static String viewTable = '/restaurant/table/view'; // + /{tableId}
 
   // Menu & Categories
   static String getCategories = '/restaurant/category/all';
-  static String getActiveCategories = '/restaurant/category/active-all?searchName=';
+  static String getActiveCategories =
+      '/restaurant/category/active-all?searchName=';
   static String getAllMenu = '/restaurant/menu/all';
   static String getMenuByCategory = '/restaurant/menu/by-category-itemin'; // ?categoryId=&searchItemIn=dinein&searchName=
   static String viewMenuById = '/restaurant/menu/getmenu'; // + /{menuId}
@@ -41,18 +44,31 @@ class ApiConfig {
   static String getRestaurantView = '/restaurant/view';
 
   // Tax Configuration
-  static String getTaxConfig = '/restaurant/tax/settax'; // ?area_id=&area_type=dinein
+  static String getTaxConfig =
+      '/restaurant/tax/settax'; // ?area_id=&area_type=dinein
 
   // Orders, Cart & KOT
   static String addToCart = '/restaurant/cart/createcart';
-  static String getCartDetails = '/restaurant/cart/listallcartmenus'; // ?tableId=
+  static String getCartDetails =
+      '/restaurant/cart/listallcartmenus'; // ?tableId=
   static String updateCartQty = '/restaurant/cart/updatecartmenuquantity';
-  static String deleteCartMenu = '/restaurant/cart/deletemenu'; // ?cartId=&cartmenuId=&...
+  static String deleteCartMenu =
+      '/restaurant/cart/deletemenu'; // ?cartId=&cartmenuId=&...
+  /// Offline sync only — live KOT must use [setCartStatus], not createorder.
   static String createKot = '/restaurant/cart/createorder';
-  static String kotPrintView = '/restaurant/cart/viewmenu'; // ?tableId=&status=1
+  /// Live dine-in kitchen / print status (PENDING→KOT, then KOT_PRINT).
+  static String setCartStatus = '/restaurant/cart/setcartstatus';
+  static String kotPrintView =
+      '/restaurant/cart/viewmenu'; // ?tableId=&status=kot
   static String settleBill = '/restaurant/cart/setcarttobill';
+  static String setCartDiscount = '/restaurant/cart/setcartdiscount';
+  static String removeCartDiscount = '/restaurant/cart/removecartdiscount';
+  /// Backend spelling is "avaliable" (not "available").
+  static String availableDiscounts = '/restaurant/discount/avaliable';
   static String getLiveCarts = '/restaurant/cart/listallcarts';
   static String getReservations = '/restaurant/reservation/all';
+  /// Staff accept/reject first QR dine-in order awaiting approval.
+  static String qrApproval = '/restaurant/cart/qr-approval';
 
   static Map<String, String> headers(String? token, String? restaurantId) {
     final Map<String, String> h = {
