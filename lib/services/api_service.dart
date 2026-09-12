@@ -17,18 +17,44 @@ class ApiService {
     String? restaurantNo,
   }) async {
     final targetBase = ApiConfig.cleanBaseUrl;
+    final no = restaurantNo?.trim() ?? '';
     debugPrint(
-      '[Fatfox Login] Attempting login with baseUrl: $targetBase, user: $email',
+      '[Fatfox Login] Attempting login with baseUrl: $targetBase, '
+      'user: $email, restaurantNo: ${no.isEmpty ? "(owner)" : no}',
     );
 
-    // 1) Restaurant owner/admin login (same as fatfox-admin-panel)
+    // Match admin: Restaurant No. filled → staff-login ONLY.
+    // Never try owner first when No. is set — dual-identity usernames (e.g. `test`
+    // is owner of 10018 and staff of 10000) would otherwise ignore the No. and
+    // land on the wrong empty restaurant.
+    if (no.isNotEmpty) {
+      return _staffLogin(
+        email: email,
+        password: password,
+        restaurantNo: no,
+        targetBase: targetBase,
+      );
+    }
+
+    return _ownerLogin(
+      email: email,
+      password: password,
+      targetBase: targetBase,
+    );
+  }
+
+  Future<Map<String, dynamic>> _ownerLogin({
+    required String email,
+    required String password,
+    required String targetBase,
+  }) async {
     final restaurantPayload = jsonEncode({
       'username': email,
       'password': password,
     });
     try {
       final restUrl = Uri.parse('$targetBase${ApiConfig.restaurantLogin}');
-      debugPrint('[Fatfox Login] Calling endpoint: $restUrl');
+      debugPrint('[Fatfox Login] Owner endpoint: $restUrl');
       final responseRest = await http
           .post(
             restUrl,
@@ -38,50 +64,44 @@ class ApiService {
           .timeout(const Duration(seconds: 20));
 
       debugPrint(
-        '[Fatfox Login] Response status: ${responseRest.statusCode}, body: ${responseRest.body}',
+        '[Fatfox Login] Owner status: ${responseRest.statusCode}, body: ${responseRest.body}',
       );
       if (responseRest.statusCode == 200) {
         final dataRest = jsonDecode(responseRest.body);
         if (_isSuccessResponse(dataRest)) {
           return dataRest as Map<String, dynamic>;
         }
-        final errMsg = _extractErrorMessage(dataRest);
-        // Invalid credentials → try staff login if restaurant_no provided
-        if (errMsg != null &&
-            (restaurantNo == null || restaurantNo.trim().isEmpty)) {
-          throw Exception(errMsg);
-        }
+        throw Exception(
+          _extractErrorMessage(dataRest) ??
+              'Invalid Credentials. For staff, enter Restaurant No.',
+        );
       }
-    } catch (e) {
-      debugPrint('[Fatfox Login] Restaurant login error: $e');
-      if (restaurantNo == null || restaurantNo.trim().isEmpty) {
-        throw Exception(_friendlyNetworkError(e, targetBase) ?? e.toString().replaceAll('Exception: ', ''));
-      }
-      // Staff path still tries staff-login unless this was clearly a network outage
-      // for the whole device — still try staff; staff catch will surface network too.
-      final net = _friendlyNetworkError(e, targetBase);
-      if (net != null) {
-        // Same DNS failure will hit staff too — fail fast with clear message.
-        throw Exception(net);
-      }
-    }
-
-    // 2) Staff login (needs restaurant_no — same as staff accounts in admin)
-    final no = restaurantNo?.trim() ?? '';
-    if (no.isEmpty) {
       throw Exception(
-        'Invalid Credentials. For staff users, enter Restaurant No. as well.',
+        'Login failed (HTTP ${responseRest.statusCode}). Check username/password.',
+      );
+    } catch (e) {
+      debugPrint('[Fatfox Login] Owner login error: $e');
+      throw Exception(
+        _friendlyNetworkError(e, targetBase) ??
+            e.toString().replaceAll('Exception: ', ''),
       );
     }
+  }
 
+  Future<Map<String, dynamic>> _staffLogin({
+    required String email,
+    required String password,
+    required String restaurantNo,
+    required String targetBase,
+  }) async {
     try {
       final staffUrl = Uri.parse('$targetBase${ApiConfig.staffLogin}');
       final staffPayload = jsonEncode({
-        'restaurant_no': no,
+        'restaurant_no': restaurantNo,
         'username': email,
         'password': password,
       });
-      debugPrint('[Fatfox Login] Staff login: $staffUrl');
+      debugPrint('[Fatfox Login] Staff endpoint: $staffUrl (no=$restaurantNo)');
       final responseStaff = await http
           .post(
             staffUrl,
