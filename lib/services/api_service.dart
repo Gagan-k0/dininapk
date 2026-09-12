@@ -918,6 +918,37 @@ class ApiService {
     }
   }
 
+  /// Accept or reject a QR dine-in order awaiting staff approval.
+  /// Mirrors admin: POST /restaurant/cart/qr-approval { cartId, action }.
+  Future<Map<String, dynamic>> decideQrOrder({
+    required String cartId,
+    required String action, // 'ACCEPT' | 'REJECT'
+  }) async {
+    final token = await _authService.getToken();
+    final restId = await _authService.getRestaurantId();
+    final url = Uri.parse(
+      '${ApiConfig.cleanBaseUrl}${ApiConfig.qrApproval}',
+    );
+
+    final body = {'cartId': cartId, 'action': action};
+
+    debugPrint('[Fatfox API] DecideQrOrder: cart=$cartId action=$action');
+
+    try {
+      final response = await http.post(
+        url,
+        headers: ApiConfig.headers(token, restId),
+        body: jsonEncode(body),
+      );
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[Fatfox API] DecideQrOrder error: $e');
+      return {
+        'status': {'code': 500, 'message': e.toString()},
+      };
+    }
+  }
+
   // ============================================================
   // Printer Settings
   // ============================================================

@@ -147,4 +147,30 @@ class TableProvider with ChangeNotifier {
     notifyListeners();
     return false;
   }
+
+  /// Accept or reject a QR dine-in order waiting for staff approval.
+  Future<bool> decideQrOrder({
+    required String cartId,
+    required String action,
+  }) async {
+    try {
+      final result = await _apiService.decideQrOrder(
+        cartId: cartId,
+        action: action,
+      );
+      final statusCode = result['status']?['code'];
+      final ok = statusCode == 200 || (statusCode == null && result.isNotEmpty);
+      if (ok) {
+        _errorMessage = null;
+        await loadDashboardData();
+        return true;
+      }
+      _errorMessage = result['status']?['message']?.toString() ??
+          'Failed to ${action.toLowerCase()} QR order';
+    } catch (e) {
+      _errorMessage = e.toString().replaceAll('Exception: ', '');
+    }
+    notifyListeners();
+    return false;
+  }
 }

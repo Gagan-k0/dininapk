@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
-import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/thermal_printer_service.dart';
 
@@ -102,10 +101,15 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               leading: const Icon(Icons.restaurant, color: Color(0xFF10B981)),
               title: const Text('Food Categories & Menu'),
               onTap: () {
+                // Real POS is table → /food-categories; do not open legacy /pos.
+                tableProv.setSelectedTab(0);
+                final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(context);
-                final posProv = Provider.of<PosProvider>(context, listen: false);
-                posProv.loadMenuData();
-                Navigator.pushNamed(context, '/pos');
+                messenger.showSnackBar(
+                  const SnackBar(
+                    content: Text('Open a table from the floor to take orders'),
+                  ),
+                );
               },
             ),
             const Divider(),
@@ -574,13 +578,116 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
+  Future<void> _acceptQrOrder(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final cartId = _cartIdForTable(table);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'ACCEPT');
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Order accepted — sent to kitchen'
+              : (tableProv.errorMessage ?? 'Failed to accept QR order'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+
+    if (!ok) return;
+
+    Navigator.pushNamed(
+      context,
+      '/food-categories',
+      arguments: {
+        'tableId': table.id,
+        'areaId': table.areaId,
+      },
+    );
+  }
+
+  Future<void> _rejectQrOrder(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final cartId = _cartIdForTable(table);
+    if (cartId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No active cart on this table'),
+          backgroundColor: Color(0xFFEF4444),
+        ),
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Reject Table ${table.tableNumber}?'),
+        content: const Text(
+          'This deletes the QR order and frees the table. The diner must re-order.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Reject order'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !context.mounted) return;
+
+    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'REJECT');
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? 'Order rejected — table freed'
+              : (tableProv.errorMessage ?? 'Failed to reject QR order'),
+        ),
+        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
+      ),
+    );
+  }
+
   Widget _buildTableCard(BuildContext context, TableProvider tableProv, DineInTable table) {
     Color cardBg = Colors.white;
     Color borderCol = const Color(0xFFE2E8F0);
     String statusText = 'AVAILABLE';
     Color badgeColor = const Color(0xFF64748B);
 
-    if (table.isKot) {
+    if (table.isPending) {
+      cardBg = const Color(0xFFF3E8FF); // soft purple
+      borderCol = const Color(0xFFF59E0B); // amber border
+      statusText = 'PENDING';
+      badgeColor = const Color(0xFF7C3AED); // purple badge
+    } else if (table.isKot) {
       cardBg = const Color(0xFFFEF3C7);
       borderCol = const Color(0xFFFCD34D);
       statusText = 'KOT RUNNING';
@@ -595,10 +702,19 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     final covers = table.cartDetails?['covers'] ?? 4;
     final timeMins = table.cartDetails?['time_mins'] ?? '';
     final cartId = _cartIdForTable(table);
-    final canShift = table.isOccupied && cartId != null;
+    final canShift = table.isOccupied && !table.isPending && cartId != null;
 
     return InkWell(
       onTap: () {
+        if (table.isPending) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Accept the QR order first to open POS'),
+              backgroundColor: Color(0xFF7C3AED),
+            ),
+          );
+          return;
+        }
         Navigator.pushNamed(
           context,
           '/food-categories',
@@ -654,7 +770,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ] else
               const Text('Tap to Order', style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8))),
 
-            // Quick Action Buttons on Cards (Shift, Printer, Release)
+            // Quick Action Buttons on Cards (Accept/Reject, Shift, Printer, Release)
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -669,7 +785,27 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: badgeColor),
                   ),
                 ),
-                if (table.isOccupied)
+                if (table.isPending && cartId != null)
+                  Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.check, size: 16, color: Color(0xFF16A34A)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        tooltip: 'Accept QR order',
+                        onPressed: () => _acceptQrOrder(context, tableProv, table),
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 16, color: Color(0xFFDC2626)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        tooltip: 'Reject QR order',
+                        onPressed: () => _rejectQrOrder(context, tableProv, table),
+                      ),
+                    ],
+                  )
+                else if (table.isOccupied)
                   Row(
                     children: [
                       if (canShift) ...[

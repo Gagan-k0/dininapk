@@ -43,6 +43,7 @@ class FatfoxDineInApp extends StatelessWidget {
             routes: {
               '/login': (context) => const LoginScreen(),
               '/tables': (context) => const DineInTableScreen(),
+              // Legacy route kept registered; real waiter POS is /food-categories (open a table from the floor).
               '/pos': (context) => const PosOrderingScreen(),
               '/food-categories': (context) => const FoodCategoriesScreen(),
               '/settings/printer': (context) => const PrinterSettingsScreen(),

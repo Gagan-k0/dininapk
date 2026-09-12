@@ -17,7 +17,7 @@ class DineInTable {
   final String tableNumber;
   final String areaId;
   final int noOfPeople;
-  final String tableStatus; // 'BLANK', 'KOT', 'KOT_PRINT', 'PRINTED', 'PAID'
+  final String tableStatus; // 'BLANK', 'PENDING', 'KOT', 'KOT_PRINT', 'PRINTED', 'PAID'
   final String status;
   final double totalPrice;
   final int itemCount;
@@ -39,6 +39,7 @@ class DineInTable {
 
   bool get isAvailable => tableStatus == 'BLANK' && cartDetails == null;
   bool get isOccupied => !isAvailable;
+  bool get isPending => tableStatus == 'PENDING';
   bool get isKot => tableStatus == 'KOT' || tableStatus == 'KOT_PRINT';
   bool get isPrinted => tableStatus == 'PRINTED';
 

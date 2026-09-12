@@ -67,6 +67,8 @@ class ApiConfig {
   static String availableDiscounts = '/restaurant/discount/avaliable';
   static String getLiveCarts = '/restaurant/cart/listallcarts';
   static String getReservations = '/restaurant/reservation/all';
+  /// Staff accept/reject first QR dine-in order awaiting approval.
+  static String qrApproval = '/restaurant/cart/qr-approval';
 
   static Map<String, String> headers(String? token, String? restaurantId) {
     final Map<String, String> h = {

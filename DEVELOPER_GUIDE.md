@@ -28,19 +28,21 @@ Tablet must resolve `backend.fatfox.testfox.in` in Chrome before login works (DN
 4. **KOT PRINT** — `setcartstatus(KOT)` → `viewmenu?status=kot` → TCP print → `setcartstatus(KOT_PRINT)` only if print OK.
 5. **SAVE & PRINT** — payment sheet (Cash/Card/UPI) → `setcarttobill` → receipt print.
 
-## Feature status (Phase A)
+## Feature status (Order-taking MVP)
 
 | Feature | Status |
 |---------|--------|
 | Login (restaurant / staff + demo UI bypass) | Done |
 | Table floor + areas | Done |
-| Menu + variants/addons | Done |
+| Menu + variants/addons (open table → `/food-categories`) | Done |
 | Live KOT (`setcartstatus`) + LAN print | Done |
 | Settle + payment method + discount chips | Done |
 | Shift table (long-press / swap icon) | Done |
+| Unify POS (drawer no longer opens legacy `/pos`) | Done |
+| QR PENDING Accept / Reject | Done |
+| Offline drafts + settle outbox | Next (OT-3) |
 | Split bill UI | Deferred |
-| Live-order detail actions | Deferred |
-| Offline dine-in | Deferred |
+| Live-order detail / reservation CRUD | Deferred |
 
 ## Demo login
 
