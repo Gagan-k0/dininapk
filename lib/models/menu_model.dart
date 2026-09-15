@@ -183,9 +183,12 @@ class MenuItem {
   final String? image;
   final List<MenuVariant> variants;
   final List<MenuAddon> addons;
+  final bool customisable;
 
   bool get hasVariants => variants.isNotEmpty;
   bool get hasAddons => addons.isNotEmpty;
+  bool get needsCustomisation =>
+      customisable || hasVariants || hasAddons;
 
   /// Prefer non-empty displayname (empty string must not hide `name`).
   String get label {
@@ -207,6 +210,7 @@ class MenuItem {
     this.image,
     this.variants = const [],
     this.addons = const [],
+    this.customisable = false,
   });
 
   factory MenuItem.fromJson(Map<String, dynamic> json) {
@@ -232,28 +236,43 @@ class MenuItem {
     }
     if (json['addOns'] is List) {
       for (var group in (json['addOns'] as List)) {
-        if (group is Map<String, dynamic>) {
-          final addonId =
-              group['addon_id']?.toString() ?? group['_id']?.toString() ?? '';
-          final values = group['value'];
-          if (values is List) {
-            for (var value in values) {
-              if (value is Map<String, dynamic> && isActive(value['status'])) {
-                addList.add(
-                  MenuAddon.fromJson({
-                    ...value,
-                    'addon_id': addonId,
-                    'name': group['displayname'] ?? group['name'],
-                  }),
-                );
-              }
+        if (group is! Map) continue;
+        final groupMap = Map<String, dynamic>.from(group);
+        // Skip empty $push slots from by-category-itemin aggregation.
+        if (groupMap.isEmpty ||
+            (groupMap['addon_id'] == null &&
+                groupMap['_id'] == null &&
+                groupMap['value'] == null)) {
+          continue;
+        }
+        final addonId =
+            groupMap['addon_id']?.toString() ??
+            groupMap['_id']?.toString() ??
+            '';
+        final values = groupMap['value'];
+        if (values is List) {
+          for (var value in values) {
+            if (value is Map && isActive(value['status'])) {
+              addList.add(
+                MenuAddon.fromJson({
+                  ...Map<String, dynamic>.from(value),
+                  'addon_id': addonId,
+                  'name': groupMap['displayname'] ?? groupMap['name'],
+                }),
+              );
             }
-          } else {
-            addList.add(MenuAddon.fromJson(group));
           }
+        } else if (groupMap['addonvalue_id'] != null ||
+            groupMap['value_id'] != null) {
+          addList.add(MenuAddon.fromJson(groupMap));
         }
       }
     }
+
+    final customisable =
+        json['customisable'] == 1 ||
+        json['customisable'] == '1' ||
+        json['customisable'] == true;
 
     final categoryNames = flattenCategoryNames(json['category']);
     final categoryIds = <String>{
@@ -294,6 +313,7 @@ class MenuItem {
       image: json['image']?.toString(),
       variants: varList,
       addons: addList,
+      customisable: customisable,
     );
   }
 }

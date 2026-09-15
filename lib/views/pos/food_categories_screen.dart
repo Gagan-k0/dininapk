@@ -346,12 +346,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       );
     }
 
-    // Admin compact POS: auto-fill ~150px columns, fixed 70px height, no images.
+    // Admin compact POS: ~150px columns, fixed row height, text-only cards.
     return GridView.builder(
       padding: const EdgeInsets.all(10),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 150,
-        mainAxisExtent: 70,
+        maxCrossAxisExtent: 160,
+        mainAxisExtent: 78,
         crossAxisSpacing: 10,
         mainAxisSpacing: 10,
       ),
@@ -379,8 +379,6 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       leftBar = const Color(0xFFFB8C00);
     }
 
-    final displayName = item.label;
-
     final inCart = pos.cartMenuItems.any((ci) {
       final menuData = ci['menuData'];
       if (menuData is List && menuData.isNotEmpty) {
@@ -390,54 +388,61 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       return false;
     });
 
-    return GestureDetector(
-      onTap: () => _handleItemTap(pos, item),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: double.infinity,
-        height: double.infinity,
-        decoration: BoxDecoration(
-          color: inCart ? const Color(0xFFFFF7ED) : bg,
-          borderRadius: BorderRadius.circular(8),
-          border: Border(
-            top: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
-            right: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
-            bottom: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
-            left: BorderSide(
-              color: inCart ? const Color(0xFFF97316) : leftBar,
-              width: 5,
+    if (inCart) {
+      bg = const Color(0xFFFFF7ED);
+      border = const Color(0xFFFDBA74);
+      leftBar = const Color(0xFFF97316);
+    }
+
+    // Avoid AnimatedContainer+Align — on some tablets the label got zero paint extent.
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: () => _handleItemTap(pos, item),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: double.infinity,
+          height: double.infinity,
+          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border(
+              top: BorderSide(color: border),
+              right: BorderSide(color: border),
+              bottom: BorderSide(color: border),
+              left: BorderSide(color: leftBar, width: 5),
             ),
           ),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        alignment: Alignment.centerLeft,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              displayName,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF1E293B),
-                height: 1.25,
-              ),
-            ),
-            if (item.shortCode != null && item.shortCode!.isNotEmpty)
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
               Text(
-                '[ ${item.shortCode!} ]',
-                maxLines: 1,
+                item.label,
+                maxLines: 2,
+                softWrap: true,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF64748B),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                  height: 1.2,
                 ),
               ),
-          ],
+              if (item.shortCode != null && item.shortCode!.trim().isNotEmpty)
+                Text(
+                  '[ ${item.shortCode!.trim()} ]',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF475569),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -446,12 +451,19 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
     if (pos.isLoading || pos.isBusy) return;
 
-    if (item.hasVariants || item.hasAddons) {
-      await _showItemCustomisationSheet(pos, item);
-      return;
+    var working = item;
+    // Admin opens customisable items via viewMenubyId — list payload often
+    // lacks fully populated variant/addon value arrays.
+    if (item.needsCustomisation) {
+      final enriched = await pos.enrichMenuItem(item);
+      if (enriched != null) working = enriched;
+      if (working.hasVariants || working.hasAddons) {
+        await _showItemCustomisationSheet(pos, working);
+        return;
+      }
     }
 
-    await _addItemAndShowResult(pos, item);
+    await _addItemAndShowResult(pos, working);
   }
 
   Future<void> _addItemAndShowResult(

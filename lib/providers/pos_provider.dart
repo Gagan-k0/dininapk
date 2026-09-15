@@ -202,6 +202,50 @@ class PosProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
+  Future<MenuItem?> enrichMenuItem(MenuItem item) async {
+    if (item.id.isEmpty) return null;
+    try {
+      final raw = await _apiService.getMenuById(item.id);
+      if (raw == null) return null;
+      final enriched = MenuItem.fromJson(raw);
+      // Keep list-derived category names (detail doc may omit nested category).
+      return MenuItem(
+        id: enriched.id.isNotEmpty ? enriched.id : item.id,
+        categoryId: enriched.categoryId.isNotEmpty
+            ? enriched.categoryId
+            : item.categoryId,
+        categoryNames: enriched.categoryNames.isNotEmpty
+            ? enriched.categoryNames
+            : item.categoryNames,
+        categoryIds: enriched.categoryIds.isNotEmpty
+            ? enriched.categoryIds
+            : item.categoryIds,
+        name: enriched.name,
+        displayName: enriched.displayName ?? item.displayName,
+        shortCode: enriched.shortCode ?? item.shortCode,
+        attribute: enriched.attribute,
+        price: enriched.price > 0 ? enriched.price : item.price,
+        image: enriched.image ?? item.image,
+        variants: enriched.variants.isNotEmpty
+            ? enriched.variants
+            : item.variants,
+        addons: enriched.addons.isNotEmpty ? enriched.addons : item.addons,
+        customisable: enriched.customisable || item.customisable,
+      );
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        _sessionExpired = true;
+        _errorMessage = e.message;
+        notifyListeners();
+      }
+      return null;
+    } catch (e) {
+      debugPrint('[Fatfox POS] enrichMenuItem failed: $e');
+      return null;
+    }
+  }
+
   // ============================================================
   // Loading (admin ngOnInit chain)
   // ============================================================
