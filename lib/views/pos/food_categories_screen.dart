@@ -201,7 +201,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       canUndo: _pendingAddDeltas.any((d) => d.lineId.isNotEmpty),
     );
     _scheduleAddBannerDismiss();
-    // Make the cart header banner visible on tablet.
+    // Expand so `_scrollCartToNewest` can reach the list (no-op while collapsed).
     final wide = MediaQuery.sizeOf(context).width >= 720;
     if (wide && _cartCollapsed) _setCartCollapsed(false);
   }
@@ -431,9 +431,6 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                     embedded: true,
                                     scrollController: _cartScrollController,
                                     onToggleCollapsed: _toggleCartCollapsed,
-                                    addBanner: _addBanner,
-                                    onUndoAdds: () => _undoPendingAdds(pos),
-                                    onDismissAddBanner: _clearAddBanner,
                                   ),
                           ),
                         ),
@@ -617,6 +614,29 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 ),
               ),
             ),
+          ),
+          ValueListenableBuilder<_CartAddBannerState?>(
+            valueListenable: _addBanner,
+            builder: (context, state, _) {
+              if (state == null) return const SizedBox.shrink();
+              final width = MediaQuery.sizeOf(context).width;
+              final narrow = width < 600;
+              return Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: width >= 720 ? 220 : 140,
+                  ),
+                  child: CartAddBanner(
+                    message: state.message,
+                    busy: state.busy,
+                    compact: narrow,
+                    onUndo: state.canUndo ? () => _undoPendingAdds(pos) : null,
+                    onDismiss: _clearAddBanner,
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -905,6 +925,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           canUndo: false,
         );
         _scheduleAddBannerDismiss();
+        // Expand so `_scrollCartToNewest` can reach the list (no-op while collapsed).
         final wide = MediaQuery.sizeOf(context).width >= 720;
         if (wide && _cartCollapsed) _setCartCollapsed(false);
       } else {
@@ -1305,9 +1326,6 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           pos: pos,
           embedded: false,
           scrollController: _cartScrollController,
-          addBanner: _addBanner,
-          onUndoAdds: () => _undoPendingAdds(pos),
-          onDismissAddBanner: _clearAddBanner,
         );
       },
     );
@@ -1504,17 +1522,11 @@ class _CartBottomSheet extends StatelessWidget {
   final bool embedded;
   final ScrollController? scrollController;
   final VoidCallback? onToggleCollapsed;
-  final ValueNotifier<_CartAddBannerState?>? addBanner;
-  final VoidCallback? onUndoAdds;
-  final VoidCallback? onDismissAddBanner;
   const _CartBottomSheet({
     required this.pos,
     this.embedded = false,
     this.scrollController,
     this.onToggleCollapsed,
-    this.addBanner,
-    this.onUndoAdds,
-    this.onDismissAddBanner,
   });
 
   @override
@@ -1577,25 +1589,6 @@ class _CartBottomSheet extends StatelessWidget {
               ],
             ),
           );
-
-          final bannerListenable = addBanner;
-          final banner = bannerListenable == null
-              ? const SizedBox.shrink()
-              : ValueListenableBuilder<_CartAddBannerState?>(
-                  valueListenable: bannerListenable,
-                  builder: (context, state, _) {
-                    if (state == null) return const SizedBox.shrink();
-                    return Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-                      child: CartAddBanner(
-                        message: state.message,
-                        busy: state.busy,
-                        onUndo: state.canUndo ? onUndoAdds : null,
-                        onDismiss: onDismissAddBanner,
-                      ),
-                    );
-                  },
-                );
 
           Widget itemList() {
             if (items.isEmpty) {
@@ -1725,7 +1718,6 @@ class _CartBottomSheet extends StatelessWidget {
                   ),
                 ),
               header,
-              banner,
               const Divider(height: 1, color: Color(0xFFE2E8F0)),
               Expanded(child: body),
             ],
