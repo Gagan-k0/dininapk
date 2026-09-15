@@ -346,11 +346,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       );
     }
 
+    // Admin compact POS: auto-fill ~150px columns, fixed 70px height, no images.
     return GridView.builder(
       padding: const EdgeInsets.all(10),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        childAspectRatio: 1.15,
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 150,
+        mainAxisExtent: 70,
         crossAxisSpacing: 10,
         mainAxisSpacing: 10,
       ),
@@ -360,18 +361,26 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final isNonVeg = item.attribute.toUpperCase() == 'NONVEG';
-    final isEgg = item.attribute.toUpperCase() == 'EGG';
+    final attr = item.attribute.toUpperCase().replaceAll('_', '');
+    final isNonVeg = attr == 'NONVEG';
+    final isEgg = attr == 'EGG';
 
-    Color attrColor = const Color(0xFF16A34A); // green default
-    if (isNonVeg) attrColor = const Color(0xFFDC2626);
-    if (isEgg) attrColor = const Color(0xFFD97706);
+    // Admin dine-in compact card colors (.veg-card / .non-veg-card / .egg-card).
+    Color bg = const Color(0xFFF1FFF3);
+    Color border = const Color(0xFF81C784);
+    Color leftBar = const Color(0xFF2E7D32);
+    if (isNonVeg) {
+      bg = const Color(0xFFFFF2F2);
+      border = const Color(0xFFEF9A9A);
+      leftBar = const Color(0xFFC62828);
+    } else if (isEgg) {
+      bg = const Color(0xFFFFF8E1);
+      border = const Color(0xFFFFCC80);
+      leftBar = const Color(0xFFFB8C00);
+    }
 
     final displayName = item.displayName ?? item.name;
-    final hasImage =
-        item.image != null && item.image!.isNotEmpty && item.image != 'null';
 
-    // Check if item is already in cart
     final inCart = pos.cartMenuItems.any((ci) {
       final menuData = ci['menuData'];
       if (menuData is List && menuData.isNotEmpty) {
@@ -386,138 +395,48 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         decoration: BoxDecoration(
-          color: inCart ? const Color(0xFFFFF7ED) : Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: inCart ? const Color(0xFFFDBA74) : const Color(0xFFE2E8F0),
-            width: inCart ? 1.5 : 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
+          color: inCart ? const Color(0xFFFFF7ED) : bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            top: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
+            right: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
+            bottom: BorderSide(color: inCart ? const Color(0xFFFDBA74) : border),
+            left: BorderSide(
+              color: inCart ? const Color(0xFFF97316) : leftBar,
+              width: 5,
             ),
-          ],
+          ),
         ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        alignment: Alignment.centerLeft,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Image or placeholder
-            Expanded(
-              flex: 3,
-              child: Container(
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF8FAFC),
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(13),
-                  ),
-                  image: hasImage
-                      ? DecorationImage(
-                          image: NetworkImage(item.image!),
-                          fit: BoxFit.cover,
-                        )
-                      : null,
-                ),
-                child: hasImage
-                    ? null
-                    : Center(
-                        child: Icon(
-                          Icons.restaurant,
-                          size: 32,
-                          color: Colors.grey.shade300,
-                        ),
-                      ),
-              ),
-            ),
-            // Item details
-            Expanded(
-              flex: 3,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // VEG/NONVEG indicator + name
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          margin: const EdgeInsets.only(top: 2, right: 4),
-                          width: 14,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: attrColor, width: 1.5),
-                            borderRadius: BorderRadius.circular(3),
-                          ),
-                          child: Center(
-                            child: Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: attrColor,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: Text(
-                            displayName,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1E293B),
-                              height: 1.2,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    // Short code + Price
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        if (item.shortCode != null &&
-                            item.shortCode!.isNotEmpty)
-                          Text(
-                            item.shortCode!,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Color(0xFF94A3B8),
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF97316)
-                                .withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '₹${item.price.toStringAsFixed(0)}',
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFFF97316),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+            Flexible(
+              child: Text(
+                displayName,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1E293B),
+                  height: 1.25,
                 ),
               ),
             ),
+            if (item.shortCode != null && item.shortCode!.isNotEmpty)
+              Text(
+                '[ ${item.shortCode!} ]',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF64748B),
+                ),
+              ),
           ],
         ),
       ),
