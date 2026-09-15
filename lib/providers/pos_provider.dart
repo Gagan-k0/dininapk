@@ -68,6 +68,7 @@ class PosProvider with ChangeNotifier {
   String? _selectedCategoryId; // null = 'ALL'; favorites/extra = sentinels
   List<Map<String, dynamic>>? _extraAddonRawGroups; // null = not loaded / failed
   bool _extraAddonsLoading = false;
+  Future<void>? _extraAddonsLoad;
   /// variant_id → display name from GET /restaurant/variant/all (admin join).
   Map<String, String> _variantNameById = {};
   String _searchQuery = '';
@@ -356,24 +357,34 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Load Extra Add-ons groups once (admin AllAvailableAddons).
+  /// Concurrent callers share one in-flight Future so enrich never expands
+  /// against a null cache while Extra-rail load is mid-flight.
   Future<void> ensureExtraAddonsLoaded({bool force = false}) async {
-    if (_extraAddonsLoading) return;
     if (!force && _extraAddonRawGroups != null) return;
-    _extraAddonsLoading = true;
-    notifyListeners();
-    try {
-      _extraAddonRawGroups = await _apiService.getAllAvailableAddons();
-      if (_errorMessage == 'Failed to load extra add-ons') {
-        _errorMessage = null;
-      }
-    } catch (e) {
-      debugPrint('[Fatfox POS] Extra add-ons load failed: $e');
-      _extraAddonRawGroups = null; // allow retry on re-select
-      _errorMessage = 'Failed to load extra add-ons';
-    } finally {
-      _extraAddonsLoading = false;
-      notifyListeners();
+    if (_extraAddonsLoad != null) {
+      await _extraAddonsLoad;
+      if (!force || _extraAddonRawGroups != null) return;
     }
+    final load = () async {
+      _extraAddonsLoading = true;
+      notifyListeners();
+      try {
+        _extraAddonRawGroups = await _apiService.getAllAvailableAddons();
+        if (_errorMessage == 'Failed to load extra add-ons') {
+          _errorMessage = null;
+        }
+      } catch (e) {
+        debugPrint('[Fatfox POS] Extra add-ons load failed: $e');
+        _extraAddonRawGroups = null; // allow retry on re-select
+        _errorMessage = 'Failed to load extra add-ons';
+      } finally {
+        _extraAddonsLoading = false;
+        _extraAddonsLoad = null;
+        notifyListeners();
+      }
+    }();
+    _extraAddonsLoad = load;
+    await load;
   }
 
   void setSearchQuery(String q) {
@@ -392,17 +403,23 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
-  /// getmenu returns `{ variant_id, price }` without names — join `_variantNameById`.
+  /// getmenu returns `{ variant_id, price }` / `{ addon_id }` without names —
+  /// join variant catalog + AllAvailableAddons like admin.
   Future<MenuItem?> enrichMenuItem(MenuItem item) async {
     // Offline the list copy is all there is; don't wait out a timeout.
     if (item.id.isEmpty || !ConnectivityService.instance.isOnline) return null;
     try {
       await _ensureVariantCatalog();
+      await ensureExtraAddonsLoaded();
       final raw = await _apiService.getMenuById(item.id);
       if (raw == null) return null;
       final enriched = MenuItem.fromJson(raw);
       final variants = _joinVariantNames(
         enriched.variants.isNotEmpty ? enriched.variants : item.variants,
+      );
+      final addons = _expandAddonsFromCatalog(
+        raw,
+        enriched.addons.isNotEmpty ? enriched.addons : item.addons,
       );
       // Keep list-derived category names (detail doc may omit nested category).
       return MenuItem(
@@ -423,7 +440,7 @@ class PosProvider with ChangeNotifier {
         price: enriched.price > 0 ? enriched.price : item.price,
         image: enriched.image ?? item.image,
         variants: variants,
-        addons: enriched.addons.isNotEmpty ? enriched.addons : item.addons,
+        addons: addons,
         customisable: enriched.customisable || item.customisable,
         isFavorite: enriched.isFavorite || item.isFavorite,
       );
@@ -438,6 +455,59 @@ class PosProvider with ChangeNotifier {
       debugPrint('[Fatfox POS] enrichMenuItem failed: $e');
       return null;
     }
+  }
+
+  /// Mirror admin `viewMenubyId` + `viewAddons.find(_id === addon.addon_id)`:
+  /// expand getmenu `{addon_id}` stubs into active catalog `value[]` options.
+  List<MenuAddon> _expandAddonsFromCatalog(
+    Map<String, dynamic> raw,
+    List<MenuAddon> alreadyParsed,
+  ) {
+    if (alreadyParsed.any((a) => a.valueName.trim().isNotEmpty)) {
+      return alreadyParsed;
+    }
+    final groups = _extraAddonRawGroups;
+    if (groups == null || groups.isEmpty) return alreadyParsed;
+
+    final catalogById = <String, Map<String, dynamic>>{};
+    for (final g in groups) {
+      final id = g['_id']?.toString() ?? '';
+      if (id.isNotEmpty) catalogById[id] = g;
+    }
+
+    final stubList = raw['addOns'] ?? raw['addons'];
+    if (stubList is! List) return alreadyParsed;
+
+    final out = <MenuAddon>[];
+    for (final entry in stubList) {
+      if (entry is! Map) continue;
+      final addonId = entry['addon_id']?.toString() ?? '';
+      if (addonId.isEmpty) continue;
+      final cat = catalogById[addonId];
+      if (cat == null) continue;
+      final values = cat['value'];
+      if (values is! List) continue;
+      final groupName =
+          (cat['displayname'] ?? cat['name'] ?? cat['title'] ?? '').toString();
+      for (final v in values) {
+        if (v is! Map) continue;
+        final status = v['status'];
+        if (status != 1 && status != '1') continue;
+        final valMap = Map<String, dynamic>.from(v);
+        out.add(
+          MenuAddon.fromJson({
+            ...valMap,
+            'addon_id': addonId,
+            'group_name': groupName,
+            'valuename': valMap['valuename'] ??
+                valMap['value_name'] ??
+                valMap['name'] ??
+                valMap['displayname'],
+          }),
+        );
+      }
+    }
+    return out.isNotEmpty ? out : alreadyParsed;
   }
 
   Future<void> _ensureVariantCatalog() async {
