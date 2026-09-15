@@ -207,7 +207,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final wide = constraints.maxWidth >= 700;
@@ -266,6 +266,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ),
           ),
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
+          const SizedBox(height: 4),
 
           // Dynamic Body based on Sub-Tab selection
           if (tableProv.isRefreshing)
@@ -546,7 +547,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       children: [
         // KPI Summary Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           color: Colors.white,
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -614,10 +615,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ),
         ),
         const Divider(height: 1, color: Color(0xFFE2E8F0)),
+        const SizedBox(height: 4),
 
         // Area Selection Filter Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           color: Colors.white,
           child: SizedBox(
             height: 32,
@@ -675,18 +677,17 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                             builder: (context, gridConstraints) {
                               final w = gridConstraints.maxWidth;
                               // Higher aspect = shorter cards → more rows visible.
-                              // Keep maxExtent ≥200 so badge+actions never overflow.
                               final double maxExtent;
                               final double aspect;
                               if (w < 600) {
                                 maxExtent = 200;
-                                aspect = 1.2;
+                                aspect = 1.4;
                               } else if (w < 900) {
                                 maxExtent = 220;
-                                aspect = 1.25;
+                                aspect = 1.5;
                               } else {
                                 maxExtent = 240;
-                                aspect = 1.3;
+                                aspect = 1.55;
                               }
                               return GridView.builder(
                                 shrinkWrap: true,
@@ -1085,29 +1086,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) {
-    Color cardBg = Colors.white;
-    Color borderCol = const Color(0xFFE2E8F0);
+    // Neutral card + left status stripe (no full pastel wash).
+    Color stripeColor = const Color(0xFF94A3B8);
     String statusText = 'AVAILABLE';
     Color badgeColor = const Color(0xFF64748B);
 
     if (table.isPending) {
-      cardBg = const Color(0xFFF3E8FF); // soft purple
-      borderCol = const Color(0xFFF59E0B); // amber border
+      stripeColor = const Color(0xFF7C3AED);
       statusText = 'PENDING';
-      badgeColor = const Color(0xFF7C3AED); // purple badge
+      badgeColor = const Color(0xFF7C3AED);
     } else if (table.isKot) {
-      cardBg = const Color(0xFFFEF3C7);
-      borderCol = const Color(0xFFFCD34D);
+      stripeColor = const Color(0xFFD97706);
       statusText = 'KOT RUNNING';
       badgeColor = const Color(0xFFD97706);
     } else if (table.isPrinted || table.isPaid) {
-      cardBg = const Color(0xFFEDE9FE);
-      borderCol = const Color(0xFFC4B5FD);
+      stripeColor = const Color(0xFF6D28D9);
       statusText = table.isPaid ? 'PAID' : 'BILL PRINTED';
       badgeColor = const Color(0xFF6D28D9);
     } else if (table.isOccupied) {
-      cardBg = const Color(0xFFDCFCE7);
-      borderCol = const Color(0xFF86EFAC);
+      stripeColor = const Color(0xFF15803D);
       statusText = 'OCCUPIED';
       badgeColor = const Color(0xFF15803D);
     }
@@ -1132,85 +1129,79 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ? () => _showShiftTableDialog(context, tableProv, table)
           : null,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
         decoration: BoxDecoration(
-          color: cardBg,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: borderCol, width: 1.5),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.02),
-              blurRadius: 6,
-              offset: const Offset(0, 1),
-            ),
-          ],
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Flexible(
-                  child: Text(
-                    table.tableNumber,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF0F172A),
-                    ),
-                  ),
-                ),
-                Flexible(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      if (table.isCombined)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.link,
-                            size: 12,
-                            color: Color(0xFF64748B),
-                          ),
+                Container(width: 4, color: stripeColor),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                table.tableNumber,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF0F172A),
+                                ),
+                              ),
+                            ),
+                            Flexible(
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  if (table.isCombined)
+                                    const Padding(
+                                      padding: EdgeInsets.only(right: 4),
+                                      child: Icon(
+                                        Icons.link,
+                                        size: 12,
+                                        color: Color(0xFF64748B),
+                                      ),
+                                    ),
+                                  if (table.isPreBooking)
+                                    const Padding(
+                                      padding: EdgeInsets.only(right: 4),
+                                      child: Icon(
+                                        Icons.event_seat,
+                                        size: 12,
+                                        color: Color(0xFF2563EB),
+                                      ),
+                                    ),
+                                  Flexible(
+                                    child: Text(
+                                      '[${table.noOfPeople} Seats]',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.right,
+                                      style: const TextStyle(
+                                        fontSize: 9,
+                                        color: Color(0xFF64748B),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      if (table.isPreBooking)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.event_seat,
-                            size: 12,
-                            color: Color(0xFF2563EB),
-                          ),
-                        ),
-                      Flexible(
-                        child: Text(
-                          '[${table.noOfPeople} Seats]',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            fontSize: 9,
-                            color: Color(0xFF64748B),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: table.isOccupied
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
+                        const SizedBox(height: 4),
+                        if (table.isOccupied) ...[
                           Text(
                             [
                               ?seated,
@@ -1237,93 +1228,105 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                               color: Color(0xFF0F172A),
                             ),
                           ),
-                        ],
-                      )
-                    : const Text(
-                        'Tap to Order',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF94A3B8),
+                        ] else
+                          const Text(
+                            'Tap to Order',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF94A3B8),
+                            ),
+                          ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5,
+                                    vertical: 1,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: badgeColor.withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(5),
+                                  ),
+                                  child: Text(
+                                    statusText,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 8,
+                                      fontWeight: FontWeight.bold,
+                                      color: badgeColor,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (table.isPending && cartId != null)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _compactIconButton(
+                                    icon: Icons.check,
+                                    color: const Color(0xFF16A34A),
+                                    tooltip: 'Accept QR order',
+                                    onPressed: () => _acceptQrOrder(
+                                      context,
+                                      tableProv,
+                                      table,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  _compactIconButton(
+                                    icon: Icons.close,
+                                    color: const Color(0xFFDC2626),
+                                    tooltip: 'Reject QR order',
+                                    onPressed: () => _rejectQrOrder(
+                                      context,
+                                      tableProv,
+                                      table,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            else if (table.isOccupied)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (canShift) ...[
+                                    _compactIconButton(
+                                      icon: Icons.swap_horiz,
+                                      color: const Color(0xFFF97316),
+                                      tooltip: 'Shift Table',
+                                      onPressed: () => _showShiftTableDialog(
+                                        context,
+                                        tableProv,
+                                        table,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                  ],
+                                  _compactIconButton(
+                                    icon: Icons.open_in_new,
+                                    color: const Color(0xFF16A34A),
+                                    tooltip: 'Open table to print or release',
+                                    onPressed: () =>
+                                        _openPos(context, tableProv, table),
+                                  ),
+                                ],
+                              ),
+                          ],
                         ),
-                      ),
-              ),
-            ),
-            // Quick actions: Accept/Reject (QR), Shift, Open
-            Row(
-              children: [
-                Flexible(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 5,
-                        vertical: 1,
-                      ),
-                      decoration: BoxDecoration(
-                        color: badgeColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(5),
-                      ),
-                      child: Text(
-                        statusText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 8,
-                          fontWeight: FontWeight.bold,
-                          color: badgeColor,
-                        ),
-                      ),
+                      ],
                     ),
                   ),
                 ),
-                if (table.isPending && cartId != null)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _compactIconButton(
-                        icon: Icons.check,
-                        color: const Color(0xFF16A34A),
-                        tooltip: 'Accept QR order',
-                        onPressed: () =>
-                            _acceptQrOrder(context, tableProv, table),
-                      ),
-                      const SizedBox(width: 4),
-                      _compactIconButton(
-                        icon: Icons.close,
-                        color: const Color(0xFFDC2626),
-                        tooltip: 'Reject QR order',
-                        onPressed: () =>
-                            _rejectQrOrder(context, tableProv, table),
-                      ),
-                    ],
-                  )
-                else if (table.isOccupied)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (canShift) ...[
-                        _compactIconButton(
-                          icon: Icons.swap_horiz,
-                          color: const Color(0xFFF97316),
-                          tooltip: 'Shift Table',
-                          onPressed: () =>
-                              _showShiftTableDialog(context, tableProv, table),
-                        ),
-                        const SizedBox(width: 4),
-                      ],
-                      _compactIconButton(
-                        icon: Icons.open_in_new,
-                        color: const Color(0xFF16A34A),
-                        tooltip: 'Open table to print or release',
-                        onPressed: () => _openPos(context, tableProv, table),
-                      ),
-                    ],
-                  ),
               ],
             ),
-          ],
+          ),
         ),
-      ),
     );
   }
 

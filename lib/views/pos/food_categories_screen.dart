@@ -124,6 +124,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     final tableNum = pos.tableNumber.isEmpty ? 'Table' : pos.tableNumber;
     final tableStatus = pos.tableStatus;
     final loadFailed = pos.errorMessage != null && pos.categories.isEmpty && !pos.isLoading;
+    final wideCart = MediaQuery.sizeOf(context).width >= 720;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -182,13 +183,24 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         color: Color(0xFFE2E8F0),
                       ),
                       Expanded(child: _buildMainContent(pos, tableStatus)),
+                      if (wideCart) ...[
+                        const VerticalDivider(
+                          width: 1,
+                          thickness: 1,
+                          color: Color(0xFFE2E8F0),
+                        ),
+                        SizedBox(
+                          width: 340,
+                          child: _CartBottomSheet(pos: pos, embedded: true),
+                        ),
+                      ],
                     ],
                   ),
                 ),
               ],
             ),
-      // Cart FAB showing item count
-      floatingActionButton: pos.cartMenuItems.isNotEmpty
+      // Phone / narrow: cart via bottom sheet. Wide: persistent right panel.
+      floatingActionButton: (!wideCart && pos.cartMenuItems.isNotEmpty)
           ? FloatingActionButton.extended(
               onPressed: () => _showCartBottomSheet(context, pos),
               backgroundColor: const Color(0xFFF97316),
@@ -849,18 +861,19 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _CartBottomSheet(pos: pos),
+      builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
     );
   }
 }
 
 // ============================================================
-// Cart Bottom Sheet
+// Cart panel (bottom sheet on phone, right column on tablet)
 // ============================================================
 
 class _CartBottomSheet extends StatelessWidget {
   final PosProvider pos;
-  const _CartBottomSheet({required this.pos});
+  final bool embedded;
+  const _CartBottomSheet({required this.pos, this.embedded = false});
 
   @override
   Widget build(BuildContext context) {
@@ -871,28 +884,56 @@ class _CartBottomSheet extends StatelessWidget {
           final items = pos.cartMenuItems;
           final cartObj = pos.cartData.isNotEmpty ? pos.cartData[0] : null;
 
+          final list = items.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text(
+                      'Cart is empty — tap menu items to add',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF94A3B8)),
+                    ),
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  itemCount: items.length,
+                  separatorBuilder: (_, index) => const Divider(
+                    height: 1,
+                    color: Color(0xFFF1F5F9),
+                  ),
+                  itemBuilder: (ctx, i) =>
+                      _buildCartItem(ctx, pos, items[i], cartObj),
+                );
+
           return Container(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.75,
-            ),
-            decoration: const BoxDecoration(
+            constraints: embedded
+                ? null
+                : BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.75,
+                  ),
+            decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              borderRadius: embedded
+                  ? BorderRadius.zero
+                  : const BorderRadius.vertical(top: Radius.circular(20)),
             ),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
+              mainAxisSize: embedded ? MainAxisSize.max : MainAxisSize.min,
               children: [
-                // Handle bar
-                Container(
-                  margin: const EdgeInsets.only(top: 10),
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
-                    borderRadius: BorderRadius.circular(2),
+                if (!embedded)
+                  Container(
+                    margin: const EdgeInsets.only(top: 10),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
-                ),
-                // Header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                   child: Row(
@@ -907,7 +948,7 @@ class _CartBottomSheet extends StatelessWidget {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            'Cart (${pos.totalItemCount} items)',
+                            'Cart (${pos.totalItemCount})',
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
@@ -916,7 +957,6 @@ class _CartBottomSheet extends StatelessWidget {
                           ),
                         ],
                       ),
-                      // Table badge
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
@@ -939,34 +979,10 @@ class _CartBottomSheet extends StatelessWidget {
                   ),
                 ),
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
-
-                // Cart items list
-                Flexible(
-                  child: items.isEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.all(32),
-                          child: Text(
-                            'Cart is empty',
-                            style: TextStyle(color: Color(0xFF94A3B8)),
-                          ),
-                        )
-                      : ListView.separated(
-                          shrinkWrap: true,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          itemCount: items.length,
-                          separatorBuilder: (_, index) => const Divider(
-                            height: 1,
-                            color: Color(0xFFF1F5F9),
-                          ),
-                          itemBuilder: (ctx, i) =>
-                              _buildCartItem(ctx, pos, items[i], cartObj),
-                        ),
-                ),
-
-                // Totals + Actions
+                if (embedded)
+                  Expanded(child: list)
+                else
+                  Flexible(child: list),
                 if (items.isNotEmpty) ...[
                   const Divider(height: 1, color: Color(0xFFE2E8F0)),
                   _buildTotals(pos, cartObj),
@@ -1772,8 +1788,8 @@ class _CartBottomSheet extends StatelessWidget {
         behavior: SnackBarBehavior.floating,
       ),
     );
-    if (success && context.mounted) {
-      Navigator.pop(context); // close cart sheet
+    if (success && context.mounted && !embedded) {
+      Navigator.pop(context); // close cart sheet only (not POS when embedded)
     }
   }
 }
