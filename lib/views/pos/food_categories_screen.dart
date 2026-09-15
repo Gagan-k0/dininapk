@@ -655,6 +655,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        // Keyboard shrinks dialog height; scroll title+content so the
+        // two-field Column does not BOTTOM OVERFLOW (admin modal scrolls).
+        scrollable: true,
         title: const Text('+ Custom add-on'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
