@@ -884,7 +884,9 @@ class _CartBottomSheet extends StatelessWidget {
           final items = pos.cartMenuItems;
           final cartObj = pos.cartData.isNotEmpty ? pos.cartData[0] : null;
 
-          final list = items.isEmpty
+          // Scrollable body: when keyboard shrinks height, totals/actions scroll
+          // instead of BOTTOM OVERFLOW. When tall enough, footer stays pinned down.
+          final body = items.isEmpty
               ? const Center(
                   child: Padding(
                     padding: EdgeInsets.all(24),
@@ -895,18 +897,56 @@ class _CartBottomSheet extends StatelessWidget {
                     ),
                   ),
                 )
-              : ListView.separated(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  itemCount: items.length,
-                  separatorBuilder: (_, index) => const Divider(
-                    height: 1,
-                    color: Color(0xFFF1F5F9),
-                  ),
-                  itemBuilder: (ctx, i) =>
-                      _buildCartItem(ctx, pos, items[i], cartObj),
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    return SingleChildScrollView(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                for (var i = 0; i < items.length; i++) ...[
+                                  if (i > 0)
+                                    const Divider(
+                                      height: 1,
+                                      color: Color(0xFFF1F5F9),
+                                    ),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 4,
+                                    ),
+                                    child: _buildCartItem(
+                                      context,
+                                      pos,
+                                      items[i],
+                                      cartObj,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Divider(
+                                  height: 1,
+                                  color: Color(0xFFE2E8F0),
+                                ),
+                                _buildTotals(pos, cartObj),
+                                _buildActionButtons(context, pos),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 );
 
           return Container(
@@ -980,14 +1020,9 @@ class _CartBottomSheet extends StatelessWidget {
                 ),
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
                 if (embedded)
-                  Expanded(child: list)
+                  Expanded(child: body)
                 else
-                  Flexible(child: list),
-                if (items.isNotEmpty) ...[
-                  const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                  _buildTotals(pos, cartObj),
-                  _buildActionButtons(context, pos),
-                ],
+                  Flexible(child: body),
               ],
             ),
           );
