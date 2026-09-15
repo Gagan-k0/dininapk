@@ -211,36 +211,71 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         thickness: 1,
                         color: Color(0xFFE2E8F0),
                       ),
-                      Expanded(child: _buildMainContent(pos, tableStatus)),
+                      // Menu width stays fixed (always reserves 56px peek). Cart
+                      // slides over the menu — no GridView reflow on toggle.
+                      Expanded(
+                        child: ClipRect(
+                          child: Stack(
+                            children: [
+                              _buildMainContent(pos, tableStatus),
+                              if (wideCart)
+                                Positioned(
+                                  right: 0,
+                                  top: 0,
+                                  bottom: 0,
+                                  width: 340,
+                                  child: IgnorePointer(
+                                    ignoring: _cartCollapsed,
+                                    child: AnimatedSlide(
+                                      duration: const Duration(
+                                        milliseconds: 280,
+                                      ),
+                                      curve: Curves.easeOutCubic,
+                                      offset: _cartCollapsed
+                                          ? const Offset(1, 0)
+                                          : Offset.zero,
+                                      child: Material(
+                                        elevation: _cartCollapsed ? 0 : 6,
+                                        color: Colors.white,
+                                        child: DecoratedBox(
+                                          decoration: const BoxDecoration(
+                                            border: Border(
+                                              left: BorderSide(
+                                                color: Color(0xFFE2E8F0),
+                                              ),
+                                            ),
+                                          ),
+                                          child: _CartBottomSheet(
+                                            pos: pos,
+                                            embedded: true,
+                                            onToggleCollapsed: () {
+                                              setState(
+                                                () => _cartCollapsed =
+                                                    !_cartCollapsed,
+                                              );
+                                              PosUiPrefs.saveCartCollapsed(
+                                                _cartCollapsed,
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
                       if (wideCart) ...[
                         const VerticalDivider(
                           width: 1,
                           thickness: 1,
                           color: Color(0xFFE2E8F0),
                         ),
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 220),
-                          curve: Curves.easeOutCubic,
-                          width: _cartCollapsed ? 56 : 340,
-                          // ClipRect — not clipBehavior on Container (Flutter
-                          // requires a decoration when clipBehavior != none).
-                          child: ClipRect(
-                            child: _cartCollapsed
-                                ? _buildCollapsedCartStrip(pos)
-                                : _CartBottomSheet(
-                                    pos: pos,
-                                    embedded: true,
-                                    onToggleCollapsed: () {
-                                      setState(
-                                        () =>
-                                            _cartCollapsed = !_cartCollapsed,
-                                      );
-                                      PosUiPrefs.saveCartCollapsed(
-                                        _cartCollapsed,
-                                      );
-                                    },
-                                  ),
-                          ),
+                        SizedBox(
+                          width: 56,
+                          child: _buildCollapsedCartStrip(pos),
                         ),
                       ],
                     ],
@@ -1352,10 +1387,21 @@ class _CartBottomSheet extends StatelessWidget {
             );
           }
 
-          // Phone sheet: scroll items+footer together (keyboard safety).
           // Embedded tablet: pin totals/actions; only lines scroll.
+          // Phone: sticky when sheet height allows; else scroll-all (5886352).
+          final viewInsets = MediaQuery.viewInsetsOf(context).bottom;
+          final sheetMaxH =
+              (MediaQuery.sizeOf(context).height - viewInsets) * 0.75;
+          // Handle(~14) + header(~52) + dividers + totals/actions overestimate.
+          const phoneChrome = 66.0;
+          const phoneFooterBudget = 320.0;
+          const phoneMinList = 80.0;
+          final phoneCanSticky = !embedded &&
+              items.isNotEmpty &&
+              sheetMaxH >= phoneChrome + phoneFooterBudget + phoneMinList;
+
           final Widget body;
-          if (embedded) {
+          if (embedded || phoneCanSticky) {
             body = Column(
               children: [
                 Expanded(child: itemList()),
@@ -1422,38 +1468,43 @@ class _CartBottomSheet extends StatelessWidget {
             );
           }
 
-          return Container(
-            constraints: embedded
-                ? null
-                : BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.75,
+          final panel = Column(
+            // Phone always gets a tight SizedBox height below → max + Expanded.
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              if (!embedded)
+                Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
                   ),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: embedded
-                  ? BorderRadius.zero
-                  : const BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            child: Column(
-              mainAxisSize: embedded ? MainAxisSize.max : MainAxisSize.min,
-              children: [
-                if (!embedded)
-                  Container(
-                    margin: const EdgeInsets.only(top: 10),
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                header,
-                const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                if (embedded)
-                  Expanded(child: body)
-                else
-                  Flexible(child: body),
-              ],
+                ),
+              header,
+              const Divider(height: 1, color: Color(0xFFE2E8F0)),
+              Expanded(child: body),
+            ],
+          );
+
+          if (embedded) {
+            return DecoratedBox(
+              decoration: const BoxDecoration(color: Colors.white),
+              child: panel,
+            );
+          }
+
+          // Tight height so Expanded(ListView) is bounded; insets shrink
+          // available height inside the 0.75 cap (not padding outside it).
+          return SizedBox(
+            height: sheetMaxH,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: panel,
             ),
           );
         },
