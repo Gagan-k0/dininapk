@@ -7,6 +7,7 @@ import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
 import '../../services/pos_ui_prefs.dart';
 import '../../utils/extra_addons.dart';
+import '../../utils/async_guard.dart';
 import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
@@ -29,6 +30,8 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   Timer? _searchDebounce;
   bool _railCollapsed = false;
   bool _cartCollapsed = false;
+  final _itemTapGuard = AsyncGuard();
+  final _customiseAddGuard = AsyncGuard();
 
   @override
   void initState() {
@@ -607,30 +610,38 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
-    if (pos.isLoading || pos.isBusy) return;
+    await _itemTapGuard.run(() async {
+      if (pos.isLoading || pos.isBusy) return;
 
-    if (item.isCustomAddonTrigger) {
-      await _showCustomExtraDialog(pos);
-      return;
-    }
-    if (item.isExtraAddon) {
-      await _showExtraAmountDialog(pos, item);
-      return;
-    }
-
-    var working = item;
-    // Admin opens customisable items via viewMenubyId — list payload often
-    // lacks fully populated variant/addon value arrays.
-    if (item.needsCustomisation || item.hasVariants || item.hasAddons || item.customisable) {
-      final enriched = await pos.enrichMenuItem(item);
-      if (enriched != null) working = enriched;
-      if (working.hasVariants || working.hasAddons || working.customisable || item.needsCustomisation) {
-        await _showItemCustomisationSheet(pos, working);
+      if (item.isCustomAddonTrigger) {
+        await _showCustomExtraDialog(pos);
         return;
       }
-    }
+      if (item.isExtraAddon) {
+        await _showExtraAmountDialog(pos, item);
+        return;
+      }
 
-    await _addItemAndShowResult(pos, working);
+      var working = item;
+      // Admin opens customisable items via viewMenubyId — list payload often
+      // lacks fully populated variant/addon value arrays.
+      if (item.needsCustomisation ||
+          item.hasVariants ||
+          item.hasAddons ||
+          item.customisable) {
+        final enriched = await pos.enrichMenuItem(item);
+        if (enriched != null) working = enriched;
+        if (working.hasVariants ||
+            working.hasAddons ||
+            working.customisable ||
+            item.needsCustomisation) {
+          await _showItemCustomisationSheet(pos, working);
+          return;
+        }
+      }
+
+      await _addItemAndShowResult(pos, working);
+    });
   }
 
   Future<void> _showExtraAmountDialog(PosProvider pos, MenuItem item) async {
@@ -643,7 +654,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
     if (amount == null || !mounted) return;
     final success = await pos.addExtraItem(name: item.label, price: amount);
-    if (!mounted) return;
+    if (!mounted || success == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -672,7 +683,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       name: result.name,
       price: result.price,
     );
-    if (!mounted) return;
+    if (!mounted || success == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -702,29 +713,28 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       variantId: variantId,
       addons: addons,
     );
-    if (mounted) {
-      if (success) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Added ${item.displayName ?? item.name}'),
-            duration: const Duration(milliseconds: 800),
-            backgroundColor: const Color(0xFF16A34A),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
+    if (!mounted || success == null) return;
+    if (success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Added ${item.displayName ?? item.name}'),
+          duration: const Duration(milliseconds: 800),
+          backgroundColor: const Color(0xFF16A34A),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
           ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(pos.errorMessage ?? 'Failed to add item'),
-            duration: const Duration(seconds: 2),
-            backgroundColor: const Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(pos.errorMessage ?? 'Failed to add item'),
+          duration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     }
   }
 
@@ -987,15 +997,17 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                 setSheetState(() => showVariantError = true);
                                 return;
                               }
-                              Navigator.pop(sheetContext);
-                              await _addItemAndShowResult(
-                                pos,
-                                item,
-                                variantId: selectedVariantId,
-                                addons: selectedAddons.values
-                                    .map((addon) => addon.toCartAddonJson())
-                                    .toList(),
-                              );
+                              await _customiseAddGuard.run(() async {
+                                Navigator.pop(sheetContext);
+                                await _addItemAndShowResult(
+                                  pos,
+                                  item,
+                                  variantId: selectedVariantId,
+                                  addons: selectedAddons.values
+                                      .map((addon) => addon.toCartAddonJson())
+                                      .toList(),
+                                );
+                              });
                             },
                             icon: const Icon(Icons.add_shopping_cart, size: 18),
                             label: const Text('ADD'),
@@ -1125,6 +1137,7 @@ class _ExtraAmountDialog extends StatefulWidget {
 
 class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
   late final TextEditingController _controller;
+  final _submitGuard = AsyncGuard();
 
   @override
   void initState() {
@@ -1139,20 +1152,24 @@ class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
   }
 
   void _submit() {
-    final v = double.tryParse(_controller.text.trim());
-    if (v == null || v <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enter an amount greater than 0'),
-          backgroundColor: Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        ),
-      );
-      return;
-    }
-    Navigator.pop(context, v);
+    _submitGuard.run(() async {
+      final v = double.tryParse(_controller.text.trim());
+      if (v == null || v <= 0) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Enter an amount greater than 0'),
+            backgroundColor: Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
+            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+        );
+        return;
+      }
+      if (!mounted) return;
+      Navigator.pop(context, v);
+    });
   }
 
   @override
@@ -1200,6 +1217,7 @@ class _CustomExtraDialog extends StatefulWidget {
 class _CustomExtraDialogState extends State<_CustomExtraDialog> {
   late final TextEditingController _nameCtrl;
   late final TextEditingController _priceCtrl;
+  final _submitGuard = AsyncGuard();
 
   @override
   void initState() {
@@ -1216,21 +1234,25 @@ class _CustomExtraDialogState extends State<_CustomExtraDialog> {
   }
 
   void _submit() {
-    final name = _nameCtrl.text.trim();
-    final price = double.tryParse(_priceCtrl.text.trim());
-    if (name.isEmpty || price == null || price <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Enter a name and amount greater than 0'),
-          backgroundColor: Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        ),
-      );
-      return;
-    }
-    Navigator.pop(context, (name: name, price: price));
+    _submitGuard.run(() async {
+      final name = _nameCtrl.text.trim();
+      final price = double.tryParse(_priceCtrl.text.trim());
+      if (name.isEmpty || price == null || price <= 0) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Enter a name and amount greater than 0'),
+            backgroundColor: Color(0xFFDC2626),
+            behavior: SnackBarBehavior.floating,
+            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+        );
+        return;
+      }
+      if (!mounted) return;
+      Navigator.pop(context, (name: name, price: price));
+    });
   }
 
   @override
@@ -1732,10 +1754,11 @@ class _CartBottomSheet extends StatelessWidget {
   Future<void> _runCartWrite(
     BuildContext context,
     PosProvider pos,
-    Future<bool> Function() write,
+    Future<bool?> Function() write,
   ) async {
     final ok = await write();
-    if (!ok && context.mounted) {
+    if (ok == null || !context.mounted) return;
+    if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(pos.errorMessage ?? 'Could not update the order'),
@@ -2022,7 +2045,7 @@ class _CartBottomSheet extends StatelessWidget {
                               TextButton(
                                 onPressed: () async {
                                   final ok = await pos.clearDiscount();
-                                  if (ok) {
+                                  if (ok == true) {
                                     setSheetState(
                                       () => selectedDiscountId = null,
                                     );
@@ -2066,7 +2089,7 @@ class _CartBottomSheet extends StatelessWidget {
                                 ),
                                 onSelected: (_) async {
                                   final ok = await pos.applyDiscount(id);
-                                  if (ok) {
+                                  if (ok == true) {
                                     setSheetState(
                                       () => selectedDiscountId = id,
                                     );
@@ -2146,7 +2169,7 @@ class _CartBottomSheet extends StatelessWidget {
     if (confirmed != true || !context.mounted) return;
 
     final success = await pos.settleAndPrintBill(paymentType: paymentType);
-    if (!context.mounted) return;
+    if (!context.mounted || success == null) return;
     if (success) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2184,7 +2207,7 @@ class _CartBottomSheet extends StatelessWidget {
                         ? null
                         : () async {
                             final success = await pos.sendKotOrder();
-                            if (!context.mounted) return;
+                            if (!context.mounted || success == null) return;
                             final printNote = pos.printError;
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
@@ -2225,8 +2248,9 @@ class _CartBottomSheet extends StatelessWidget {
                     onPressed: busy
                         ? null
                         : () async {
-                            final err = await pos.printBill();
-                            if (!context.mounted) return;
+                            final result = await pos.printBill();
+                            if (!context.mounted || result.skipped) return;
+                            final err = result.error;
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
                                 content: Text(
@@ -2336,7 +2360,7 @@ class _CartBottomSheet extends StatelessWidget {
     if (ok != true || !context.mounted) return;
 
     final success = await pos.discardCart();
-    if (!context.mounted) return;
+    if (!context.mounted || success == null) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
