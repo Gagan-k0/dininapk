@@ -883,6 +883,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     const Divider(height: 1, color: Color(0xFFE2E8F0)),
                     Flexible(
                       child: ListView(
+                        // Modal sheet owns a PrimaryScrollController; default
+                        // primary:true asserts _dependents.isEmpty on ADD/pop
+                        // (same class of bug as Custom add-on / decbf4d).
+                        primary: false,
                         shrinkWrap: true,
                         padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                         children: [
