@@ -265,68 +265,31 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         thickness: 1,
                         color: Color(0xFFE2E8F0),
                       ),
-                      // Menu width stays fixed (always reserves 56px peek). Cart
-                      // slides over the menu — no GridView reflow on toggle.
-                      Expanded(
-                        child: ClipRect(
-                          child: Stack(
-                            children: [
-                              _buildMainContent(pos, tableStatus),
-                              if (wideCart)
-                                Positioned(
-                                  right: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  width: 340,
-                                  child: IgnorePointer(
-                                    ignoring: _cartCollapsed,
-                                    child: AnimatedSlide(
-                                      duration: const Duration(
-                                        milliseconds: _cartSlideMs,
-                                      ),
-                                      curve: Curves.easeInOutCubic,
-                                      offset: _cartCollapsed
-                                          ? const Offset(1, 0)
-                                          : Offset.zero,
-                                      child: Material(
-                                        elevation: _cartCollapsed ? 0 : 6,
-                                        color: Colors.white,
-                                        child: DecoratedBox(
-                                          decoration: const BoxDecoration(
-                                            border: Border(
-                                              left: BorderSide(
-                                                color: Color(0xFFE2E8F0),
-                                              ),
-                                            ),
-                                          ),
-                                          child: _CartBottomSheet(
-                                            pos: pos,
-                                            embedded: true,
-                                            scrollController:
-                                                _cartScrollController,
-                                            onToggleCollapsed:
-                                                _toggleCartCollapsed,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
+                      // Sibling panel (not Stack overlay): grid shrinks so tiles
+                      // wrap instead of sitting under the cart.
+                      Expanded(child: _buildMainContent(pos, tableStatus)),
+                      if (wideCart)
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: _cartSlideMs),
+                          curve: Curves.easeInOutCubic,
+                          width: _cartCollapsed ? 56 : 340,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            border: Border(
+                              left: BorderSide(color: Color(0xFFE2E8F0)),
+                            ),
+                          ),
+                          child: ClipRect(
+                            child: _cartCollapsed
+                                ? _buildCollapsedCartStrip(pos)
+                                : _CartBottomSheet(
+                                    pos: pos,
+                                    embedded: true,
+                                    scrollController: _cartScrollController,
+                                    onToggleCollapsed: _toggleCartCollapsed,
                                   ),
-                                ),
-                            ],
                           ),
                         ),
-                      ),
-                      if (wideCart) ...[
-                        const VerticalDivider(
-                          width: 1,
-                          thickness: 1,
-                          color: Color(0xFFE2E8F0),
-                        ),
-                        SizedBox(
-                          width: 56,
-                          child: _buildCollapsedCartStrip(pos),
-                        ),
-                      ],
                     ],
                   ),
                 ),
