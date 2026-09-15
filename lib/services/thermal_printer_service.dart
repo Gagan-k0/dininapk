@@ -2,18 +2,34 @@ import 'dart:io';
 
 import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:intl/intl.dart';
+import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/table_model.dart';
 import '../models/cart_model.dart';
+
+/// Lowest/highest values `Socket.connect` accepts — anything outside this
+/// throws `ArgumentError: Invalid argument(s): Invalid port <n>` instead of
+/// a friendly message, so every reader/writer of a printer port must clamp
+/// to this range first.
+const int kMinTcpPort = 1;
+const int kMaxTcpPort = 65535;
+
+bool isValidTcpPort(int? port) =>
+    port != null && port >= kMinTcpPort && port <= kMaxTcpPort;
 
 /// Device-local receipt preferences (admin keeps receipt customization in
 /// localStorage per till too — it is not server data a waiter can read).
 class ReceiptPrefs {
   final String header;
   final PaperSize paperSize;
+
+  /// `LAN` or `Bluetooth` (USB reserved / not wired yet).
+  final String printerType;
   final String printerIp;
   final int printerPort;
+  final String bluetoothMac;
+  final String bluetoothName;
 
   /// Admin POS rule: allow "Release" at KOT_PRINT/RUNNING without a printed bill.
   final bool kotEnableReleaseTable;
@@ -21,21 +37,34 @@ class ReceiptPrefs {
   const ReceiptPrefs({
     required this.header,
     required this.paperSize,
+    required this.printerType,
     required this.printerIp,
     required this.printerPort,
+    required this.bluetoothMac,
+    required this.bluetoothName,
     required this.kotEnableReleaseTable,
   });
 
-  bool get printerConfigured => printerIp.isNotEmpty;
+  bool get isBluetooth =>
+      printerType.toLowerCase() == 'bluetooth';
+
+  bool get printerConfigured =>
+      isBluetooth ? bluetoothMac.isNotEmpty : printerIp.isNotEmpty;
 
   static Future<ReceiptPrefs> load() async {
     final prefs = await SharedPreferences.getInstance();
     final paper = prefs.getString('printer_paper') ?? '80mm';
+    final savedPort = int.tryParse(prefs.getString('printer_port') ?? '9100');
     return ReceiptPrefs(
       header: prefs.getString('printer_header') ?? 'THE FAT FOX',
       paperSize: paper.contains('58') ? PaperSize.mm58 : PaperSize.mm80,
+      printerType: prefs.getString('printer_type') ?? 'LAN',
       printerIp: prefs.getString('printer_ip') ?? '',
-      printerPort: int.tryParse(prefs.getString('printer_port') ?? '9100') ?? 9100,
+      // A bad value already saved (pre-dating validation, or hand-edited)
+      // must not throw ArgumentError on every future print — fall back.
+      printerPort: isValidTcpPort(savedPort) ? savedPort! : 9100,
+      bluetoothMac: prefs.getString('printer_bt_mac') ?? '',
+      bluetoothName: prefs.getString('printer_bt_name') ?? '',
       kotEnableReleaseTable: prefs.getBool('kot_enable_release_table') ?? false,
     );
   }
@@ -110,11 +139,32 @@ class BillPrintData {
 }
 
 class ThermalPrinterService {
+  // Raw ESC/POS printers render Latin-1 (ISO-8859-1) only — ₹ (U+20B9) isn't
+  // in that range and the generator throws ArgumentError on it, unlike the
+  // admin panel's receipts, which are printed as HTML/CSS and can show any
+  // Unicode glyph. "Rs." is the standard ASCII-safe stand-in on thermal bills.
   final NumberFormat _currencyFormat = NumberFormat.currency(
-    symbol: '₹',
+    symbol: 'Rs. ',
     decimalDigits: 2,
   );
-  final DateFormat _dateFormat = DateFormat('dd MMM yyyy • h:mm a');
+  final DateFormat _dateFormat = DateFormat('dd MMM yyyy - h:mm a');
+
+  /// Routes free text (menu items, customer names, the user-typed header)
+  /// through Latin-1 safety: normalizes common punctuation the printer's
+  /// font can't render, then replaces anything still outside Latin-1 so a
+  /// stray character (an emoji in an item name, a pasted "₹") can never
+  /// throw ArgumentError deep inside the ESC/POS generator.
+  String _safe(String s) {
+    final normalized = s
+        .replaceAll('₹', 'Rs. ')
+        .replaceAll(RegExp('[‒-―]'), '-') // figure/en/em dash
+        .replaceAll('•', '-') // •
+        .replaceAll(RegExp('[‘’]'), "'")
+        .replaceAll(RegExp('[“”]'), '"');
+    return String.fromCharCodes(
+      normalized.codeUnits.map((c) => c <= 0xFF ? c : 0x3F), // '?'
+    );
+  }
 
   Future<void> sendRaw(
     List<int> bytes, {
@@ -134,13 +184,37 @@ class ThermalPrinterService {
     }
   }
 
-  /// Direct LAN ESC/POS over TCP :9100 (silent — no system dialog).
+  /// Silent ESC/POS — LAN TCP :9100 or Bluetooth SPP. Never uses PrintManager.
   Future<void> printBytes(List<int> bytes) async {
     final prefs = await ReceiptPrefs.load();
     if (!prefs.printerConfigured) {
-      throw Exception('Printer IP not configured. Open Printer Settings.');
+      throw Exception(
+        prefs.isBluetooth
+            ? 'Bluetooth printer not selected. Open Printer Settings → Scan.'
+            : 'Printer IP not configured. Open Printer Settings → Scan or enter IP.',
+      );
+    }
+    if (prefs.isBluetooth) {
+      await _sendBluetooth(bytes, mac: prefs.bluetoothMac);
+      return;
     }
     await sendRaw(bytes, host: prefs.printerIp, port: prefs.printerPort);
+  }
+
+  Future<void> _sendBluetooth(List<int> bytes, {required String mac}) async {
+    final connected = await PrintBluetoothThermal.connectionStatus;
+    if (!connected) {
+      final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+      if (!ok) {
+        throw Exception(
+          'Could not connect to Bluetooth printer $mac. Pair it in Android Settings first.',
+        );
+      }
+    }
+    final written = await PrintBluetoothThermal.writeBytes(bytes);
+    if (!written) {
+      throw Exception('Bluetooth printer failed to accept the print job.');
+    }
   }
 
   Future<List<int>> generateTestBytes({
@@ -152,7 +226,7 @@ class ThermalPrinterService {
     List<int> bytes = [];
 
     bytes += generator.text(
-      header,
+      _safe(header),
       styles: const PosStyles(
         align: PosAlign.center,
         height: PosTextSize.size2,
@@ -165,7 +239,7 @@ class ThermalPrinterService {
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.text(
-      'LAN thermal printer ready',
+      'Silent thermal printer ready',
       styles: const PosStyles(align: PosAlign.center),
     );
     bytes += generator.text(
@@ -174,7 +248,7 @@ class ThermalPrinterService {
     );
     bytes += generator.hr();
     bytes += generator.text(
-      'Silent print via TCP port 9100',
+      'ESC/POS - no system print dialog',
       styles: const PosStyles(align: PosAlign.center),
     );
     bytes += generator.feed(2);
@@ -206,19 +280,19 @@ class ThermalPrinterService {
     );
 
     bytes += generator.text(
-      restaurantName,
+      _safe(restaurantName),
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     if (department != null && department.isNotEmpty) {
       bytes += generator.text(
-        'DEPARTMENT : $department',
+        _safe('DEPARTMENT : $department'),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       );
     }
 
     bytes += generator.feed(1);
     bytes += generator.text(
-      'Table #: ${table.tableNumber}',
+      _safe('Table #: ${table.tableNumber}'),
       styles: const PosStyles(bold: true, height: PosTextSize.size2),
     );
     bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
@@ -245,7 +319,7 @@ class ThermalPrinterService {
       }
       if (line.cancelStatus == 1) name += ' (cancelled)';
       bytes += generator.row([
-        PosColumn(text: name, width: 9),
+        PosColumn(text: _safe(name), width: 9),
         PosColumn(
           text: 'x${line.quantity}',
           width: 3,
@@ -253,10 +327,11 @@ class ThermalPrinterService {
         ),
       ]);
       for (final addon in line.selectedAddons) {
-        bytes += generator.text('   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}');
+        bytes += generator.text(_safe(
+            '   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}'));
       }
       if (line.instruction != null && line.instruction!.isNotEmpty) {
-        bytes += generator.text('   Note: ${line.instruction}');
+        bytes += generator.text(_safe('   Note: ${line.instruction}'));
       }
     }
 
@@ -279,7 +354,7 @@ class ThermalPrinterService {
     List<int> bytes = [];
 
     bytes += generator.text(
-      bill.restaurantName,
+      _safe(bill.restaurantName),
       styles: const PosStyles(
         align: PosAlign.center,
         height: PosTextSize.size2,
@@ -288,28 +363,28 @@ class ThermalPrinterService {
       ),
     );
     if (bill.address != null && bill.address!.isNotEmpty) {
-      bytes += generator.text(bill.address!, styles: const PosStyles(align: PosAlign.center));
+      bytes += generator.text(_safe(bill.address!), styles: const PosStyles(align: PosAlign.center));
     }
     if (bill.phone != null && bill.phone!.isNotEmpty) {
-      bytes += generator.text('Ph: ${bill.phone}', styles: const PosStyles(align: PosAlign.center));
+      bytes += generator.text(_safe('Ph: ${bill.phone}'), styles: const PosStyles(align: PosAlign.center));
     }
     if (bill.gstin != null && bill.gstin!.isNotEmpty) {
-      bytes += generator.text('GSTIN: ${bill.gstin}', styles: const PosStyles(align: PosAlign.center));
+      bytes += generator.text(_safe('GSTIN: ${bill.gstin}'), styles: const PosStyles(align: PosAlign.center));
     }
     bytes += generator.hr();
     bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
     bytes += generator.text(
-      'Table No : ${bill.tableNumber}',
+      _safe('Table No : ${bill.tableNumber}'),
       styles: const PosStyles(bold: true),
     );
     if (bill.paymentMode != null && bill.paymentMode!.isNotEmpty) {
-      bytes += generator.text('Payment : ${bill.paymentMode}');
+      bytes += generator.text(_safe('Payment : ${bill.paymentMode}'));
     }
     if (bill.customerName != null && bill.customerName!.isNotEmpty) {
-      bytes += generator.text('Name : ${bill.customerName}');
+      bytes += generator.text(_safe('Name : ${bill.customerName}'));
     }
     if (bill.customerMobile != null && bill.customerMobile!.isNotEmpty) {
-      bytes += generator.text('Mobile : ${bill.customerMobile}');
+      bytes += generator.text(_safe('Mobile : ${bill.customerMobile}'));
     }
     bytes += generator.hr();
 
@@ -333,7 +408,7 @@ class ThermalPrinterService {
       if (line.variant != null && line.variant!.isNotEmpty) name += ' (${line.variant})';
       if (line.cancelled) name += ' (cancelled)';
       bytes += generator.row([
-        PosColumn(text: name, width: 6),
+        PosColumn(text: _safe(name), width: 6),
         PosColumn(
           text: '${line.quantity}',
           width: 2,
@@ -346,10 +421,10 @@ class ThermalPrinterService {
         ),
       ]);
       for (final a in line.addons) {
-        bytes += generator.text('   + $a');
+        bytes += generator.text(_safe('   + $a'));
       }
       if (line.note != null && line.note!.isNotEmpty) {
-        bytes += generator.text('   (${line.note})');
+        bytes += generator.text(_safe('   (${line.note})'));
       }
     }
 
@@ -404,7 +479,7 @@ class ThermalPrinterService {
 
     bytes += generator.hr();
     bytes += generator.text(
-      bill.footer ?? 'THANKS FOR VISITING US',
+      _safe(bill.footer ?? 'THANKS FOR VISITING US'),
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.feed(2);
@@ -415,7 +490,7 @@ class ThermalPrinterService {
 
   List<int> _amountRow(Generator g, String label, double amount, {bool bold = false}) {
     return g.row([
-      PosColumn(text: label, width: 8, styles: PosStyles(bold: bold)),
+      PosColumn(text: _safe(label), width: 8, styles: PosStyles(bold: bold)),
       PosColumn(
         text: _currencyFormat.format(amount),
         width: 4,

@@ -2,12 +2,14 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:dineinapk/models/menu_model.dart';
 import 'package:dineinapk/utils/menu_filter.dart';
+import 'package:dineinapk/utils/menu_page_window.dart';
 
 MenuItem _item({
   required String name,
   String? displayName,
   String categoryId = '',
   List<String> categoryNames = const [],
+  String? shortCode,
 }) {
   return MenuItem(
     id: name,
@@ -15,6 +17,7 @@ MenuItem _item({
     categoryNames: categoryNames,
     name: name,
     displayName: displayName,
+    shortCode: shortCode,
     attribute: 'VEG',
     price: 10,
   );
@@ -71,9 +74,52 @@ void main() {
       expect(out.map((e) => e.name), ['Draft']);
     });
 
-    test('search filters by name', () {
+    test('search filters by label and short code', () {
       final out = filterMenuItems(items: items, search: 'bir');
       expect(out.map((e) => e.name), ['Biryani']);
+      final byCode = filterMenuItems(
+        items: [
+          _item(name: 'X', displayName: 'Hidden', shortCode: 'MD1'),
+        ],
+        search: 'md1',
+      );
+      expect(byCode.single.shortCode, 'MD1');
+    });
+
+    test('alreadySorted skips reordering', () {
+      final unsorted = [
+        _item(name: 'Zed'),
+        _item(name: 'Able'),
+      ];
+      final kept = filterMenuItems(items: unsorted, alreadySorted: true);
+      expect(kept.map((e) => e.name), ['Zed', 'Able']);
+    });
+  });
+
+  group('menuFilterFingerprint', () {
+    test('changes with category or search', () {
+      expect(menuFilterFingerprint(), '|');
+      expect(
+        menuFilterFingerprint(categoryId: 'c1', search: ' Soup '),
+        'c1|soup',
+      );
+      expect(
+        menuFilterFingerprint(categoryId: 'c1'),
+        isNot(menuFilterFingerprint(categoryId: 'c2')),
+      );
+    });
+  });
+
+  group('MenuPageWindow', () {
+    test('resets only when fingerprint changes', () {
+      final page = MenuPageWindow<int>(pageSize: 3);
+      expect(page.reset([1, 2, 3, 4], fingerprint: 'a'), isTrue);
+      expect(page.visible, [1, 2, 3]);
+      expect(page.reset([1, 2, 3, 4], fingerprint: 'a'), isFalse);
+      expect(page.loadMore(), isTrue);
+      expect(page.visible, [1, 2, 3, 4]);
+      expect(page.reset([9, 8, 7], fingerprint: 'b'), isTrue);
+      expect(page.visible, [9, 8, 7]);
     });
   });
 
@@ -106,6 +152,31 @@ void main() {
       expect(item.categoryNames, ['Starters']);
       expect(item.categoryId, '');
       expect(item.label, 'Soup');
+    });
+
+    test('label prefers displayname then name; never blank', () {
+      expect(
+        MenuItem.fromJson({
+          '_id': 'm2',
+          'name': '',
+          'displayname': '  Masala Dosa  ',
+          'attribute': 'VEG',
+          'price': 80,
+        }).label,
+        'Masala Dosa',
+      );
+      expect(
+        MenuItem.fromJson({
+          '_id': 'm3',
+          'name': '   ',
+          'displayname': '',
+          'shortCode': 'MD1',
+          'attribute': 'VEG',
+          'price': 80,
+        }).label,
+        'MD1',
+      );
+      expect(_item(name: '', displayName: '').label, 'Item');
     });
   });
 }

@@ -1,8 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
+import '../../services/pos_ui_prefs.dart';
+import '../../utils/menu_filter.dart';
+import '../../utils/menu_page_window.dart';
+import '../../widgets/pos_category_rail.dart';
+import '../../widgets/pos_menu_tile.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
   const FoodCategoriesScreen({super.key});
@@ -15,6 +22,23 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   bool _initialized = false;
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _cartScrollController = ScrollController();
+  final ScrollController _menuScrollController = ScrollController();
+  final MenuPageWindow<MenuItem> _menuPage =
+      MenuPageWindow<MenuItem>(pageSize: 80);
+  Timer? _searchDebounce;
+  bool _railCollapsed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _menuScrollController.addListener(_onMenuScroll);
+    _searchController.addListener(() {
+      if (mounted) setState(() {});
+    });
+    PosUiPrefs.loadRailCollapsed().then((v) {
+      if (mounted) setState(() => _railCollapsed = v);
+    });
+  }
 
   @override
   void didChangeDependencies() {
@@ -37,9 +61,61 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
+    _menuScrollController.removeListener(_onMenuScroll);
+    _menuScrollController.dispose();
     _searchController.dispose();
     _cartScrollController.dispose();
     super.dispose();
+  }
+
+  void _onMenuScroll() {
+    if (!_menuScrollController.hasClients) return;
+    final position = _menuScrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 120) {
+      if (_menuPage.loadMore()) {
+        setState(() {});
+      }
+    }
+  }
+
+  void _onSearchChanged(PosProvider pos, String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (!mounted) return;
+      pos.setSearchQuery(value);
+    });
+  }
+
+  void _clearAllFilters(PosProvider pos) {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    pos.clearFilters();
+    _menuPage.reset(
+      pos.filteredMenuItems,
+      fingerprint: menuFilterFingerprint(),
+    );
+    if (_menuScrollController.hasClients) {
+      _menuScrollController.jumpTo(0);
+    }
+    setState(() {});
+  }
+
+  void _syncMenuPage(PosProvider pos) {
+    final items = pos.filteredMenuItems;
+    final fp = menuFilterFingerprint(
+      categoryId: pos.selectedCategoryId,
+      search: pos.searchQuery,
+    );
+    final previousFp = _menuPage.fingerprint;
+    final changed = _menuPage.reset(items, fingerprint: fp);
+    if (changed && previousFp != fp) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_menuScrollController.hasClients) {
+          _menuScrollController.jumpTo(0);
+        }
+      });
+    }
   }
 
   @override
@@ -73,11 +149,42 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 if (pos.isBusy)
                   const LinearProgressIndicator(minHeight: 2, color: Color(0xFFF97316)),
                 if (pos.cartError != null) _buildCartErrorBar(pos),
-                // Category horizontal scroll bar
-                _buildCategoryBar(pos),
-                const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                // Menu grid + Cart panel
-                Expanded(child: _buildMainContent(pos, tableStatus)),
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      PosCategoryRail(
+                        categories: pos.categories,
+                        selectedCategoryId: pos.selectedCategoryId,
+                        collapsed: _railCollapsed,
+                        onToggleCollapsed: () {
+                          setState(() => _railCollapsed = !_railCollapsed);
+                          PosUiPrefs.saveRailCollapsed(_railCollapsed);
+                        },
+                        onSelect: (id) {
+                          pos.selectCategory(id);
+                          _menuPage.reset(
+                            pos.filteredMenuItems,
+                            fingerprint: menuFilterFingerprint(
+                              categoryId: id,
+                              search: pos.searchQuery,
+                            ),
+                          );
+                          if (_menuScrollController.hasClients) {
+                            _menuScrollController.jumpTo(0);
+                          }
+                          setState(() {});
+                        },
+                      ),
+                      const VerticalDivider(
+                        width: 1,
+                        thickness: 1,
+                        color: Color(0xFFE2E8F0),
+                      ),
+                      Expanded(child: _buildMainContent(pos, tableStatus)),
+                    ],
+                  ),
+                ),
               ],
             ),
       // Cart FAB showing item count
@@ -209,7 +316,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               height: 38,
               child: TextField(
                 controller: _searchController,
-                onChanged: (v) => pos.setSearchQuery(v),
+                onChanged: (v) => _onSearchChanged(pos, v),
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
                   hintText: 'Search food or short code...',
@@ -224,10 +331,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                   ),
                   suffixIcon: _searchController.text.isNotEmpty
                       ? IconButton(
+                          tooltip: 'Clear search',
                           icon: const Icon(Icons.close, size: 16),
                           onPressed: () {
+                            _searchDebounce?.cancel();
                             _searchController.clear();
                             pos.setSearchQuery('');
+                            setState(() {});
                           },
                         )
                       : null,
@@ -261,190 +371,128 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
   }
 
-  Widget _buildCategoryBar(PosProvider pos) {
-    return Container(
-      height: 50,
-      color: Colors.white,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        itemCount: pos.categories.length + 1, // +1 for "ALL"
-        itemBuilder: (context, index) {
-          final isAll = index == 0;
-          final isSelected = isAll
-              ? pos.selectedCategoryId == null
-              : pos.selectedCategoryId == pos.categories[index - 1].id;
-          final label = isAll ? 'ALL' : pos.categories[index - 1].categoryName;
-
-          return Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: GestureDetector(
-              onTap: () {
-                if (isAll) {
-                  pos.selectCategory(null);
-                } else {
-                  pos.selectCategory(pos.categories[index - 1].id);
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? const Color(0xFFF97316)
-                      : const Color(0xFFF1F5F9),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: isSelected
-                        ? const Color(0xFFF97316)
-                        : const Color(0xFFE2E8F0),
-                    width: 1,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    label.toUpperCase(),
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: isSelected
-                          ? Colors.white
-                          : const Color(0xFF475569),
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   Widget _buildMainContent(PosProvider pos, String tableStatus) {
-    final items = pos.filteredMenuItems;
+    _syncMenuPage(pos);
+    final items = _menuPage.visible;
+    final total = _menuPage.totalCount;
+    final cartIds = pos.cartMenuIds;
 
-    if (items.isEmpty && !pos.isLoading) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.restaurant_menu, size: 64, color: Colors.grey.shade300),
-            const SizedBox(height: 12),
-            Text(
-              pos.searchQuery.isNotEmpty
-                  ? 'No items found for "${pos.searchQuery}"'
-                  : 'No menu items available',
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Admin compact POS: ~150px columns, fixed row height, text-only cards.
-    return GridView.builder(
-      padding: const EdgeInsets.all(10),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 160,
-        mainAxisExtent: 78,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-      ),
-      itemCount: items.length,
-      itemBuilder: (context, index) => _buildFoodCard(pos, items[index]),
-    );
-  }
-
-  Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final attr = item.attribute.toUpperCase().replaceAll('_', '');
-    final isNonVeg = attr == 'NONVEG';
-    final isEgg = attr == 'EGG';
-
-    // Admin dine-in compact card colors (.veg-card / .non-veg-card / .egg-card).
-    Color bg = const Color(0xFFF1FFF3);
-    Color border = const Color(0xFF81C784);
-    Color leftBar = const Color(0xFF2E7D32);
-    if (isNonVeg) {
-      bg = const Color(0xFFFFF2F2);
-      border = const Color(0xFFEF9A9A);
-      leftBar = const Color(0xFFC62828);
-    } else if (isEgg) {
-      bg = const Color(0xFFFFF8E1);
-      border = const Color(0xFFFFCC80);
-      leftBar = const Color(0xFFFB8C00);
-    }
-
-    final inCart = pos.cartMenuItems.any((ci) {
-      final menuData = ci['menuData'];
-      if (menuData is List && menuData.isNotEmpty) {
-        return menuData[0]['_id']?.toString() == item.id ||
-            menuData[0]['name']?.toString() == item.name;
-      }
-      return false;
-    });
-
-    if (inCart) {
-      bg = const Color(0xFFFFF7ED);
-      border = const Color(0xFFFDBA74);
-      leftBar = const Color(0xFFF97316);
-    }
-
-    // Avoid AnimatedContainer+Align — on some tablets the label got zero paint extent.
-    return Material(
-      color: bg,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        onTap: () => _handleItemTap(pos, item),
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border(
-              top: BorderSide(color: border),
-              right: BorderSide(color: border),
-              bottom: BorderSide(color: border),
-              left: BorderSide(color: leftBar, width: 5),
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisAlignment: MainAxisAlignment.center,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: Row(
             children: [
-              Text(
-                item.label,
-                maxLines: 2,
-                softWrap: true,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black87,
-                  height: 1.2,
-                ),
-              ),
-              if (item.shortCode != null && item.shortCode!.trim().isNotEmpty)
-                Text(
-                  '[ ${item.shortCode!.trim()} ]',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              Expanded(
+                child: Text(
+                  total == 0
+                      ? '0 ITEMS'
+                      : '${_menuPage.visibleCount} OF $total ITEMS',
                   style: const TextStyle(
                     fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF475569),
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ),
+              if (pos.hasActiveFilters)
+                TextButton.icon(
+                  onPressed: () => _clearAllFilters(pos),
+                  icon: const Icon(Icons.filter_alt_off, size: 16),
+                  label: const Text(
+                    'Clear filters',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFEA580C),
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
                   ),
                 ),
             ],
           ),
         ),
-      ),
+        Expanded(
+          child: items.isEmpty && !pos.isLoading
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.restaurant_menu,
+                        size: 64,
+                        color: Colors.grey.shade300,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        pos.searchQuery.isNotEmpty
+                            ? 'No items found for "${pos.searchQuery}"'
+                            : 'No menu items available',
+                        style: TextStyle(
+                          color: Colors.grey.shade500,
+                          fontSize: 14,
+                        ),
+                      ),
+                      if (pos.hasActiveFilters) ...[
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: () => _clearAllFilters(pos),
+                          child: const Text('Clear filters'),
+                        ),
+                      ],
+                    ],
+                  ),
+                )
+              : GridView.builder(
+                  controller: _menuScrollController,
+                  physics: const BouncingScrollPhysics(
+                    parent: AlwaysScrollableScrollPhysics(),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(10, 6, 10, 88),
+                  gridDelegate:
+                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 160,
+                    mainAxisExtent: 70,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                  ),
+                  itemCount: items.length + (_menuPage.hasMore ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    if (index >= items.length) {
+                      return const Center(
+                        child: SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFFF97316),
+                          ),
+                        ),
+                      );
+                    }
+                    return _buildFoodCard(pos, items[index], cartIds);
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFoodCard(
+    PosProvider pos,
+    MenuItem item,
+    Set<String> cartIds,
+  ) {
+    final inCart = cartIds.contains(item.id);
+
+    return PosMenuTile(
+      label: item.label,
+      shortCode: item.shortCode,
+      attribute: item.attribute,
+      inCart: inCart,
+      onTap: () => _handleItemTap(pos, item),
     );
   }
 
@@ -568,7 +616,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              item.displayName ?? item.name,
+                              item.label,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
@@ -1548,84 +1596,133 @@ class _CartBottomSheet extends StatelessWidget {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy || !pos.hasUnprintedItems
-                    ? null
-                    : () async {
-                        final success = await pos.sendKotOrder();
-                        if (!context.mounted) return;
-                        final printNote = pos.printError;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              !success
-                                  ? (pos.errorMessage ?? 'KOT failed')
-                                  : printNote == null
-                                      ? 'KOT sent + printed ✓'
-                                      : 'KOT sent to kitchen. Print failed: $printNote',
-                            ),
-                            backgroundColor: !success
-                                ? const Color(0xFFDC2626)
-                                : printNote == null
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy || !pos.hasUnprintedItems
+                        ? null
+                        : () async {
+                            final success = await pos.sendKotOrder();
+                            if (!context.mounted) return;
+                            final printNote = pos.printError;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  !success
+                                      ? (pos.errorMessage ?? 'KOT failed')
+                                      : printNote == null
+                                          ? 'KOT sent + printed ✓'
+                                          : 'KOT sent to kitchen. Print failed: $printNote',
+                                ),
+                                backgroundColor: !success
+                                    ? const Color(0xFFDC2626)
+                                    : printNote == null
+                                        ? const Color(0xFF16A34A)
+                                        : const Color(0xFFD97706),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.soup_kitchen, size: 18),
+                    label: const Text(
+                      'KOT',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2563EB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            final err = await pos.printBill();
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  err == null ? 'Bill printed ✓' : err,
+                                ),
+                                backgroundColor: err == null
                                     ? const Color(0xFF16A34A)
-                                    : const Color(0xFFD97706),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      },
-                icon: const Icon(Icons.soup_kitchen, size: 18),
-                label: const Text('KOT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF2563EB),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    : const Color(0xFFDC2626),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.print, size: 18),
+                    label: Text(
+                      pos.tableStatus == 'PRINTED' ? 'REPRINT' : 'BILL',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7C3AED),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () => _showSettlePaymentSheet(context, pos),
+                    icon: const Icon(Icons.check_circle_outline, size: 18),
+                    label: const Text(
+                      'SETTLE',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFF97316),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: busy || pos.cartMenuItems.isEmpty
                     ? null
-                    : () async {
-                        final err = await pos.printBill();
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(err == null ? 'Bill printed ✓' : err),
-                            backgroundColor: err == null ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      },
-                icon: const Icon(Icons.print, size: 18),
-                label: Text(
-                  pos.tableStatus == 'PRINTED' ? 'REPRINT' : 'BILL',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    : () => _confirmDiscardCart(context, pos),
+                icon: const Icon(Icons.delete_sweep, size: 18),
+                label: const Text(
+                  'DISCARD CART',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF7C3AED),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy ? null : () => _showSettlePaymentSheet(context, pos),
-                icon: const Icon(Icons.check_circle_outline, size: 18),
-                label: const Text('SETTLE', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFF97316),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFDC2626),
+                  side: const BorderSide(color: Color(0xFFFECACA)),
+                  backgroundColor: const Color(0xFFFEF2F2),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ),
@@ -1633,5 +1730,50 @@ class _CartBottomSheet extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDiscardCart(
+    BuildContext context,
+    PosProvider pos,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard this cart?'),
+        content: const Text(
+          'All items in this table cart will be removed. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFDC2626)),
+            child: const Text('Discard Cart'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+
+    final success = await pos.discardCart();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Cart discarded'
+              : (pos.errorMessage ?? 'Discard failed'),
+        ),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    if (success && context.mounted) {
+      Navigator.pop(context); // close cart sheet
+    }
   }
 }
