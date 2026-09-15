@@ -222,21 +222,25 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           duration: const Duration(milliseconds: 220),
                           curve: Curves.easeOutCubic,
                           width: _cartCollapsed ? 56 : 340,
-                          clipBehavior: Clip.hardEdge,
-                          child: _cartCollapsed
-                              ? _buildCollapsedCartStrip(pos)
-                              : _CartBottomSheet(
-                                  pos: pos,
-                                  embedded: true,
-                                  onToggleCollapsed: () {
-                                    setState(
-                                      () => _cartCollapsed = !_cartCollapsed,
-                                    );
-                                    PosUiPrefs.saveCartCollapsed(
-                                      _cartCollapsed,
-                                    );
-                                  },
-                                ),
+                          // ClipRect — not clipBehavior on Container (Flutter
+                          // requires a decoration when clipBehavior != none).
+                          child: ClipRect(
+                            child: _cartCollapsed
+                                ? _buildCollapsedCartStrip(pos)
+                                : _CartBottomSheet(
+                                    pos: pos,
+                                    embedded: true,
+                                    onToggleCollapsed: () {
+                                      setState(
+                                        () =>
+                                            _cartCollapsed = !_cartCollapsed,
+                                      );
+                                      PosUiPrefs.saveCartCollapsed(
+                                        _cartCollapsed,
+                                      );
+                                    },
+                                  ),
+                          ),
                         ),
                       ],
                     ],
