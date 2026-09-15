@@ -775,7 +775,7 @@ class PosProvider with ChangeNotifier {
           paperSize: prefs.paperSize,
           customization: customization,
         );
-        await _printer.printBytes(bytes);
+        await _printer.printBytes(bytes, role: PrinterRole.kot);
         printOk = true;
       } catch (e) {
         printError = friendlyError(e);

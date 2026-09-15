@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/table_model.dart';
 import '../models/cart_model.dart';
 import '../models/receipt_customization.dart';
+import 'usb_printer.dart';
 
 /// Lowest/highest values `Socket.connect` accepts — anything outside this
 /// throws `ArgumentError: Invalid argument(s): Invalid port <n>` instead of
@@ -31,18 +32,79 @@ class _Col {
   const _Col(this.text, this.width, {this.align = _ColAlign.left});
 }
 
+/// Which job a print is for — admin assigns a KOT printer and a Bill printer
+/// separately, so a kitchen ticket never comes out at the billing counter.
+enum PrinterRole { bill, kot }
+
+/// One physical printer: a LAN host:port or a paired Bluetooth MAC.
+///
+/// Stored per device only, never in the server's `printer_config`: the admin
+/// exe keeps Windows print-queue names there, which a raw IP/MAC would clobber.
+class PrinterTarget {
+  /// `LAN`, `Bluetooth` or `USB`.
+  final String type;
+  final String ip;
+  final int port;
+  final String btMac;
+  final String btName;
+
+  /// `vendorId:productId` of a USB printer (see [UsbPrinter.id]).
+  final String usbId;
+  final String usbName;
+
+  const PrinterTarget({
+    required this.type,
+    required this.ip,
+    required this.port,
+    required this.btMac,
+    required this.btName,
+    this.usbId = '',
+    this.usbName = '',
+  });
+
+  /// The Bill printer keeps the original single-printer keys so existing
+  /// installs carry on printing without re-setup.
+  static String prefixFor(PrinterRole role) => role == PrinterRole.kot ? 'kot_' : '';
+
+  bool get isBluetooth => type.toLowerCase() == 'bluetooth';
+
+  bool get isUsb => type.toLowerCase() == 'usb';
+
+  bool get configured => isUsb
+      ? usbId.isNotEmpty
+      : isBluetooth
+          ? btMac.isNotEmpty
+          : ip.isNotEmpty;
+
+  static PrinterTarget read(SharedPreferences prefs, PrinterRole role) {
+    final p = prefixFor(role);
+    final savedPort = int.tryParse(prefs.getString('${p}printer_port') ?? '9100');
+    return PrinterTarget(
+      type: prefs.getString('${p}printer_type') ?? 'LAN',
+      ip: prefs.getString('${p}printer_ip') ?? '',
+      // A bad value already saved (pre-dating validation, or hand-edited)
+      // must not throw ArgumentError on every future print — fall back.
+      port: isValidTcpPort(savedPort) ? savedPort! : 9100,
+      btMac: prefs.getString('${p}printer_bt_mac') ?? '',
+      btName: prefs.getString('${p}printer_bt_name') ?? '',
+      usbId: prefs.getString('${p}printer_usb_id') ?? '',
+      usbName: prefs.getString('${p}printer_usb_name') ?? '',
+    );
+  }
+}
+
 /// Device-local receipt preferences (admin keeps receipt customization in
 /// localStorage per till too — it is not server data a waiter can read).
 class ReceiptPrefs {
+  static const String kotSameAsBillKey = 'kot_printer_same_as_bill';
+
   final String header;
   final PaperSize paperSize;
+  final PrinterTarget bill;
+  final PrinterTarget kot;
 
-  /// `LAN` or `Bluetooth` (USB reserved / not wired yet).
-  final String printerType;
-  final String printerIp;
-  final int printerPort;
-  final String bluetoothMac;
-  final String bluetoothName;
+  /// True until a separate KOT printer is assigned — KOTs print on [bill].
+  final bool kotSameAsBill;
 
   /// Admin POS rule: allow "Release" at KOT_PRINT/RUNNING without a printed bill.
   final bool kotEnableReleaseTable;
@@ -50,34 +112,24 @@ class ReceiptPrefs {
   const ReceiptPrefs({
     required this.header,
     required this.paperSize,
-    required this.printerType,
-    required this.printerIp,
-    required this.printerPort,
-    required this.bluetoothMac,
-    required this.bluetoothName,
+    required this.bill,
+    required this.kot,
+    required this.kotSameAsBill,
     required this.kotEnableReleaseTable,
   });
 
-  bool get isBluetooth =>
-      printerType.toLowerCase() == 'bluetooth';
-
-  bool get printerConfigured =>
-      isBluetooth ? bluetoothMac.isNotEmpty : printerIp.isNotEmpty;
+  PrinterTarget targetFor(PrinterRole role) =>
+      role == PrinterRole.kot && !kotSameAsBill ? kot : bill;
 
   static Future<ReceiptPrefs> load() async {
     final prefs = await SharedPreferences.getInstance();
     final paper = prefs.getString('printer_paper') ?? '80mm';
-    final savedPort = int.tryParse(prefs.getString('printer_port') ?? '9100');
     return ReceiptPrefs(
       header: prefs.getString('printer_header') ?? 'THE FAT FOX',
       paperSize: paper.contains('58') ? PaperSize.mm58 : PaperSize.mm80,
-      printerType: prefs.getString('printer_type') ?? 'LAN',
-      printerIp: prefs.getString('printer_ip') ?? '',
-      // A bad value already saved (pre-dating validation, or hand-edited)
-      // must not throw ArgumentError on every future print — fall back.
-      printerPort: isValidTcpPort(savedPort) ? savedPort! : 9100,
-      bluetoothMac: prefs.getString('printer_bt_mac') ?? '',
-      bluetoothName: prefs.getString('printer_bt_name') ?? '',
+      bill: PrinterTarget.read(prefs, PrinterRole.bill),
+      kot: PrinterTarget.read(prefs, PrinterRole.kot),
+      kotSameAsBill: prefs.getBool(kotSameAsBillKey) ?? true,
       kotEnableReleaseTable: prefs.getBool('kot_enable_release_table') ?? false,
     );
   }
@@ -269,31 +321,54 @@ class ThermalPrinterService {
   }
 
   /// Silent ESC/POS — LAN TCP :9100 or Bluetooth SPP. Never uses PrintManager.
-  Future<void> printBytes(List<int> bytes) async {
+  /// [role] picks the assigned KOT or Bill printer.
+  Future<void> printBytes(List<int> bytes, {PrinterRole role = PrinterRole.bill}) async {
     final prefs = await ReceiptPrefs.load();
-    if (!prefs.printerConfigured) {
+    final target = prefs.targetFor(role);
+    final label = role == PrinterRole.kot && !prefs.kotSameAsBill ? 'KOT' : 'Bill';
+    if (!target.configured) {
       throw Exception(
-        prefs.isBluetooth
-            ? 'Bluetooth printer not selected. Open Printer Settings → Scan.'
-            : 'Printer IP not configured. Open Printer Settings → Scan or enter IP.',
+        target.isUsb
+            ? '$label USB printer not selected. Open Printer Settings → $label printer → Scan.'
+            : target.isBluetooth
+                ? '$label Bluetooth printer not selected. Open Printer Settings → $label printer → Scan.'
+                : '$label printer IP not configured. Open Printer Settings → $label printer.',
       );
     }
-    if (prefs.isBluetooth) {
-      await _sendBluetooth(bytes, mac: prefs.bluetoothMac);
+    if (target.isUsb) {
+      await UsbPrinter.write(target.usbId, bytes);
       return;
     }
-    await sendRaw(bytes, host: prefs.printerIp, port: prefs.printerPort);
+    if (target.isBluetooth) {
+      await _sendBluetooth(bytes, mac: target.btMac);
+      return;
+    }
+    await sendRaw(bytes, host: target.ip, port: target.port);
   }
 
+  /// MAC of the link the Bluetooth plugin currently holds. Static because
+  /// the plugin keeps ONE socket for the whole app, shared by every service
+  /// instance (POS screen and Printer Settings each create their own).
+  static String? _connectedMac;
+
   Future<void> _sendBluetooth(List<int> bytes, {required String mac}) async {
-    final connected = await PrintBluetoothThermal.connectionStatus;
+    // `connectionStatus` is true for ANY connected printer and `connect` does
+    // nothing while a link is open, so with separate KOT and Bill printers
+    // the job would print on whichever one was used last — drop that first.
+    var connected = await PrintBluetoothThermal.connectionStatus;
+    if (connected && _connectedMac != mac) {
+      await PrintBluetoothThermal.disconnect;
+      connected = false;
+    }
     if (!connected) {
+      _connectedMac = null;
       final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
       if (!ok) {
         throw Exception(
           'Could not connect to Bluetooth printer $mac. Pair it in Android Settings first.',
         );
       }
+      _connectedMac = mac;
     }
     final written = await PrintBluetoothThermal.writeBytes(bytes);
     if (!written) {
@@ -304,6 +379,7 @@ class ThermalPrinterService {
   Future<List<int>> generateTestBytes({
     String header = 'THE FAT FOX',
     PaperSize paperSize = PaperSize.mm80,
+    String title = 'TEST PRINT',
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
@@ -319,7 +395,7 @@ class ThermalPrinterService {
       ),
     );
     bytes += generator.text(
-      'TEST PRINT',
+      _safe(title),
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.text(
@@ -354,8 +430,11 @@ class ThermalPrinterService {
     final generator = Generator(paperSize, profile);
     List<int> bytes = [];
 
+    // Short on purpose: double-width halves the line (24 chars on 80mm, 16 on
+    // 58mm), so a long title wrapped mid-word. Like admin's KOT, no restaurant
+    // header — the kitchen only needs the table and items.
     bytes += generator.text(
-      'KITCHEN ORDER TICKET (KOT)',
+      'KOT',
       styles: const PosStyles(
         align: PosAlign.center,
         height: PosTextSize.size2,
@@ -364,24 +443,6 @@ class ThermalPrinterService {
       ),
     );
 
-    if (customization.showRestaurantName) {
-      bytes += generator.text(
-        _safe(restaurantName),
-        styles: PosStyles(align: _alignFrom(customization.restaurantNameAlignment), bold: true),
-      );
-    }
-    if (customization.customHeaderLine1.isNotEmpty) {
-      bytes += generator.text(
-        _safe(customization.customHeaderLine1),
-        styles: const PosStyles(align: PosAlign.center),
-      );
-    }
-    if (customization.customHeaderLine2.isNotEmpty) {
-      bytes += generator.text(
-        _safe(customization.customHeaderLine2),
-        styles: const PosStyles(align: PosAlign.center),
-      );
-    }
     if (department != null &&
         department.isNotEmpty &&
         customization.kotShowDepartmentName) {
@@ -524,7 +585,8 @@ class ThermalPrinterService {
       if (customization.billShowPaymentMode &&
           bill.paymentMode != null &&
           bill.paymentMode!.isNotEmpty) {
-        bytes += generator.text(_safe('Payment : ${bill.paymentMode}'));
+        bytes += generator.text(
+            _safe('Payment : ${bill.paymentMode!.toUpperCase().replaceAll('_', ' ')}'));
       }
       if (customization.billShowCustomerName &&
           bill.customerName != null &&
@@ -631,6 +693,13 @@ class ThermalPrinterService {
         bytes += generator.hr();
       }
 
+      // Admin prints this label on the single bill — not a second full bill.
+      if (customization.billShowCustomerCopy) {
+        bytes += generator.text(
+          '--- CUSTOMER COPY ---',
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        );
+      }
       final footerAlign = _alignFrom(customization.footerAlignment);
       bytes += generator.text(
         _safe(bill.footer ?? customization.footerThankYouMessage),
@@ -657,17 +726,7 @@ class ThermalPrinterService {
       return bytes;
     }
 
-    List<int> bytes = [];
-    bytes += buildCopy();
-    bytes += generator.feed(2);
-    bytes += generator.cut();
-    if (customization.billShowCustomerCopy) {
-      bytes += buildCopy();
-      bytes += generator.feed(2);
-      bytes += generator.cut();
-    }
-
-    return bytes;
+    return [...buildCopy(), ...generator.feed(2), ...generator.cut()];
   }
 
   List<int> _amountRow(

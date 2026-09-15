@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -102,26 +103,42 @@ void main() {
       expect(latin1.decode(hidden, allowInvalid: true), isNot(contains('GSTIN')));
     });
 
-    test('billShowCustomerCopy=true prints the bill twice', () async {
+    test('billShowCustomerCopy labels ONE bill (admin parity), never prints it twice', () async {
       final bill = BillPrintData(
         restaurantName: 'THE FAT FOX',
         tableNumber: '10',
+        paymentMode: 'upi_qr',
         lines: const [BillLine(name: 'Paneer Tikka', quantity: 1, lineTotal: 120)],
         subTotal: 120,
         taxTotal: 0,
         grandTotal: 120,
       );
-      final once = await service.generateBillBytes(
+      final off = latin1.decode(await service.generateBillBytes(
         bill: bill,
         customization: ReceiptCustomization.defaults.copyWith(billShowCustomerCopy: false),
-      );
-      final twice = await service.generateBillBytes(
+      ), allowInvalid: true);
+      final on = latin1.decode(await service.generateBillBytes(
         bill: bill,
         customization: ReceiptCustomization.defaults.copyWith(billShowCustomerCopy: true),
-      );
-      final text = latin1.decode(twice, allowInvalid: true);
-      expect('Paneer Tikka'.allMatches(text).length, 2);
-      expect(twice.length, greaterThan(once.length));
+      ), allowInvalid: true);
+      expect('Paneer Tikka'.allMatches(on).length, 1);
+      expect(on, contains('CUSTOMER COPY'));
+      expect(off, isNot(contains('CUSTOMER COPY')));
+      expect(on, contains('Payment : UPI QR'));
+    });
+
+    test('KOT has no restaurant header and its title fits double-width on 58mm', () async {
+      final text = latin1.decode(await service.generateKotBytes(
+        table: table,
+        items: const [],
+        restaurantName: 'THE FAT FOX',
+        paperSize: PaperSize.mm58,
+        customization: ReceiptCustomization.defaults.copyWith(customHeaderLine1: 'HDR1'),
+      ), allowInvalid: true);
+      expect(text, isNot(contains('THE FAT FOX')));
+      expect(text, isNot(contains('HDR1')));
+      expect(text, isNot(contains('KITCHEN ORDER TICKET')));
+      expect(text, contains('KOT'));
     });
 
     test('non-Latin1 currencySymbol from the server does not crash printing', () async {

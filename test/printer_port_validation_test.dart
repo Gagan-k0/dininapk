@@ -25,13 +25,13 @@ void main() {
     test('keeps a valid saved port', () async {
       SharedPreferences.setMockInitialValues({'printer_port': '9100'});
       final prefs = await ReceiptPrefs.load();
-      expect(prefs.printerPort, 9100);
+      expect(prefs.bill.port, 9100);
     });
 
     test('falls back to 9100 for a non-numeric saved port', () async {
       SharedPreferences.setMockInitialValues({'printer_port': 'oops'});
       final prefs = await ReceiptPrefs.load();
-      expect(prefs.printerPort, 9100);
+      expect(prefs.bill.port, 9100);
     });
 
     test('falls back to 9100 for an out-of-range saved port', () async {
@@ -40,7 +40,7 @@ void main() {
       // "Invalid argument(s): Invalid port 91000" on every Test Print.
       SharedPreferences.setMockInitialValues({'printer_port': '91000'});
       final prefs = await ReceiptPrefs.load();
-      expect(prefs.printerPort, 9100);
+      expect(prefs.bill.port, 9100);
     });
   });
 }

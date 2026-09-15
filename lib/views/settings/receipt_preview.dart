@@ -47,11 +47,11 @@ class ReceiptPreview extends StatelessWidget {
       ));
     }
 
-    if (c.showRestaurantName) {
+    if (c.showRestaurantName && !isKot) {
       line('HOTEL SUNSHINE', style: bold.copyWith(fontSize: 14), align: c.restaurantNameAlignment);
     }
     if (isKot) {
-      line('KITCHEN ORDER TICKET', style: bold);
+      line('KOT', style: bold.copyWith(fontSize: 14));
       if (c.kotShowDepartmentName) line('DEPARTMENT : North Indian');
       if (c.kotShowTableNumber) line('Table #: 5', style: bold, align: 'left');
       if (c.kotShowDate) line('Date: 15-09-2026 1:15 PM', align: 'left');
@@ -96,6 +96,7 @@ class ReceiptPreview extends StatelessWidget {
         line(_row('GRAND TOTAL', 'Rs. 716.20'), style: bold.copyWith(fontSize: 14), align: 'left');
         lines.add(const Divider());
       }
+      if (c.billShowCustomerCopy) line('--- CUSTOMER COPY ---', style: bold);
       line(c.footerThankYouMessage, style: bold, align: c.footerAlignment);
       if (c.footerSubMessage.isNotEmpty) line(c.footerSubMessage, align: c.footerAlignment);
     }

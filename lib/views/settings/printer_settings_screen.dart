@@ -10,6 +10,22 @@ import '../../services/receipt_customization_service.dart';
 import '../../services/thermal_printer_service.dart';
 import 'receipt_preview.dart';
 
+/// Editable connection fields for one assigned printer (Bill or KOT).
+class _PrinterSlot {
+  String type = 'LAN'; // LAN, Bluetooth, USB
+  final ip = TextEditingController();
+  final port = TextEditingController(text: '9100');
+  String btMac = '';
+  String btName = '';
+  String usbId = '';
+  String usbName = '';
+
+  void dispose() {
+    ip.dispose();
+    port.dispose();
+  }
+}
+
 class PrinterSettingsScreen extends StatefulWidget {
   const PrinterSettingsScreen({super.key});
 
@@ -18,13 +34,23 @@ class PrinterSettingsScreen extends StatefulWidget {
 }
 
 class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
-  final _ipController = TextEditingController();
-  final _portController = TextEditingController(text: '9100');
   final _headerController = TextEditingController(text: 'THE FAT FOX');
   final _discovery = PrinterDiscoveryService();
   final _receiptService = ReceiptCustomizationService();
 
-  String _connectionType = 'LAN'; // LAN, Bluetooth, USB
+  final _slots = {
+    PrinterRole.bill: _PrinterSlot(),
+    PrinterRole.kot: _PrinterSlot(),
+  };
+  PrinterRole _editing = PrinterRole.bill;
+  bool _kotSameAsBill = true;
+
+  _PrinterSlot get _slot => _slots[_editing]!;
+
+  /// Editing the KOT slot while it just follows the Bill printer — there are
+  /// no connection fields of its own to show or scan for.
+  bool get _kotFollowsBill => _editing == PrinterRole.kot && _kotSameAsBill;
+
   String _paperSize = '80mm'; // 80mm, 58mm
 
   /// True once Paper Size has a real saved value, or the user has picked one
@@ -34,8 +60,6 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   /// never clobber a choice the user actually made (saved before, or picked
   /// this session), or switching Connection Type would silently wipe it.
   bool _paperSizeExplicit = false;
-  String _btMac = '';
-  String _btName = '';
   bool _kotEnableReleaseTable = false;
   bool _isSaving = false;
   bool _isTesting = false;
@@ -57,8 +81,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
 
   @override
   void dispose() {
-    _ipController.dispose();
-    _portController.dispose();
+    for (final slot in _slots.values) {
+      slot.dispose();
+    }
     _headerController.dispose();
     super.dispose();
   }
@@ -75,15 +100,22 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     final receipt = await _receiptService.loadCached();
     final syncedAt = await _receiptService.lastSyncedAt();
     setState(() {
-      _connectionType = prefs.getString('printer_type') ?? 'LAN';
+      for (final role in PrinterRole.values) {
+        final p = PrinterTarget.prefixFor(role);
+        final slot = _slots[role]!;
+        slot.type = prefs.getString('${p}printer_type') ?? 'LAN';
+        slot.ip.text = prefs.getString('${p}printer_ip') ?? '';
+        slot.port.text = prefs.getString('${p}printer_port') ?? '9100';
+        slot.btMac = prefs.getString('${p}printer_bt_mac') ?? '';
+        slot.btName = prefs.getString('${p}printer_bt_name') ?? '';
+        slot.usbId = prefs.getString('${p}printer_usb_id') ?? '';
+        slot.usbName = prefs.getString('${p}printer_usb_name') ?? '';
+      }
+      _kotSameAsBill = prefs.getBool(ReceiptPrefs.kotSameAsBillKey) ?? true;
       _paperSizeExplicit = savedPaper != null;
-      _paperSize = savedPaper ?? _defaultPaperSizeFor(_connectionType);
-      _ipController.text = prefs.getString('printer_ip') ?? '';
-      _portController.text = prefs.getString('printer_port') ?? '9100';
+      _paperSize = savedPaper ?? _defaultPaperSizeFor(_slots[PrinterRole.bill]!.type);
       _headerController.text =
           prefs.getString('printer_header') ?? 'THE FAT FOX';
-      _btMac = prefs.getString('printer_bt_mac') ?? '';
-      _btName = prefs.getString('printer_bt_name') ?? '';
       _kotEnableReleaseTable =
           prefs.getBool('kot_enable_release_table') ?? false;
       _receipt = receipt;
@@ -96,13 +128,20 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     // choice — a later Connection Type switch must not silently override it.
     _paperSizeExplicit = true;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('printer_type', _connectionType);
+    for (final role in PrinterRole.values) {
+      final p = PrinterTarget.prefixFor(role);
+      final slot = _slots[role]!;
+      await prefs.setString('${p}printer_type', slot.type);
+      await prefs.setString('${p}printer_ip', slot.ip.text.trim());
+      await prefs.setString('${p}printer_port', slot.port.text.trim());
+      await prefs.setString('${p}printer_bt_mac', slot.btMac);
+      await prefs.setString('${p}printer_bt_name', slot.btName);
+      await prefs.setString('${p}printer_usb_id', slot.usbId);
+      await prefs.setString('${p}printer_usb_name', slot.usbName);
+    }
+    await prefs.setBool(ReceiptPrefs.kotSameAsBillKey, _kotSameAsBill);
     await prefs.setString('printer_paper', _paperSize);
-    await prefs.setString('printer_ip', _ipController.text.trim());
-    await prefs.setString('printer_port', _portController.text.trim());
     await prefs.setString('printer_header', _headerController.text.trim());
-    await prefs.setString('printer_bt_mac', _btMac);
-    await prefs.setString('printer_bt_name', _btName);
     await prefs.setBool('kot_enable_release_table', _kotEnableReleaseTable);
   }
 
@@ -137,11 +176,11 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     );
   }
 
-  /// Parses the Port field, or shows a red snackbar and returns null if it
-  /// isn't a valid TCP port (1-65535) — callers must not scan/print/persist
+  /// Parses [slot]'s Port field, or shows a red snackbar and returns null if
+  /// it isn't a valid TCP port (1-65535) — callers must not scan/print/persist
   /// on null, since `Socket.connect` throws a raw ArgumentError otherwise.
-  int? _validatedLanPort() {
-    final port = int.tryParse(_portController.text.trim());
+  int? _validatedLanPort(_PrinterSlot slot) {
+    final port = int.tryParse(slot.port.text.trim());
     if (!isValidTcpPort(port)) {
       _showSnackBar(
         'Enter a valid port (1-65535)',
@@ -150,6 +189,24 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       return null;
     }
     return port;
+  }
+
+  String _roleLabel(PrinterRole role) => role == PrinterRole.kot ? 'KOT' : 'Bill';
+
+  String _describe(PrinterRole role) {
+    if (role == PrinterRole.kot && _kotSameAsBill) return 'Same as bill printer';
+    final slot = _slots[role]!;
+    switch (slot.type) {
+      case 'Bluetooth':
+        if (slot.btMac.isEmpty) return 'Not set';
+        return slot.btName.isEmpty ? slot.btMac : slot.btName;
+      case 'LAN':
+        final ip = slot.ip.text.trim();
+        return ip.isEmpty ? 'Not set' : '$ip:${slot.port.text.trim()}';
+      default:
+        if (slot.usbId.isEmpty) return 'Not set';
+        return 'USB · ${slot.usbName}';
+    }
   }
 
   Future<void> _saveSettings() async {
@@ -178,17 +235,10 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   }
 
   Future<void> _scan() async {
-    if (_connectionType == 'USB') {
-      _showSnackBar(
-        'USB auto-detect is not available yet — use LAN or Bluetooth.',
-        backgroundColor: Colors.orange,
-      );
-      return;
-    }
-
+    final slot = _slot;
     int? lanPort;
-    if (_connectionType == 'LAN') {
-      lanPort = _validatedLanPort();
+    if (slot.type == 'LAN') {
+      lanPort = _validatedLanPort(slot);
       if (lanPort == null) return;
     }
 
@@ -196,11 +246,11 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _isScanning = true;
       _discovered = [];
       _scanChecked = 0;
-      _scanTotal = _connectionType == 'LAN' ? 254 : 0;
+      _scanTotal = slot.type == 'LAN' ? 254 : 0;
     });
 
     try {
-      final list = _connectionType == 'LAN'
+      final list = slot.type == 'LAN'
           ? await _discovery.scanLan(
               port: lanPort!,
               onProgress: (checked, total) {
@@ -211,15 +261,19 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 });
               },
             )
-          : await _discovery.scanBluetooth();
+          : slot.type == 'USB'
+              ? await _discovery.scanUsb()
+              : await _discovery.scanBluetooth();
 
       if (!mounted) return;
       setState(() => _discovered = list);
       _showSnackBar(
         list.isEmpty
-            ? (_connectionType == 'LAN'
-                  ? 'No printers on port ${_portController.text}. Check Wi‑Fi / IP.'
-                  : 'No paired Bluetooth printers. Pair in Android Settings first.')
+            ? switch (slot.type) {
+                'LAN' => 'No printers on port ${slot.port.text}. Check Wi‑Fi / IP.',
+                'USB' => 'No USB printer found. Plug it in (OTG cable on phones) and Scan again.',
+                _ => 'No paired Bluetooth printers. Pair in Android Settings first.',
+              }
             : 'Found ${list.length} printer(s). Tap one to select.',
         backgroundColor: list.isEmpty ? Colors.orange : Colors.green,
       );
@@ -231,50 +285,58 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   }
 
   void _selectDiscovered(DiscoveredPrinter printer) {
+    final slot = _slot;
     setState(() {
       if (printer.transport == PrinterTransport.lan) {
-        _connectionType = 'LAN';
-        _ipController.text = printer.host ?? '';
-        _portController.text = '${printer.port}';
-        _btMac = '';
-        _btName = '';
-        if (!_paperSizeExplicit) _paperSize = _defaultPaperSizeFor('LAN');
+        slot.type = 'LAN';
+        slot.ip.text = printer.host ?? '';
+        slot.port.text = '${printer.port}';
+        slot.btMac = '';
+        slot.btName = '';
+      } else if (printer.transport == PrinterTransport.usb) {
+        slot.type = 'USB';
+        slot.usbId = printer.usbId ?? '';
+        slot.usbName = printer.displayName;
       } else {
-        _connectionType = 'Bluetooth';
-        _btMac = printer.macAddress ?? '';
-        _btName = printer.displayName;
-        if (!_paperSizeExplicit) _paperSize = _defaultPaperSizeFor('Bluetooth');
+        slot.type = 'Bluetooth';
+        slot.btMac = printer.macAddress ?? '';
+        slot.btName = printer.displayName;
+      }
+      if (_editing == PrinterRole.bill && !_paperSizeExplicit) {
+        _paperSize = _defaultPaperSizeFor(slot.type);
       }
     });
     _showSnackBar(
-      'Selected ${printer.displayName}',
+      'Selected ${printer.displayName} as ${_roleLabel(_editing)} printer',
       backgroundColor: Colors.green,
     );
   }
 
   Future<void> _testPrint() async {
-    if (_connectionType == 'USB') {
+    final role = _editing;
+    final slot = _kotFollowsBill ? _slots[PrinterRole.bill]! : _slot;
+    if (slot.type == 'USB' && slot.usbId.isEmpty) {
       _showSnackBar(
-        'USB not supported yet — use LAN or Bluetooth',
+        'Select a USB printer from Scan first',
         backgroundColor: Colors.red,
       );
       return;
     }
-    if (_connectionType == 'Bluetooth' && _btMac.isEmpty) {
+    if (slot.type == 'Bluetooth' && slot.btMac.isEmpty) {
       _showSnackBar(
         'Select a Bluetooth printer from Scan first',
         backgroundColor: Colors.red,
       );
       return;
     }
-    if (_connectionType == 'LAN' && _ipController.text.trim().isEmpty) {
+    if (slot.type == 'LAN' && slot.ip.text.trim().isEmpty) {
       _showSnackBar(
         'Enter or scan a printer IP first',
         backgroundColor: Colors.red,
       );
       return;
     }
-    if (_connectionType == 'LAN' && _validatedLanPort() == null) return;
+    if (slot.type == 'LAN' && _validatedLanPort(slot) == null) return;
 
     setState(() => _isTesting = true);
     try {
@@ -285,10 +347,11 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
             ? 'THE FAT FOX'
             : _headerController.text.trim(),
         paperSize: _paperSize == '58mm' ? PaperSize.mm58 : PaperSize.mm80,
+        title: '${_roleLabel(role)} PRINTER TEST',
       );
-      await service.printBytes(bytes);
+      await service.printBytes(bytes, role: role);
       _showSnackBar(
-        'Test print sent successfully!',
+        '${_roleLabel(role)} test print sent successfully!',
         backgroundColor: Colors.green,
       );
     } catch (error) {
@@ -356,8 +419,291 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     );
   }
 
+  /// Admin "Hardware Printers": pick which printer gets KOTs and which gets
+  /// bills, then edit that one's connection below.
+  Widget _buildPrinterAssignment(bool busy) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Printers',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<PrinterRole>(
+            segments: const [
+              ButtonSegment(
+                value: PrinterRole.bill,
+                icon: Icon(Icons.receipt_long),
+                label: Text('Bill printer'),
+              ),
+              ButtonSegment(
+                value: PrinterRole.kot,
+                icon: Icon(Icons.soup_kitchen),
+                label: Text('KOT printer'),
+              ),
+            ],
+            selected: {_editing},
+            onSelectionChanged: busy
+                ? null
+                : (s) => setState(() {
+                      _editing = s.first;
+                      _discovered = [];
+                    }),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Bill: ${_describe(PrinterRole.bill)}   ·   KOT: ${_describe(PrinterRole.kot)}',
+          style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+        ),
+        if (_editing == PrinterRole.kot)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text(
+              'Print KOT on the bill printer',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            subtitle: const Text(
+              'Turn off to send kitchen tickets to a separate printer.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            value: _kotSameAsBill,
+            activeThumbColor: const Color(0xFFF97316),
+            onChanged: busy
+                ? null
+                : (v) => setState(() {
+                      _kotSameAsBill = v;
+                      _discovered = [];
+                    }),
+          ),
+        const SizedBox(height: 12),
+      ],
+    );
+  }
+
+  List<Widget> _buildConnectionFields(bool busy) {
+    final slot = _slot;
+    return [
+      const Text(
+        'Connection Type',
+        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+      ),
+      const SizedBox(height: 8),
+      Row(
+        children: ['LAN', 'Bluetooth', 'USB'].map((type) {
+          final isSelected = slot.type == type;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: Text(type),
+              selected: isSelected,
+              selectedColor: const Color(0xFFF97316),
+              labelStyle: TextStyle(
+                color: isSelected ? Colors.white : Colors.black87,
+              ),
+              onSelected: busy
+                  ? null
+                  : (_) => setState(() {
+                        slot.type = type;
+                        _discovered = [];
+                        if (_editing == PrinterRole.bill && !_paperSizeExplicit) {
+                          _paperSize = _defaultPaperSizeFor(type);
+                        }
+                      }),
+            ),
+          );
+        }).toList(),
+      ),
+      const SizedBox(height: 12),
+      const Text(
+        'Silent ESC/POS — auto-detect scans LAN :9100, paired Bluetooth or USB. '
+        'No Android print dialog.',
+        style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+      ),
+      const SizedBox(height: 16),
+
+      SizedBox(
+        width: double.infinity,
+        height: 44,
+        child: OutlinedButton.icon(
+          onPressed: busy ? null : _scan,
+          icon: _isScanning
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.radar),
+          label: Text(
+            _isScanning
+                ? (_scanTotal > 0
+                      ? 'Scanning… $_scanChecked/$_scanTotal'
+                      : 'Scanning…')
+                : 'Scan for ${_roleLabel(_editing)} printer',
+          ),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFFF97316),
+            side: const BorderSide(color: Color(0xFFF97316)),
+          ),
+        ),
+      ),
+
+      if (_discovered.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        const Text(
+          'Discovered',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 6),
+        ..._discovered.map((p) {
+          final selected = switch (p.transport) {
+            PrinterTransport.lan => p.host == slot.ip.text.trim(),
+            PrinterTransport.bluetooth => p.macAddress == slot.btMac,
+            PrinterTransport.usb => p.usbId == slot.usbId,
+          };
+          return Card(
+            margin: const EdgeInsets.only(bottom: 6),
+            child: ListTile(
+              leading: Icon(
+                switch (p.transport) {
+                  PrinterTransport.lan => Icons.lan,
+                  PrinterTransport.bluetooth => Icons.bluetooth,
+                  PrinterTransport.usb => Icons.usb,
+                },
+                color: const Color(0xFFF97316),
+              ),
+              title: Text(p.displayName),
+              subtitle: Text(
+                switch (p.transport) {
+                  PrinterTransport.lan => 'LAN ESC/POS',
+                  PrinterTransport.bluetooth => 'Bluetooth · ${p.macAddress}',
+                  PrinterTransport.usb => 'USB ESC/POS',
+                },
+                style: const TextStyle(fontSize: 12),
+              ),
+              trailing: selected
+                  ? const Icon(Icons.check_circle, color: Colors.green)
+                  : const Icon(Icons.chevron_right),
+              onTap: busy ? null : () => _selectDiscovered(p),
+            ),
+          );
+        }),
+      ],
+      const SizedBox(height: 20),
+
+      if (slot.type == 'LAN') ...[
+        const Text(
+          'Printer IP Address',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: slot.ip,
+          enabled: !busy,
+          onChanged: (_) => setState(() {}),
+          decoration: InputDecoration(
+            hintText: 'Scan or type e.g. 192.168.1.100',
+            filled: true,
+            fillColor: Colors.white,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          'Printer Port',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 6),
+        TextField(
+          controller: slot.port,
+          enabled: !busy,
+          keyboardType: TextInputType.number,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(5),
+          ],
+          onChanged: (_) => setState(() {}),
+          decoration: InputDecoration(
+            hintText: '9100',
+            filled: true,
+            fillColor: Colors.white,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+      ],
+
+      if (slot.type == 'Bluetooth') ...[
+        const Text(
+          'Selected Bluetooth printer',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Text(
+            slot.btMac.isEmpty
+                ? 'None — pair in Android Settings, then Scan'
+                : '${slot.btName}\n${slot.btMac}',
+            style: TextStyle(
+              color: slot.btMac.isEmpty
+                  ? const Color(0xFF64748B)
+                  : Colors.black87,
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+      ],
+
+      if (slot.type == 'USB') ...[
+        const Text(
+          'Selected USB printer',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Text(
+            slot.usbId.isEmpty
+                ? 'None — plug the printer in (OTG cable on phones), then Scan'
+                : slot.usbName,
+            style: TextStyle(
+              color: slot.usbId.isEmpty
+                  ? const Color(0xFF64748B)
+                  : Colors.black87,
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Android asks once for permission to use the printer — tap OK.',
+          style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+        ),
+        const SizedBox(height: 20),
+      ],
+    ];
+  }
+
   Widget _buildReceiptCustomizationSection(bool busy) {
-    final charsPerLine = _paperSize == '58mm' ? 32 : 48;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -465,7 +811,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 (v) => setState(() => _receipt = _receipt.copyWith(billShowRoundOff: v)), busy: busy),
             _toggle('Show grand total', _receipt.billShowGrandTotal,
                 (v) => setState(() => _receipt = _receipt.copyWith(billShowGrandTotal: v)), busy: busy),
-            _toggle('Print a second customer copy', _receipt.billShowCustomerCopy,
+            _toggle('Show "Customer copy" label', _receipt.billShowCustomerCopy,
                 (v) => setState(() => _receipt = _receipt.copyWith(billShowCustomerCopy: v)), busy: busy),
           ],
         ),
@@ -493,8 +839,15 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 (v) => setState(() => _receipt = _receipt.copyWith(timeFormat: v)), busy: busy),
           ],
         ),
-        const SizedBox(height: 12),
+      ],
+    );
+  }
 
+  Widget _buildPreviewPanel() {
+    final charsPerLine = _paperSize == '58mm' ? 32 : 48;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
         Row(
           children: [
             const Text('Preview:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
@@ -536,112 +889,25 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         backgroundColor: Colors.white,
         elevation: 0,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
+      // Mirrors the admin printer settings page: side-by-side preview on wide
+      // (tablet / landscape) screens, stacked below the form when narrow.
+      body: LayoutBuilder(builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 840;
+        final form = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Connection Type',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: ['LAN', 'Bluetooth', 'USB'].map((type) {
-                final isSelected = _connectionType == type;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(type),
-                    selected: isSelected,
-                    selectedColor: const Color(0xFFF97316),
-                    labelStyle: TextStyle(
-                      color: isSelected ? Colors.white : Colors.black87,
-                    ),
-                    onSelected: busy
-                        ? null
-                        : (_) => setState(() {
-                              _connectionType = type;
-                              _discovered = [];
-                              if (!_paperSizeExplicit) {
-                                _paperSize = _defaultPaperSizeFor(type);
-                              }
-                            }),
-                  ),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Silent ESC/POS — auto-detect scans LAN :9100 or paired Bluetooth. '
-              'No Android print dialog.',
-              style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
-            ),
-            const SizedBox(height: 16),
-
-            SizedBox(
-              width: double.infinity,
-              height: 44,
-              child: OutlinedButton.icon(
-                onPressed: busy ? null : _scan,
-                icon: _isScanning
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.radar),
-                label: Text(
-                  _isScanning
-                      ? (_scanTotal > 0
-                            ? 'Scanning… $_scanChecked/$_scanTotal'
-                            : 'Scanning…')
-                      : 'Scan for printers',
+            _buildPrinterAssignment(busy),
+            if (_kotFollowsBill)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 20),
+                child: Text(
+                  'Kitchen tickets print on the Bill printer. Switch to "Bill printer" to change it.',
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
                 ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFFF97316),
-                  side: const BorderSide(color: Color(0xFFF97316)),
-                ),
-              ),
-            ),
+              )
+            else
+              ..._buildConnectionFields(busy),
 
-            if (_discovered.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              const Text(
-                'Discovered',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-              const SizedBox(height: 6),
-              ..._discovered.map((p) {
-                final selected = p.transport == PrinterTransport.lan
-                    ? p.host == _ipController.text.trim()
-                    : p.macAddress == _btMac;
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 6),
-                  child: ListTile(
-                    leading: Icon(
-                      p.transport == PrinterTransport.lan
-                          ? Icons.lan
-                          : Icons.bluetooth,
-                      color: const Color(0xFFF97316),
-                    ),
-                    title: Text(p.displayName),
-                    subtitle: Text(
-                      p.transport == PrinterTransport.lan
-                          ? 'LAN ESC/POS'
-                          : 'Bluetooth · ${p.macAddress}',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    trailing: selected
-                        ? const Icon(Icons.check_circle, color: Colors.green)
-                        : const Icon(Icons.chevron_right),
-                    onTap: busy ? null : () => _selectDiscovered(p),
-                  ),
-                );
-              }),
-            ],
-
-            const SizedBox(height: 20),
             const Text(
               'Paper Size',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
@@ -670,86 +936,6 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
               }).toList(),
             ),
             const SizedBox(height: 20),
-
-            if (_connectionType == 'LAN') ...[
-              const Text(
-                'Printer IP Address',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: _ipController,
-                enabled: !busy,
-                decoration: InputDecoration(
-                  hintText: 'Scan or type e.g. 192.168.1.100',
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Printer Port',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-              const SizedBox(height: 6),
-              TextField(
-                controller: _portController,
-                enabled: !busy,
-                keyboardType: TextInputType.number,
-                inputFormatters: [
-                  FilteringTextInputFormatter.digitsOnly,
-                  LengthLimitingTextInputFormatter(5),
-                ],
-                decoration: InputDecoration(
-                  hintText: '9100',
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-            ],
-
-            if (_connectionType == 'Bluetooth') ...[
-              const Text(
-                'Selected Bluetooth printer',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-              const SizedBox(height: 6),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: const Color(0xFFE2E8F0)),
-                ),
-                child: Text(
-                  _btMac.isEmpty
-                      ? 'None — pair in Android Settings, then Scan'
-                      : '$_btName\n$_btMac',
-                  style: TextStyle(
-                    color: _btMac.isEmpty
-                        ? const Color(0xFF64748B)
-                        : Colors.black87,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-            ],
-
-            if (_connectionType == 'USB') ...[
-              const Text(
-                'USB / built-in (Sunmi) printers are not wired yet. Use LAN or Bluetooth for silent ESC/POS.',
-                style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
-              ),
-              const SizedBox(height: 20),
-            ],
 
             const Text(
               'Receipt Header Title',
@@ -789,6 +975,10 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
             const SizedBox(height: 24),
 
             _buildReceiptCustomizationSection(busy),
+            if (!wide) ...[
+              const SizedBox(height: 12),
+              _buildPreviewPanel(),
+            ],
             const SizedBox(height: 24),
 
             SizedBox(
@@ -840,9 +1030,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                         width: 20,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text(
-                        'Test Print',
-                        style: TextStyle(
+                    : Text(
+                        'Test ${_roleLabel(_editing)} Printer',
+                        style: const TextStyle(
                           fontWeight: FontWeight.bold,
                           fontSize: 15,
                         ),
@@ -850,8 +1040,27 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
               ),
             ),
           ],
-        ),
-      ),
+        );
+
+        if (!wide) {
+          return SingleChildScrollView(padding: const EdgeInsets.all(16), child: form);
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: form),
+            ),
+            SizedBox(
+              width: 380,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(0, 16, 16, 16),
+                child: _buildPreviewPanel(),
+              ),
+            ),
+          ],
+        );
+      }),
     );
   }
 }
