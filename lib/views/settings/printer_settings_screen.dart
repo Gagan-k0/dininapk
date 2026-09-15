@@ -21,6 +21,14 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
 
   String _connectionType = 'LAN'; // LAN, Bluetooth, USB
   String _paperSize = '80mm'; // 80mm, 58mm
+
+  /// True once Paper Size has a real saved value, or the user has picked one
+  /// in this session. Small handheld Bluetooth thermal printers are almost
+  /// always 58mm while LAN kitchen printers are usually 80mm, so a genuinely
+  /// fresh setup defaults smartly by connection type — but that default must
+  /// never clobber a choice the user actually made (saved before, or picked
+  /// this session), or switching Connection Type would silently wipe it.
+  bool _paperSizeExplicit = false;
   String _btMac = '';
   String _btName = '';
   bool _kotEnableReleaseTable = false;
@@ -45,11 +53,19 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     super.dispose();
   }
 
+  /// Small handheld Bluetooth thermal printers are almost always 58mm; LAN
+  /// kitchen printers are usually 80mm. Only a suggestion for a connection
+  /// type that has no explicit Paper Size choice yet — see _paperSizeExplicit.
+  String _defaultPaperSizeFor(String connectionType) =>
+      connectionType == 'Bluetooth' ? '58mm' : '80mm';
+
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final savedPaper = prefs.getString('printer_paper');
     setState(() {
       _connectionType = prefs.getString('printer_type') ?? 'LAN';
-      _paperSize = prefs.getString('printer_paper') ?? '80mm';
+      _paperSizeExplicit = savedPaper != null;
+      _paperSize = savedPaper ?? _defaultPaperSizeFor(_connectionType);
       _ipController.text = prefs.getString('printer_ip') ?? '';
       _portController.text = prefs.getString('printer_port') ?? '9100';
       _headerController.text =
@@ -62,6 +78,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   }
 
   Future<void> _persistSettings() async {
+    // A save makes the current Paper Size (default or not) the user's real
+    // choice — a later Connection Type switch must not silently override it.
+    _paperSizeExplicit = true;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('printer_type', _connectionType);
     await prefs.setString('printer_paper', _paperSize);
@@ -167,10 +186,12 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         _portController.text = '${printer.port}';
         _btMac = '';
         _btName = '';
+        if (!_paperSizeExplicit) _paperSize = _defaultPaperSizeFor('LAN');
       } else {
         _connectionType = 'Bluetooth';
         _btMac = printer.macAddress ?? '';
         _btName = printer.displayName;
+        if (!_paperSizeExplicit) _paperSize = _defaultPaperSizeFor('Bluetooth');
       }
     });
     _showSnackBar(
@@ -268,6 +289,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                         : (_) => setState(() {
                               _connectionType = type;
                               _discovered = [];
+                              if (!_paperSizeExplicit) {
+                                _paperSize = _defaultPaperSizeFor(type);
+                              }
                             }),
                   ),
                 );
@@ -363,7 +387,10 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                     ),
                     onSelected: busy
                         ? null
-                        : (_) => setState(() => _paperSize = size),
+                        : (_) => setState(() {
+                              _paperSize = size;
+                              _paperSizeExplicit = true;
+                            }),
                   ),
                 );
               }).toList(),
