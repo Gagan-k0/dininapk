@@ -223,15 +223,35 @@ class ApiService {
 
   /// GET /restaurant/category/active-all?searchName=
   Future<List<MenuCategory>> getActiveCategories({String search = ''}) async {
+    final maps = await getActiveCategoryMaps(search: search);
+    return maps.map(MenuCategory.fromJson).toList();
+  }
+
+  /// Raw category maps (for local menu cache).
+  Future<List<Map<String, dynamic>>> getActiveCategoryMaps({
+    String search = '',
+  }) async {
     final env = await _client.get(
       ApiConfig.getActiveCategoriesPath,
       query: {'searchName': search},
     );
-    return env.mapList.map(MenuCategory.fromJson).toList();
+    return env.mapList;
   }
 
   /// GET /restaurant/menu/by-category-itemin?categoryId=&searchItemIn=dinein&searchName=
   Future<List<MenuItem>> getMenuItemsByCategory({
+    String categoryId = '',
+    String search = '',
+  }) async {
+    final maps = await getDineinMenuMaps(
+      categoryId: categoryId,
+      search: search,
+    );
+    return maps.map(MenuItem.fromJson).toList();
+  }
+
+  /// Raw dine-in menu maps (for local menu cache).
+  Future<List<Map<String, dynamic>>> getDineinMenuMaps({
     String categoryId = '',
     String search = '',
   }) async {
@@ -243,7 +263,7 @@ class ApiService {
         'searchName': search,
       },
     );
-    return env.mapList.map(MenuItem.fromJson).toList();
+    return env.mapList;
   }
 
   /// GET /restaurant/menu/getmenu/{menuId} — variant/addon details.
@@ -525,6 +545,12 @@ class ApiService {
       '${ApiConfig.switchTable}/$cartId',
       body: {'table_id': tableId},
     );
+  }
+
+  /// DELETE /restaurant/cart/deletecart/{cartId}
+  /// Admin "Discard" — empties the table cart without settling (no Order/ledger).
+  Future<ApiEnvelope> deleteCart(String cartId) {
+    return _client.delete('${ApiConfig.releaseTable}/$cartId');
   }
 
   /// POST /restaurant/cart/qr-approval { cartId, action: ACCEPT|REJECT }

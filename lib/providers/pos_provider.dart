@@ -4,7 +4,9 @@ import '../models/table_model.dart';
 import '../models/menu_model.dart';
 import '../models/cart_model.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 import '../services/bill_builder.dart';
+import '../services/menu_cache_service.dart';
 import '../services/thermal_printer_service.dart';
 import '../utils/menu_filter.dart';
 
@@ -14,14 +16,23 @@ import '../utils/menu_filter.dart';
 /// * `container_price` is echoed on every write (the server resets it to 0 otherwise);
 /// * quantity is locked once a line is KOT'd — removal is `cancelmenu` with a reason;
 /// * KOT = `setcartstatus KOT` → print → `KOT_PRINT` only after a successful print;
-/// * Bill = print → `setcartstatus PRINTED`; Settle = `setcarttobill` (deletes the cart).
+/// * Bill = print → `setcartstatus PRINTED`; Settle = `setcarttobill` (deletes the cart);
+/// * Discard = `DELETE deletecart/{id}` (empties cart, no Order — admin Discard).
 class PosProvider with ChangeNotifier {
   final ApiService _apiService;
   final ThermalPrinterService _printer;
+  final MenuCacheService _menuCache;
+  final AuthService _authService;
 
-  PosProvider({ApiService? api, ThermalPrinterService? printer})
-    : _apiService = api ?? ApiService(),
-      _printer = printer ?? ThermalPrinterService();
+  PosProvider({
+    ApiService? api,
+    ThermalPrinterService? printer,
+    MenuCacheService? menuCache,
+    AuthService? auth,
+  })  : _apiService = api ?? ApiService(),
+        _printer = printer ?? ThermalPrinterService(),
+        _menuCache = menuCache ?? MenuCacheService(),
+        _authService = auth ?? AuthService();
 
   // ── Table ──
   String? _activeTableId;
@@ -253,6 +264,9 @@ class PosProvider with ChangeNotifier {
   /// Load everything the ordering screen needs. Table + categories + menu are
   /// mandatory; tax config is best-effort; the cart is loaded last and its
   /// failure is reported separately so the menu still renders.
+  ///
+  /// Categories/menu paint from disk cache first (if any), then refresh from
+  /// the network like admin's warm menu cache.
   Future<void> loadTableAndMenu(String tableId, String areaId) async {
     _isLoading = true;
     _errorMessage = null;
@@ -264,17 +278,35 @@ class PosProvider with ChangeNotifier {
 
     try {
       _receiptPrefs = await ReceiptPrefs.load();
+      final restaurantId = await _authService.getRestaurantId() ?? '';
+      final cached = await _menuCache.load(restaurantId);
+      if (cached != null &&
+          (cached.categories.isNotEmpty || cached.items.isNotEmpty)) {
+        _categories = cached.categories;
+        _allItems = cached.items;
+        // Let the grid paint while table + network refresh continue.
+        notifyListeners();
+      }
+
       final results = await Future.wait<Object?>([
         _apiService.viewTableById(tableId),
-        _apiService.getActiveCategories(),
-        _apiService.getMenuItemsByCategory(),
+        _apiService.getActiveCategoryMaps(),
+        _apiService.getDineinMenuMaps(),
         _bestEffortTax(),
       ]);
       _tableDetails = results[0] as Map<String, dynamic>?;
-      _categories = results[1] as List<MenuCategory>;
-      _allItems = results[2] as List<MenuItem>;
+      final catMaps = results[1] as List<Map<String, dynamic>>;
+      final itemMaps = results[2] as List<Map<String, dynamic>>;
+      _categories = catMaps.map(MenuCategory.fromJson).toList();
+      _allItems = itemMaps.map(MenuItem.fromJson).toList();
       _taxConfig = results[3] as List<Map<String, dynamic>>;
       _buildConsolidatedTax();
+
+      await _menuCache.save(
+        restaurantId: restaurantId,
+        categories: catMaps,
+        items: itemMaps,
+      );
 
       if (_tableDetails == null ||
           (_tableDetails!['table_id'] ?? _tableDetails!['_id']) == null) {
@@ -830,6 +862,37 @@ class PosProvider with ChangeNotifier {
       }
     }
     if (last != null) throw last;
+  }
+
+  /// Admin Discard: delete the whole cart without creating an Order/ledger.
+  /// Confirmed in the UI before calling. Does not settle payment.
+  Future<bool> discardCart() async {
+    final cid = cartId;
+    if (cid.isEmpty) {
+      _cartData = [];
+      _errorMessage = null;
+      notifyListeners();
+      return true;
+    }
+
+    _isBusy = true;
+    _errorMessage = null;
+    notifyListeners();
+    try {
+      await _apiService.deleteCart(cid);
+      _cartData = [];
+      _isBusy = false;
+      notifyListeners();
+      return true;
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+    } catch (e) {
+      _errorMessage = friendlyError(e);
+    }
+    _isBusy = false;
+    notifyListeners();
+    return false;
   }
 
   /// SETTLE: `setcarttobill { cartId, paymentType }` — creates the Order and

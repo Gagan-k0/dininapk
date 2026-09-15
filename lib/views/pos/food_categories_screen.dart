@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
+import '../../services/pos_ui_prefs.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
@@ -23,11 +24,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       MenuPageWindow<MenuItem>(pageSize: 80);
   String? _pagedForCategoryId;
   String _pagedForSearch = '';
+  bool _railCollapsed = false;
 
   @override
   void initState() {
     super.initState();
     _menuScrollController.addListener(_onMenuScroll);
+    PosUiPrefs.loadRailCollapsed().then((v) {
+      if (mounted) setState(() => _railCollapsed = v);
+    });
   }
 
   @override
@@ -129,6 +134,11 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                       PosCategoryRail(
                         categories: pos.categories,
                         selectedCategoryId: pos.selectedCategoryId,
+                        collapsed: _railCollapsed,
+                        onToggleCollapsed: () {
+                          setState(() => _railCollapsed = !_railCollapsed);
+                          PosUiPrefs.saveRailCollapsed(_railCollapsed);
+                        },
                         onSelect: (id) {
                           pos.selectCategory(id);
                           setState(() {
@@ -1533,84 +1543,133 @@ class _CartBottomSheet extends StatelessWidget {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy || !pos.hasUnprintedItems
-                    ? null
-                    : () async {
-                        final success = await pos.sendKotOrder();
-                        if (!context.mounted) return;
-                        final printNote = pos.printError;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              !success
-                                  ? (pos.errorMessage ?? 'KOT failed')
-                                  : printNote == null
-                                      ? 'KOT sent + printed ✓'
-                                      : 'KOT sent to kitchen. Print failed: $printNote',
-                            ),
-                            backgroundColor: !success
-                                ? const Color(0xFFDC2626)
-                                : printNote == null
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy || !pos.hasUnprintedItems
+                        ? null
+                        : () async {
+                            final success = await pos.sendKotOrder();
+                            if (!context.mounted) return;
+                            final printNote = pos.printError;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  !success
+                                      ? (pos.errorMessage ?? 'KOT failed')
+                                      : printNote == null
+                                          ? 'KOT sent + printed ✓'
+                                          : 'KOT sent to kitchen. Print failed: $printNote',
+                                ),
+                                backgroundColor: !success
+                                    ? const Color(0xFFDC2626)
+                                    : printNote == null
+                                        ? const Color(0xFF16A34A)
+                                        : const Color(0xFFD97706),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.soup_kitchen, size: 18),
+                    label: const Text(
+                      'KOT',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2563EB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            final err = await pos.printBill();
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  err == null ? 'Bill printed ✓' : err,
+                                ),
+                                backgroundColor: err == null
                                     ? const Color(0xFF16A34A)
-                                    : const Color(0xFFD97706),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      },
-                icon: const Icon(Icons.soup_kitchen, size: 18),
-                label: const Text('KOT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF2563EB),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                    : const Color(0xFFDC2626),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.print, size: 18),
+                    label: Text(
+                      pos.tableStatus == 'PRINTED' ? 'REPRINT' : 'BILL',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7C3AED),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () => _showSettlePaymentSheet(context, pos),
+                    icon: const Icon(Icons.check_circle_outline, size: 18),
+                    label: const Text(
+                      'SETTLE',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFF97316),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: busy || pos.cartMenuItems.isEmpty
                     ? null
-                    : () async {
-                        final err = await pos.printBill();
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(err == null ? 'Bill printed ✓' : err),
-                            backgroundColor: err == null ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                      },
-                icon: const Icon(Icons.print, size: 18),
-                label: Text(
-                  pos.tableStatus == 'PRINTED' ? 'REPRINT' : 'BILL',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    : () => _confirmDiscardCart(context, pos),
+                icon: const Icon(Icons.delete_sweep, size: 18),
+                label: const Text(
+                  'DISCARD CART',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                 ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF7C3AED),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: busy ? null : () => _showSettlePaymentSheet(context, pos),
-                icon: const Icon(Icons.check_circle_outline, size: 18),
-                label: const Text('SETTLE', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFF97316),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFDC2626),
+                  side: const BorderSide(color: Color(0xFFFECACA)),
+                  backgroundColor: const Color(0xFFFEF2F2),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ),
@@ -1618,5 +1677,50 @@ class _CartBottomSheet extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDiscardCart(
+    BuildContext context,
+    PosProvider pos,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard this cart?'),
+        content: const Text(
+          'All items in this table cart will be removed. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFDC2626)),
+            child: const Text('Discard Cart'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+
+    final success = await pos.discardCart();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Cart discarded'
+              : (pos.errorMessage ?? 'Discard failed'),
+        ),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    if (success && context.mounted) {
+      Navigator.pop(context); // close cart sheet
+    }
   }
 }
