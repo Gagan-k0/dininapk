@@ -163,8 +163,32 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           setState(() => _railCollapsed = !_railCollapsed);
                           PosUiPrefs.saveRailCollapsed(_railCollapsed);
                         },
-                        onSelect: (id) {
+                        onSelect: (id) async {
                           pos.selectCategory(id);
+                          if (id == kExtraAddonsCategoryId) {
+                            await pos.ensureExtraAddonsLoaded();
+                            if (!mounted) return;
+                            if (pos.errorMessage ==
+                                'Failed to load extra add-ons') {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(pos.errorMessage!),
+                                  backgroundColor: const Color(0xFFDC2626),
+                                  behavior: SnackBarBehavior.floating,
+                                  margin: const EdgeInsets.fromLTRB(
+                                    48,
+                                    0,
+                                    48,
+                                    16,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 8,
+                                  ),
+                                ),
+                              );
+                            }
+                          }
                           _menuPage.reset(
                             pos.filteredMenuItems,
                             fingerprint: menuFilterFingerprint(
@@ -175,7 +199,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           if (_menuScrollController.hasClients) {
                             _menuScrollController.jumpTo(0);
                           }
-                          setState(() {});
+                          if (mounted) setState(() {});
                         },
                       ),
                       const VerticalDivider(
@@ -580,7 +604,18 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           ElevatedButton(
             onPressed: () {
               final v = double.tryParse(controller.text.trim());
-              if (v == null || v <= 0) return;
+              if (v == null || v <= 0) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Enter an amount greater than 0'),
+                    backgroundColor: Color(0xFFDC2626),
+                    behavior: SnackBarBehavior.floating,
+                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                );
+                return;
+              }
               Navigator.pop(ctx, v);
             },
             style: ElevatedButton.styleFrom(
@@ -652,7 +687,18 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
             onPressed: () {
               final name = nameCtrl.text.trim();
               final price = double.tryParse(priceCtrl.text.trim());
-              if (name.isEmpty || price == null || price <= 0) return;
+              if (name.isEmpty || price == null || price <= 0) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Enter a name and amount greater than 0'),
+                    backgroundColor: Color(0xFFDC2626),
+                    behavior: SnackBarBehavior.floating,
+                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                );
+                return;
+              }
               Navigator.pop(ctx, true);
             },
             style: ElevatedButton.styleFrom(
@@ -1206,6 +1252,41 @@ class _CartBottomSheet extends StatelessWidget {
               .toString()
         : (item['menu_name'] ?? 'Item').toString();
 
+    final variantRaw = item['variant'];
+    Map<String, dynamic>? variantMap;
+    if (variantRaw is Map) {
+      variantMap = Map<String, dynamic>.from(variantRaw);
+    } else if (variantRaw is List &&
+        variantRaw.isNotEmpty &&
+        variantRaw.first is Map) {
+      variantMap = Map<String, dynamic>.from(variantRaw.first as Map);
+    }
+    final variantName = (variantMap?['valuename'] ??
+            variantMap?['name'] ??
+            item['variant_name'])
+        ?.toString()
+        .trim();
+
+    final addonBits = <String>[];
+    final addonRaw = item['addon'] ?? item['addonData'] ?? item['addons'];
+    if (addonRaw is List) {
+      for (final a in addonRaw) {
+        if (a is! Map) continue;
+        final v = a['value'];
+        final label = (a['valuename'] ??
+                a['value_name'] ??
+                (v is Map ? (v['valuename'] ?? v['name']) : null) ??
+                a['name'])
+            ?.toString()
+            .trim();
+        if (label != null && label.isNotEmpty) addonBits.add(label);
+      }
+    }
+    final subtitleParts = <String>[
+      if (variantName != null && variantName.isNotEmpty) variantName,
+      ...addonBits,
+    ];
+
     final qty = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
     final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
     final unitPrice =
@@ -1244,6 +1325,16 @@ class _CartBottomSheet extends StatelessWidget {
                     color: Color(0xFF1E293B),
                   ),
                 ),
+                if (subtitleParts.isNotEmpty)
+                  Text(
+                    subtitleParts.join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
                 const SizedBox(height: 2),
                 Text(
                   '₹${unitPrice.toStringAsFixed(2)} each',

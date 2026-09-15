@@ -52,6 +52,8 @@ class PosProvider with ChangeNotifier {
   String? _selectedCategoryId; // null = 'ALL'; favorites/extra = sentinels
   List<Map<String, dynamic>>? _extraAddonRawGroups; // null = not loaded / failed
   bool _extraAddonsLoading = false;
+  /// variant_id → display name from GET /restaurant/variant/all (admin join).
+  Map<String, String> _variantNameById = {};
   String _searchQuery = '';
 
   // ── Cart (live backend snapshot) ──
@@ -316,12 +318,17 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
+  /// getmenu returns `{ variant_id, price }` without names — join `_variantNameById`.
   Future<MenuItem?> enrichMenuItem(MenuItem item) async {
     if (item.id.isEmpty) return null;
     try {
+      await _ensureVariantCatalog();
       final raw = await _apiService.getMenuById(item.id);
       if (raw == null) return null;
       final enriched = MenuItem.fromJson(raw);
+      final variants = _joinVariantNames(
+        enriched.variants.isNotEmpty ? enriched.variants : item.variants,
+      );
       // Keep list-derived category names (detail doc may omit nested category).
       return MenuItem(
         id: enriched.id.isNotEmpty ? enriched.id : item.id,
@@ -340,11 +347,10 @@ class PosProvider with ChangeNotifier {
         attribute: enriched.attribute,
         price: enriched.price > 0 ? enriched.price : item.price,
         image: enriched.image ?? item.image,
-        variants: enriched.variants.isNotEmpty
-            ? enriched.variants
-            : item.variants,
+        variants: variants,
         addons: enriched.addons.isNotEmpty ? enriched.addons : item.addons,
         customisable: enriched.customisable || item.customisable,
+        isFavorite: enriched.isFavorite || item.isFavorite,
       );
     } on ApiException catch (e) {
       if (e.isAuth) {
@@ -357,6 +363,40 @@ class PosProvider with ChangeNotifier {
       debugPrint('[Fatfox POS] enrichMenuItem failed: $e');
       return null;
     }
+  }
+
+  Future<void> _ensureVariantCatalog() async {
+    if (_variantNameById.isNotEmpty) return;
+    try {
+      final rows = await _apiService.getAllVariants();
+      final map = <String, String>{};
+      for (final row in rows) {
+        final id = row['_id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        final name = (row['name'] ?? row['valuename'] ?? row['displayname'])
+                ?.toString()
+                .trim() ??
+            '';
+        if (name.isNotEmpty) map[id] = name;
+      }
+      _variantNameById = map;
+    } catch (e) {
+      debugPrint('[Fatfox POS] variant catalog load failed: $e');
+    }
+  }
+
+  List<MenuVariant> _joinVariantNames(List<MenuVariant> variants) {
+    if (variants.isEmpty || _variantNameById.isEmpty) return variants;
+    return [
+      for (final v in variants)
+        MenuVariant(
+          id: v.id,
+          name: v.name.isNotEmpty
+              ? v.name
+              : (_variantNameById[v.id] ?? ''),
+          price: v.price,
+        ),
+    ];
   }
 
   void _setSortedMenuItems(List<MenuItem> items) {
@@ -403,6 +443,7 @@ class PosProvider with ChangeNotifier {
         _apiService.getActiveCategoryMaps(),
         _apiService.getDineinMenuMaps(),
         _bestEffortTax(),
+        _bestEffortVariantCatalog(),
       ]);
       _tableDetails = results[0] as Map<String, dynamic>?;
       final catMaps = results[1] as List<Map<String, dynamic>>;
@@ -411,6 +452,21 @@ class PosProvider with ChangeNotifier {
       _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
       _taxConfig = results[3] as List<Map<String, dynamic>>;
       _buildConsolidatedTax();
+      final variantMaps = results[4] as List<Map<String, dynamic>>;
+      if (variantMaps.isNotEmpty) {
+        final map = <String, String>{};
+        for (final row in variantMaps) {
+          final id = row['_id']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          final name =
+              (row['name'] ?? row['valuename'] ?? row['displayname'])
+                      ?.toString()
+                      .trim() ??
+                  '';
+          if (name.isNotEmpty) map[id] = name;
+        }
+        if (map.isNotEmpty) _variantNameById = map;
+      }
 
       await _menuCache.save(
         restaurantId: restaurantId,
@@ -447,6 +503,17 @@ class PosProvider with ChangeNotifier {
       return await _apiService.getTaxConfig();
     } on ApiException catch (e) {
       if (e.isAuth) rethrow;
+      return const [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _bestEffortVariantCatalog() async {
+    try {
+      return await _apiService.getAllVariants();
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      return const [];
+    } catch (_) {
       return const [];
     }
   }
@@ -911,6 +978,62 @@ class PosProvider with ChangeNotifier {
   // ============================================================
   // Bill + settle
   // ============================================================
+
+  /// Floor print: bind table cart temporarily, print, then restore prior POS bind
+  /// so an open food-categories screen is not left on the wrong table.
+  Future<String?> printBillForFloorTable({
+    required String tableId,
+    required String areaId,
+  }) async {
+    final prevTableId = _activeTableId;
+    final prevAreaId = _activeAreaId;
+    final prevCart = List<Map<String, dynamic>>.from(_cartData);
+    final prevDetails = _tableDetails;
+    final prevTax = List<Map<String, dynamic>>.from(_taxConfig);
+    final prevConsolidated = _consolidatedTax;
+    try {
+      final prep = await prepareTableForBill(tableId: tableId, areaId: areaId);
+      if (prep != null) return prep;
+      return await printBill();
+    } finally {
+      _activeTableId = prevTableId;
+      _activeAreaId = prevAreaId;
+      _cartData = prevCart;
+      _tableDetails = prevDetails;
+      _taxConfig = prevTax;
+      _consolidatedTax = prevConsolidated;
+      notifyListeners();
+    }
+  }
+
+  /// Lightweight floor bind: table header + cart (+ tax) so [printBill] works
+  /// without loading the full menu (admin floor print path).
+  Future<String?> prepareTableForBill({
+    required String tableId,
+    required String areaId,
+  }) async {
+    _activeTableId = tableId;
+    _activeAreaId = areaId;
+    try {
+      final results = await Future.wait<Object?>([
+        _apiService.viewTableById(tableId),
+        _apiService.getCartItemsByTableId(tableId),
+        _bestEffortTax(),
+      ]);
+      _tableDetails = results[0] as Map<String, dynamic>?;
+      _cartData = results[1] as List<Map<String, dynamic>>;
+      _taxConfig = results[2] as List<Map<String, dynamic>>;
+      _buildConsolidatedTax();
+      notifyListeners();
+      if (cartId.isEmpty) return 'No items on this table yet';
+      return null;
+    } on ApiException catch (e) {
+      _sessionExpired = e.isAuth;
+      return e.message;
+    } catch (e) {
+      return friendlyError(e);
+    }
+  }
 
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
   /// Returns null on success, else the error text. Un-printed items are sent

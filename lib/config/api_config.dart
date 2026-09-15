@@ -43,6 +43,8 @@ class ApiConfig {
   /// Backend spelling is "avaliable". Extra Add-ons rail (admin AllAvailableAddons).
   static String allAvailableAddons =
       '/restaurant/add-on/all-avaliable'; // ?searchName=
+  /// Admin AllVariants — join names onto getmenu variant_id rows.
+  static String allVariants = '/restaurant/variant/all'; // ?searchName=
 
   // Restaurant & Printer Settings
   static String getRestaurantView = '/restaurant/view';
