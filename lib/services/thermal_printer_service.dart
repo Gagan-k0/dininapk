@@ -18,6 +18,18 @@ const int kMaxTcpPort = 65535;
 bool isValidTcpPort(int? port) =>
     port != null && port >= kMinTcpPort && port <= kMaxTcpPort;
 
+enum _ColAlign { left, center, right }
+
+/// One column of a `_tableRow` — [width] is in twelfths, matching
+/// `PosColumn.width`, so existing column proportions carry over unchanged.
+class _Col {
+  final String text;
+  final int width;
+  final _ColAlign align;
+
+  const _Col(this.text, this.width, {this.align = _ColAlign.left});
+}
+
 /// Device-local receipt preferences (admin keeps receipt customization in
 /// localStorage per till too — it is not server data a waiter can read).
 class ReceiptPrefs {
@@ -166,6 +178,50 @@ class ThermalPrinterService {
     );
   }
 
+  /// Characters per printed line for the printer's default font — mirrors
+  /// esc_pos_utils' own `_getMaxCharsPerLine` for `PosFontType.fontA` (the
+  /// only font this app uses), since table rows must agree with it exactly.
+  int _charsPerLine(PaperSize paperSize) =>
+      paperSize == PaperSize.mm58 ? 32 : 48;
+
+  /// Lays out [cols] as ONE line of plain space-padded text instead of using
+  /// `Generator.row()`. `row()` positions each column with an ESC/POS
+  /// "move to absolute dot position" command, which many generic/Bluetooth
+  /// thermal printers don't honor — the cursor never actually moves, so
+  /// every column prints back-to-back with no visible gap. Literal space
+  /// bytes work on any ESC/POS printer. [widthMultiplier] halves (or more)
+  /// the usable characters per line for double-width text (e.g. size2).
+  String _tableRow(
+    PaperSize paperSize,
+    List<_Col> cols, {
+    int widthMultiplier = 1,
+  }) {
+    assert(cols.fold<int>(0, (sum, c) => sum + c.width) == 12);
+    final totalChars = _charsPerLine(paperSize) ~/ widthMultiplier;
+    var allocated = 0;
+    final parts = <String>[];
+    for (var i = 0; i < cols.length; i++) {
+      final isLast = i == cols.length - 1;
+      final chars = isLast
+          ? totalChars - allocated
+          : (cols[i].width * totalChars / 12).round();
+      allocated += chars;
+      final text = _safe(cols[i].text);
+      final clipped = text.length > chars ? text.substring(0, chars) : text;
+      final gap = chars - clipped.length;
+      switch (cols[i].align) {
+        case _ColAlign.right:
+          parts.add('${' ' * gap}$clipped');
+        case _ColAlign.center:
+          final left = gap ~/ 2;
+          parts.add('${' ' * left}$clipped${' ' * (gap - left)}');
+        case _ColAlign.left:
+          parts.add('$clipped${' ' * gap}');
+      }
+    }
+    return parts.join();
+  }
+
   Future<void> sendRaw(
     List<int> bytes, {
     required String host,
@@ -298,18 +354,13 @@ class ThermalPrinterService {
     bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
     bytes += generator.hr();
 
-    bytes += generator.row([
-      PosColumn(
-        text: 'Item Name',
-        width: 8,
-        styles: const PosStyles(bold: true),
-      ),
-      PosColumn(
-        text: 'Qty',
-        width: 4,
-        styles: const PosStyles(bold: true, align: PosAlign.right),
-      ),
-    ]);
+    bytes += generator.text(
+      _tableRow(paperSize, const [
+        _Col('Item Name', 8),
+        _Col('Qty', 4, align: _ColAlign.right),
+      ]),
+      styles: const PosStyles(bold: true),
+    );
     bytes += generator.hr();
 
     for (var line in items) {
@@ -318,14 +369,12 @@ class ThermalPrinterService {
         name += ' (${line.selectedVariant!.name})';
       }
       if (line.cancelStatus == 1) name += ' (cancelled)';
-      bytes += generator.row([
-        PosColumn(text: _safe(name), width: 9),
-        PosColumn(
-          text: 'x${line.quantity}',
-          width: 3,
-          styles: const PosStyles(align: PosAlign.right, bold: true),
-        ),
-      ]);
+      bytes += generator.text(
+        _tableRow(paperSize, [
+          _Col(name, 9),
+          _Col('x${line.quantity}', 3, align: _ColAlign.right),
+        ]),
+      );
       for (final addon in line.selectedAddons) {
         bytes += generator.text(_safe(
             '   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}'));
@@ -388,38 +437,27 @@ class ThermalPrinterService {
     }
     bytes += generator.hr();
 
-    bytes += generator.row([
-      PosColumn(text: 'Item', width: 6, styles: const PosStyles(bold: true)),
-      PosColumn(
-        text: 'Qty',
-        width: 2,
-        styles: const PosStyles(bold: true, align: PosAlign.center),
-      ),
-      PosColumn(
-        text: 'Amount',
-        width: 4,
-        styles: const PosStyles(bold: true, align: PosAlign.right),
-      ),
-    ]);
+    bytes += generator.text(
+      _tableRow(paperSize, const [
+        _Col('Item', 6),
+        _Col('Qty', 2, align: _ColAlign.center),
+        _Col('Amount', 4, align: _ColAlign.right),
+      ]),
+      styles: const PosStyles(bold: true),
+    );
     bytes += generator.hr();
 
     for (final line in bill.lines) {
       var name = line.name;
       if (line.variant != null && line.variant!.isNotEmpty) name += ' (${line.variant})';
       if (line.cancelled) name += ' (cancelled)';
-      bytes += generator.row([
-        PosColumn(text: _safe(name), width: 6),
-        PosColumn(
-          text: '${line.quantity}',
-          width: 2,
-          styles: const PosStyles(align: PosAlign.center),
-        ),
-        PosColumn(
-          text: _currencyFormat.format(line.lineTotal),
-          width: 4,
-          styles: const PosStyles(align: PosAlign.right),
-        ),
-      ]);
+      bytes += generator.text(
+        _tableRow(paperSize, [
+          _Col(name, 6),
+          _Col('${line.quantity}', 2, align: _ColAlign.center),
+          _Col(_currencyFormat.format(line.lineTotal), 4, align: _ColAlign.right),
+        ]),
+      );
       for (final a in line.addons) {
         bytes += generator.text(_safe('   + $a'));
       }
@@ -429,19 +467,20 @@ class ThermalPrinterService {
     }
 
     bytes += generator.hr();
-    bytes += _amountRow(generator, 'Subtotal', bill.subTotal, bold: true);
+    bytes += _amountRow(generator, paperSize, 'Subtotal', bill.subTotal, bold: true);
     if (bill.discount > 0) {
       final label = bill.discountName == null || bill.discountName!.isEmpty
           ? 'Discount'
           : 'Discount (${bill.discountName})';
-      bytes += _amountRow(generator, label, -bill.discount);
+      bytes += _amountRow(generator, paperSize, label, -bill.discount);
     }
     if (bill.containerCharge > 0) {
-      bytes += _amountRow(generator, 'Container Charge', bill.containerCharge);
+      bytes += _amountRow(generator, paperSize, 'Container Charge', bill.containerCharge);
     }
     if (bill.areaCharge > 0) {
       bytes += _amountRow(
         generator,
+        paperSize,
         bill.areaChargeLabel == null || bill.areaChargeLabel!.isEmpty
             ? 'AC / Area Charge'
             : 'AC / Area Charge (${bill.areaChargeLabel})',
@@ -450,32 +489,26 @@ class ThermalPrinterService {
     }
     if (bill.taxBreakdown.isNotEmpty) {
       for (final t in bill.taxBreakdown) {
-        bytes += _amountRow(generator, t.key, t.value);
+        bytes += _amountRow(generator, paperSize, t.key, t.value);
       }
     } else if (bill.taxTotal > 0) {
-      bytes += _amountRow(generator, 'Tax', bill.taxTotal);
+      bytes += _amountRow(generator, paperSize, 'Tax', bill.taxTotal);
     }
     if (bill.roundOff != 0) {
-      bytes += _amountRow(generator, 'Round Off', bill.roundOff);
+      bytes += _amountRow(generator, paperSize, 'Round Off', bill.roundOff);
     }
     bytes += generator.hr();
 
-    bytes += generator.row([
-      PosColumn(
-        text: 'GRAND TOTAL',
-        width: 7,
-        styles: const PosStyles(bold: true, height: PosTextSize.size2),
-      ),
-      PosColumn(
-        text: _currencyFormat.format(bill.grandTotal),
-        width: 5,
-        styles: const PosStyles(
-          bold: true,
-          align: PosAlign.right,
-          height: PosTextSize.size2,
-        ),
-      ),
-    ]);
+    bytes += generator.text(
+      // Only height is doubled here (as before) — PosTextSize.height alone
+      // doesn't change how many characters fit per line, only .width does,
+      // so the normal (undivided) character budget still applies.
+      _tableRow(paperSize, [
+        const _Col('GRAND TOTAL', 7),
+        _Col(_currencyFormat.format(bill.grandTotal), 5, align: _ColAlign.right),
+      ]),
+      styles: const PosStyles(bold: true, height: PosTextSize.size2),
+    );
 
     bytes += generator.hr();
     bytes += generator.text(
@@ -488,14 +521,19 @@ class ThermalPrinterService {
     return bytes;
   }
 
-  List<int> _amountRow(Generator g, String label, double amount, {bool bold = false}) {
-    return g.row([
-      PosColumn(text: _safe(label), width: 8, styles: PosStyles(bold: bold)),
-      PosColumn(
-        text: _currencyFormat.format(amount),
-        width: 4,
-        styles: PosStyles(align: PosAlign.right, bold: bold),
-      ),
-    ]);
+  List<int> _amountRow(
+    Generator g,
+    PaperSize paperSize,
+    String label,
+    double amount, {
+    bool bold = false,
+  }) {
+    return g.text(
+      _tableRow(paperSize, [
+        _Col(label, 8),
+        _Col(_currencyFormat.format(amount), 4, align: _ColAlign.right),
+      ]),
+      styles: PosStyles(bold: bold),
+    );
   }
 }
