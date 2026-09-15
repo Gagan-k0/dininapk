@@ -1,20 +1,94 @@
+/// Flatten one nesting level of `category` from by-category-itemin.
+List<String> flattenCategoryNames(dynamic categoryField) {
+  if (categoryField is! List) return <String>[];
+  final flat = <dynamic>[];
+  for (final c in categoryField) {
+    if (c is List) {
+      flat.addAll(c);
+    } else {
+      flat.add(c);
+    }
+  }
+  final names = <String>[];
+  for (final c in flat) {
+    if (c is Map) {
+      final name = c['name']?.toString().trim() ?? '';
+      if (name.isNotEmpty) names.add(name);
+    }
+  }
+  return names;
+}
+
+List<String> flattenCategoryIds(dynamic categoryField) {
+  if (categoryField is! List) return <String>[];
+  final flat = <dynamic>[];
+  for (final c in categoryField) {
+    if (c is List) {
+      flat.addAll(c);
+    } else {
+      flat.add(c);
+    }
+  }
+  final ids = <String>[];
+  for (final c in flat) {
+    if (c is Map) {
+      final id = c['_id']?.toString() ?? c['category_id']?.toString() ?? '';
+      if (id.isNotEmpty) ids.add(id);
+    } else if (c != null) {
+      final id = c.toString();
+      if (id.isNotEmpty && id != 'null') ids.add(id);
+    }
+  }
+  return ids;
+}
+
 class MenuCategory {
   final String id;
   final String categoryName;
+  final String? valueName;
+  final String? displayName;
   final String? image;
   final int count;
 
   MenuCategory({
     required this.id,
     required this.categoryName,
+    this.valueName,
+    this.displayName,
     this.image,
     this.count = 0,
   });
 
+  /// Names used by admin `filterCachedDineinMenu` ([valuename, displayname, name]).
+  List<String> get filterNames {
+    final out = <String>[];
+    void add(String? v) {
+      final t = v?.trim() ?? '';
+      if (t.isNotEmpty && !out.contains(t)) out.add(t);
+    }
+
+    add(valueName);
+    add(displayName);
+    add(categoryName);
+    return out;
+  }
+
   factory MenuCategory.fromJson(Map<String, dynamic> json) {
+    final valueName = json['valuename']?.toString();
+    final displayName = json['displayname']?.toString();
+    final legacy = json['category_name']?.toString();
+    final label = () {
+      for (final v in [displayName, valueName, legacy]) {
+        if (v != null && v.trim().isNotEmpty) return v.trim();
+      }
+      return 'Category';
+    }();
+
     return MenuCategory(
       id: json['_id']?.toString() ?? '',
-      categoryName: json['category_name']?.toString() ?? 'Category',
+      categoryName: label,
+      valueName: valueName,
+      displayName: displayName,
       image: json['image']?.toString(),
       count: int.tryParse(json['count']?.toString() ?? '0') ?? 0,
     );
@@ -99,6 +173,8 @@ class MenuAddon {
 class MenuItem {
   final String id;
   final String categoryId;
+  final List<String> categoryNames;
+  final List<String> categoryIds;
   final String name;
   final String? displayName;
   final String? shortCode;
@@ -111,9 +187,18 @@ class MenuItem {
   bool get hasVariants => variants.isNotEmpty;
   bool get hasAddons => addons.isNotEmpty;
 
+  /// Prefer non-empty displayname (empty string must not hide `name`).
+  String get label {
+    final d = displayName?.trim() ?? '';
+    if (d.isNotEmpty) return d;
+    return name;
+  }
+
   MenuItem({
     required this.id,
     required this.categoryId,
+    this.categoryNames = const [],
+    this.categoryIds = const [],
     required this.name,
     this.displayName,
     this.shortCode,
@@ -170,9 +255,36 @@ class MenuItem {
       }
     }
 
+    final categoryNames = flattenCategoryNames(json['category']);
+    final categoryIds = <String>{
+      ...flattenCategoryIds(json['category']),
+      if (json['category_id'] != null &&
+          json['category_id'].toString().isNotEmpty)
+        json['category_id'].toString(),
+    };
+
+    if (json['categories'] is List) {
+      for (final c in (json['categories'] as List)) {
+        if (c is Map) {
+          final id =
+              c['category_id']?.toString() ?? c['_id']?.toString() ?? '';
+          if (id.isNotEmpty) categoryIds.add(id);
+          final n =
+              c['name']?.toString() ??
+              c['valuename']?.toString() ??
+              c['displayname']?.toString() ??
+              '';
+          if (n.trim().isNotEmpty) categoryNames.add(n.trim());
+        }
+      }
+    }
+
     return MenuItem(
       id: json['_id']?.toString() ?? '',
-      categoryId: json['category_id']?.toString() ?? '',
+      categoryId: json['category_id']?.toString() ??
+          (categoryIds.isNotEmpty ? categoryIds.first : ''),
+      categoryNames: categoryNames,
+      categoryIds: categoryIds.toList(),
       name: json['name']?.toString() ?? 'Menu Item',
       displayName: json['displayname']?.toString(),
       shortCode:

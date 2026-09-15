@@ -6,6 +6,7 @@ import '../models/cart_model.dart';
 import '../services/api_service.dart';
 import '../services/bill_builder.dart';
 import '../services/thermal_printer_service.dart';
+import '../utils/menu_filter.dart';
 
 /// Ordering screen state for ONE open table. Mirrors the admin
 /// `dinein-food-categories` contract:
@@ -93,29 +94,23 @@ class PosProvider with ChangeNotifier {
   }
 
   List<MenuItem> get filteredMenuItems {
-    var result = List<MenuItem>.from(_allItems);
-
+    MenuCategory? selected;
     if (_selectedCategoryId != null && _selectedCategoryId!.isNotEmpty) {
-      result = result
-          .where((i) => i.categoryId == _selectedCategoryId)
-          .toList();
+      for (final c in _categories) {
+        if (c.id == _selectedCategoryId) {
+          selected = c;
+          break;
+        }
+      }
     }
 
-    if (_searchQuery.trim().isNotEmpty) {
-      final q = _searchQuery.toLowerCase().trim();
-      result = result.where((item) {
-        final nameMatch = item.name.toLowerCase().contains(q);
-        final displayMatch =
-            item.displayName?.toLowerCase().contains(q) ?? false;
-        final codeMatch = item.shortCode?.toLowerCase().contains(q) ?? false;
-        return nameMatch || displayMatch || codeMatch;
-      }).toList();
-    }
-
-    result.sort(
-      (a, b) => (a.displayName ?? a.name).compareTo(b.displayName ?? b.name),
+    // Admin dine-in: match by category name (by-category-itemin strips ids).
+    return filterMenuItems(
+      items: _allItems,
+      categoryNames: selected?.filterNames ?? const [],
+      categoryId: _selectedCategoryId,
+      search: _searchQuery,
     );
-    return result;
   }
 
   // ── Cart computed values (cancelled rows excluded everywhere) ──
@@ -160,13 +155,16 @@ class PosProvider with ChangeNotifier {
 
   String get cartId => cart?['_id']?.toString() ?? '';
 
-  /// Phase 1 safety rule: Release only after the bill status is durable.
+  /// Phase 1 safety rule: Release only after the bill status is durable,
+  /// unless device pref `kot_enable_release_table` matches admin exception.
   bool get canRelease {
     if (cartId.isEmpty || cartMenuItems.isEmpty) return false;
+    if (hasUnsentKotItems || hasUnprintedItems) return false;
     final s = tableStatus;
-    return (s == 'PRINTED' || s == 'PAID') &&
-        !hasUnsentKotItems &&
-        !hasUnprintedItems;
+    if (s == 'PRINTED' || s == 'PAID') return true;
+    final allowKotRelease = _receiptPrefs?.kotEnableReleaseTable ?? false;
+    if (!allowKotRelease) return false;
+    return s == 'KOT_PRINT' || s == 'KOT' || s == 'RUNNING';
   }
 
   String get releaseBlockedReason {
@@ -175,6 +173,10 @@ class PosProvider with ChangeNotifier {
     }
     if (hasUnsentKotItems) return 'Send KOT for the new items first';
     if (hasUnprintedItems) return 'Print KOT before printing the bill';
+    final allowKotRelease = _receiptPrefs?.kotEnableReleaseTable ?? false;
+    if (allowKotRelease) {
+      return 'Send/print KOT before releasing the table';
+    }
     return 'Print the bill before releasing the table';
   }
 

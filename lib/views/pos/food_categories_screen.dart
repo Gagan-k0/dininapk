@@ -379,7 +379,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       leftBar = const Color(0xFFFB8C00);
     }
 
-    final displayName = item.displayName ?? item.name;
+    final displayName = item.label;
 
     final inCart = pos.cartMenuItems.any((ci) {
       final menuData = ci['menuData'];
@@ -394,6 +394,8 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       onTap: () => _handleItemTap(pos, item),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
+        width: double.infinity,
+        height: double.infinity,
         decoration: BoxDecoration(
           color: inCart ? const Color(0xFFFFF7ED) : bg,
           borderRadius: BorderRadius.circular(8),
@@ -413,17 +415,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Flexible(
-              child: Text(
-                displayName,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF1E293B),
-                  height: 1.25,
-                ),
+            Text(
+              displayName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1E293B),
+                height: 1.25,
               ),
             ),
             if (item.shortCode != null && item.shortCode!.isNotEmpty)
