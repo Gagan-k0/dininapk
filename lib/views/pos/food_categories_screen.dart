@@ -599,58 +599,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _showExtraAmountDialog(PosProvider pos, MenuItem item) async {
-    final controller = TextEditingController(
-      text: item.price > 0 ? item.price.toStringAsFixed(2) : '',
-    );
     final amount = await showDialog<double>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(item.label),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(
-            labelText: 'Amount (₹)',
-            border: OutlineInputBorder(),
-          ),
-          onSubmitted: (_) {
-            final v = double.tryParse(controller.text.trim());
-            if (v != null && v > 0) Navigator.pop(ctx, v);
-          },
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final v = double.tryParse(controller.text.trim());
-              if (v == null || v <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Enter an amount greater than 0'),
-                    backgroundColor: Color(0xFFDC2626),
-                    behavior: SnackBarBehavior.floating,
-                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                );
-                return;
-              }
-              Navigator.pop(ctx, v);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF97316),
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Add'),
-          ),
-        ],
+      builder: (ctx) => _ExtraAmountDialog(
+        title: item.label,
+        initialText: item.price > 0 ? item.price.toStringAsFixed(2) : '',
       ),
     );
-    controller.dispose();
     if (amount == null || !mounted) return;
     final success = await pos.addExtraItem(name: item.label, price: amount);
     if (!mounted) return;
@@ -673,85 +628,21 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _showCustomExtraDialog(PosProvider pos) async {
-    final nameCtrl = TextEditingController();
-    final priceCtrl = TextEditingController();
-    final ok = await showDialog<bool>(
+    final result = await showDialog<({String name, double price})>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        // Do NOT use AlertDialog.scrollable:true — it binds SingleChildScrollView
-        // to the modal PrimaryScrollController and can assert _dependents.isEmpty
-        // on keyboard/dialog teardown. Content-only scroll with primary:false.
-        title: const Text('+ Custom add-on'),
-        content: SingleChildScrollView(
-          primary: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: priceCtrl,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Amount (₹)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final name = nameCtrl.text.trim();
-              final price = double.tryParse(priceCtrl.text.trim());
-              if (name.isEmpty || price == null || price <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Enter a name and amount greater than 0'),
-                    backgroundColor: Color(0xFFDC2626),
-                    behavior: SnackBarBehavior.floating,
-                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                );
-                return;
-              }
-              Navigator.pop(ctx, true);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF97316),
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+      builder: (ctx) => const _CustomExtraDialog(),
     );
-    final name = nameCtrl.text.trim();
-    final price = double.tryParse(priceCtrl.text.trim()) ?? 0;
-    nameCtrl.dispose();
-    priceCtrl.dispose();
-    if (ok != true || !mounted) return;
-    final success = await pos.addExtraItem(name: name, price: price);
+    if (result == null || !mounted) return;
+    final success = await pos.addExtraItem(
+      name: result.name,
+      price: result.price,
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           success
-              ? 'Added $name ₹${price.toStringAsFixed(2)}'
+              ? 'Added ${result.name} ₹${result.price.toStringAsFixed(2)}'
               : (pos.errorMessage ?? 'Failed to add'),
         ),
         duration: const Duration(milliseconds: 800),
@@ -1181,6 +1072,177 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
+    );
+  }
+}
+
+// Controllers live on the dialog State so dispose runs after IME/route
+// teardown — disposing immediately after await showDialog races TextField
+// unmount and asserts _dependents.isEmpty (framework.dart).
+class _ExtraAmountDialog extends StatefulWidget {
+  final String title;
+  final String initialText;
+  const _ExtraAmountDialog({required this.title, required this.initialText});
+
+  @override
+  State<_ExtraAmountDialog> createState() => _ExtraAmountDialogState();
+}
+
+class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialText);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final v = double.tryParse(_controller.text.trim());
+    if (v == null || v <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter an amount greater than 0'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+      );
+      return;
+    }
+    Navigator.pop(context, v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SingleChildScrollView(
+        primary: false,
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: 'Amount (₹)',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFF97316),
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Add'),
+        ),
+      ],
+    );
+  }
+}
+
+class _CustomExtraDialog extends StatefulWidget {
+  const _CustomExtraDialog();
+
+  @override
+  State<_CustomExtraDialog> createState() => _CustomExtraDialogState();
+}
+
+class _CustomExtraDialogState extends State<_CustomExtraDialog> {
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _priceCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController();
+    _priceCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _priceCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _nameCtrl.text.trim();
+    final price = double.tryParse(_priceCtrl.text.trim());
+    if (name.isEmpty || price == null || price <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a name and amount greater than 0'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+      );
+      return;
+    }
+    Navigator.pop(context, (name: name, price: price));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('+ Custom add-on'),
+      content: SingleChildScrollView(
+        primary: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _nameCtrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _priceCtrl,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Amount (₹)',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFF97316),
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Add'),
+        ),
+      ],
     );
   }
 }
