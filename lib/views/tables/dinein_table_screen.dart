@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
+import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 
 class DineInTableScreen extends StatefulWidget {
@@ -17,7 +18,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<TableProvider>(context, listen: false).loadDashboardData();
+      Provider.of<TableProvider>(context, listen: false).ensureLoaded();
     });
   }
 
@@ -148,6 +149,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 style: TextStyle(color: Color(0xFFEF4444)),
               ),
               onTap: () async {
+                tableProv.reset();
+                Provider.of<PosProvider>(context, listen: false)
+                    .clearFloorDirty();
                 await auth.logout();
                 if (context.mounted) {
                   Navigator.pushReplacementNamed(context, '/login');
@@ -186,6 +190,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     ),
                     TextButton(
                       onPressed: () async {
+                        tableProv.reset();
+                        Provider.of<PosProvider>(context, listen: false)
+                            .clearFloorDirty();
                         await auth.logout();
                         if (context.mounted) {
                           Navigator.of(context).pushReplacementNamed('/login');
@@ -436,6 +443,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   Future<void> _relogin() async {
     final auth = Provider.of<AuthProvider>(context, listen: false);
     Provider.of<TableProvider>(context, listen: false).reset();
+    Provider.of<PosProvider>(context, listen: false).clearFloorDirty();
     await auth.logout();
     if (!mounted) return;
     Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
@@ -800,6 +808,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
   String? _cartIdForTable(DineInTable table) => table.cartId;
 
+  Future<void> _openPos(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    await Navigator.pushNamed(
+      context,
+      '/food-categories',
+      arguments: {'tableId': table.id, 'areaId': table.areaId},
+    );
+    if (!context.mounted) return;
+    final pos = Provider.of<PosProvider>(context, listen: false);
+    if (pos.consumeFloorDirty()) {
+      await tableProv.refresh();
+    } else {
+      await tableProv.ensureLoaded();
+    }
+  }
+
   void _toast(String text, {bool error = false, Color? color}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -993,11 +1020,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     if (!ok) return;
 
-    Navigator.pushNamed(
-      context,
-      '/food-categories',
-      arguments: {'tableId': table.id, 'areaId': table.areaId},
-    );
+    if (!context.mounted) return;
+    await _openPos(context, tableProv, table);
   }
 
   Future<void> _rejectQrOrder(
@@ -1102,11 +1126,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           );
           return;
         }
-        Navigator.pushNamed(
-          context,
-          '/food-categories',
-          arguments: {'tableId': table.id, 'areaId': table.areaId},
-        ).then((_) => tableProv.refresh());
+        _openPos(context, tableProv, table);
       },
       onLongPress: canShift
           ? () => _showShiftTableDialog(context, tableProv, table)
@@ -1295,16 +1315,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         icon: Icons.open_in_new,
                         color: const Color(0xFF16A34A),
                         tooltip: 'Open table to print or release',
-                        onPressed: () {
-                          Navigator.pushNamed(
-                            context,
-                            '/food-categories',
-                            arguments: {
-                              'tableId': table.id,
-                              'areaId': table.areaId,
-                            },
-                          ).then((_) => tableProv.refresh());
-                        },
+                        onPressed: () => _openPos(context, tableProv, table),
                       ),
                     ],
                   ),
