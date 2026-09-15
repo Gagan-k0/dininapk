@@ -6,11 +6,12 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 
 import 'thermal_printer_service.dart' show isValidTcpPort;
+import 'usb_printer.dart';
 
 /// How the waiter tablet reaches a silent ESC/POS printer.
-enum PrinterTransport { lan, bluetooth }
+enum PrinterTransport { lan, bluetooth, usb }
 
-/// One candidate found by LAN :9100 probe or Bluetooth paired list.
+/// One candidate found by LAN :9100 probe, Bluetooth paired list or USB host.
 class DiscoveredPrinter {
   final PrinterTransport transport;
   final String displayName;
@@ -18,17 +19,23 @@ class DiscoveredPrinter {
   final int port;
   final String? macAddress;
 
+  /// `vendorId:productId` of a USB printer.
+  final String? usbId;
+
   const DiscoveredPrinter({
     required this.transport,
     required this.displayName,
     this.host,
     this.port = 9100,
     this.macAddress,
+    this.usbId,
   });
 
-  String get id => transport == PrinterTransport.lan
-      ? 'lan:${host!}:$port'
-      : 'bt:${macAddress!}';
+  String get id => switch (transport) {
+        PrinterTransport.lan => 'lan:${host!}:$port',
+        PrinterTransport.bluetooth => 'bt:${macAddress!}',
+        PrinterTransport.usb => 'usb:${usbId!}',
+      };
 }
 
 /// Derives `a.b.c` from an IPv4 string, or null if invalid / not IPv4.
@@ -154,6 +161,22 @@ class PrinterDiscoveryService {
         .toList();
     list.sort((a, b) => a.displayName.compareTo(b.displayName));
     return list;
+  }
+
+  /// Printers plugged into the tablet over USB / OTG. No permission prompt
+  /// here — Android asks once, on the first print to that device.
+  Future<List<DiscoveredPrinter>> scanUsb() async {
+    final printers = await UsbPrinter.list();
+    return printers
+        .map(
+          (p) => DiscoveredPrinter(
+            transport: PrinterTransport.usb,
+            displayName: p.name,
+            usbId: p.id,
+          ),
+        )
+        .toList()
+      ..sort((a, b) => a.displayName.compareTo(b.displayName));
   }
 
   Future<void> _ensureBluetoothPermissions() async {

@@ -51,6 +51,9 @@ class ApiConfig {
   /// Same endpoint the admin exe/website read for `printer_settings` (and
   /// everything else on the Restaurant Settings page).
   static String restaurantSettingsView = '/restaurant/settings/view';
+  /// Only `printer_settings`, readable by any staff — waiter accounts lack the
+  /// `private` permission [restaurantSettingsView] requires.
+  static String printerSettings = '/restaurant/settings/printer-settings';
   /// Same endpoint the admin exe/website PUT `receipt_settings`/`printer_config`
   /// to — shared source of truth across every device for one restaurant.
   static String updatePrinterSettings =

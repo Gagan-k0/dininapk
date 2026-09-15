@@ -100,13 +100,16 @@ void main() {
       ),
     );
 
-    expect(find.text('ALL'), findsOneWidget);
-    expect(find.text('STARTERS'), findsOneWidget);
+    // Labels render as typed; Favorites and Extra Add-ons sit under All.
+    expect(find.text('All'), findsOneWidget);
+    expect(find.text('Favorites'), findsOneWidget);
+    expect(find.text('Starters'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Collapse categories'));
     await tester.pumpAndSettle();
-    expect(find.text('A'), findsOneWidget); // ALL initial
-    expect(find.text('S'), findsOneWidget); // Starters
+    expect(find.text('Starters'), findsNothing);
+    expect(find.byIcon(Icons.apps), findsOneWidget); // All keeps its icon
+    expect(find.text('S'), findsOneWidget); // Starters initial
 
     await tester.tap(find.text('S'));
     await tester.pumpAndSettle();
