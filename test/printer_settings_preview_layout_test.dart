@@ -26,6 +26,33 @@ void main() {
     expect(tester.getTopLeft(preview).dy, lessThan(800));
   });
 
+  testWidgets('landscape: preview stays put (sticky) while the form scrolls', (tester) async {
+    await _pumpAt(tester, const Size(1280, 800));
+    final preview = find.byType(ReceiptPreview);
+    final before = tester.getTopLeft(preview).dy;
+    final connectionBefore = tester.getTopLeft(find.text('Connection Type')).dy;
+
+    await tester.dragFrom(const Offset(300, 500), const Offset(0, -500));
+    await tester.pumpAndSettle();
+
+    expect(tester.getTopLeft(find.text('Connection Type')).dy, lessThan(connectionBefore));
+    expect(tester.getTopLeft(preview).dy, before);
+  });
+
+  testWidgets('typing in a receipt text field updates the live preview', (tester) async {
+    await _pumpAt(tester, const Size(1280, 800));
+    final field = find.widgetWithText(TextFormField, 'Custom KOT message');
+    await tester.ensureVisible(field);
+    await tester.pumpAndSettle();
+    await tester.enterText(field, 'Serve hot');
+    await tester.pump();
+
+    expect(
+      find.descendant(of: find.byType(ReceiptPreview), matching: find.text('Serve hot')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('portrait phone: preview stays stacked under the form', (tester) async {
     await _pumpAt(tester, const Size(400, 800));
 

@@ -59,7 +59,11 @@ void main() {
       // User explicitly picks 80mm for Bluetooth (a real 80mm BT printer).
       await tester.tap(find.widgetWithText(ChoiceChip, 'Bluetooth'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(ChoiceChip, '80mm'));
+      // The chip can sit under the pinned Save/Test bar — scroll it into view.
+      final chip80 = find.widgetWithText(ChoiceChip, '80mm');
+      await tester.ensureVisible(chip80);
+      await tester.pumpAndSettle();
+      await tester.tap(chip80);
       await tester.pumpAndSettle();
 
       // Switching away and back must not silently revert their choice.

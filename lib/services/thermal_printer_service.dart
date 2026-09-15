@@ -226,8 +226,19 @@ class ThermalPrinterService {
   /// Characters per printed line for the printer's default font — mirrors
   /// esc_pos_utils' own `_getMaxCharsPerLine` for `PosFontType.fontA` (the
   /// only font this app uses), since table rows must agree with it exactly.
-  int _charsPerLine(PaperSize paperSize) =>
-      paperSize == PaperSize.mm58 ? 32 : 48;
+  int _charsPerLine(PaperSize paperSize) => paperSize == PaperSize.mm58
+      ? (_font == PosFontType.fontB ? 42 : 32)
+      : (_font == PosFontType.fontB ? 64 : 48);
+
+  /// Font of the ticket being generated — set at the start of each KOT/bill
+  /// so [_tableRow] pads to the same width the printer wraps at.
+  PosFontType _font = PosFontType.fontA;
+
+  /// Admin small/medium/large: small = the printer's narrow Font B (more
+  /// characters per line), large = double-height item rows.
+  PosFontType _fontFor(String size) => size == 'small' ? PosFontType.fontB : PosFontType.fontA;
+
+  PosTextSize _itemHeight(String size) => size == 'large' ? PosTextSize.size2 : PosTextSize.size1;
 
   /// Lays out [cols] as ONE line of plain space-padded text instead of using
   /// `Generator.row()`. `row()` positions each column with an ESC/POS
@@ -428,7 +439,8 @@ class ThermalPrinterService {
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
-    List<int> bytes = [];
+    _font = _fontFor(customization.kotFontSize);
+    List<int> bytes = generator.setGlobalFont(_font);
 
     // Short on purpose: double-width halves the line (24 chars on 80mm, 16 on
     // 58mm), so a long title wrapped mid-word. Like admin's KOT, no restaurant
@@ -489,7 +501,10 @@ class ThermalPrinterService {
           _Col(name, 9),
           _Col('x${line.quantity}', 3, align: _ColAlign.right),
         ]),
-        styles: PosStyles(bold: _isBold(customization)),
+        styles: PosStyles(
+          bold: _isBold(customization),
+          height: _itemHeight(customization.kotFontSize),
+        ),
       );
       if (customization.kotShowAddons) {
         for (final addon in line.selectedAddons) {
@@ -530,6 +545,8 @@ class ThermalPrinterService {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
     final currencyFormat = _buildCurrencyFormat(customization);
+    _font = _fontFor(customization.billFontSize);
+    final fontBytes = generator.setGlobalFont(_font);
 
     List<int> buildCopy() {
       List<int> bytes = [];
@@ -627,7 +644,10 @@ class ThermalPrinterService {
             _Col('${line.quantity}', 2, align: _ColAlign.center),
             _Col(currencyFormat.format(line.lineTotal), 4, align: _ColAlign.right),
           ]),
-          styles: PosStyles(bold: _isBold(customization)),
+          styles: PosStyles(
+            bold: _isBold(customization),
+            height: _itemHeight(customization.billFontSize),
+          ),
         );
         if (customization.billShowAddons) {
           for (final a in line.addons) {
@@ -726,7 +746,7 @@ class ThermalPrinterService {
       return bytes;
     }
 
-    return [...buildCopy(), ...generator.feed(2), ...generator.cut()];
+    return [...fontBytes, ...buildCopy(), ...generator.feed(2), ...generator.cut()];
   }
 
   List<int> _amountRow(

@@ -66,8 +66,14 @@ class ReceiptCustomizationService {
   /// return it. Throws [ApiException] on failure — callers on a Settings
   /// screen should catch it and keep showing the last cached copy.
   Future<ReceiptCustomization> fetchAndCache() async {
-    final restaurant = await _api.getRestaurantSettingsView();
-    final printerSettings = restaurant['printer_settings'];
+    Object? printerSettings;
+    try {
+      printerSettings = (await _api.getPrinterSettings())['printer_settings'];
+    } on ApiException catch (e) {
+      // An API without the staff-readable route yet: try the admin-only one.
+      if (e.isAuth || e.isNetwork) rethrow;
+      printerSettings = (await _api.getRestaurantSettingsView())['printer_settings'];
+    }
     final receiptSettings = printerSettings is Map
         ? printerSettings['receipt_settings']
         : null;

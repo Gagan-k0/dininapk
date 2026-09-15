@@ -419,9 +419,12 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: TextFormField(
+        // Recreated after a sync so it shows the synced value, not the stale one.
+        key: ValueKey('$label|$_receiptBaseline'),
         initialValue: value,
         enabled: !busy,
-        onChanged: onChanged,
+        // setState so the live preview follows every keystroke.
+        onChanged: (v) => setState(() => onChanged(v)),
         style: const TextStyle(fontSize: 13),
         decoration: InputDecoration(
           labelText: label,
@@ -429,6 +432,93 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
           filled: true,
           fillColor: Colors.white,
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      ),
+    );
+  }
+
+  /// White rounded panel grouping one area of the form. A [Material], not a
+  /// decorated Container, so the switch tiles inside keep their ink splashes.
+  Widget _card(Widget child) => Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Material(
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: Color(0xFFE2E8F0)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: SizedBox(width: double.infinity, child: child),
+          ),
+        ),
+      );
+
+  /// Titled set of controls laid out as a grid: two columns once there is room.
+  Widget _group(String title, List<Widget> children) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: const TextStyle(
+                  fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF334155))),
+          const Divider(height: 12),
+          LayoutBuilder(builder: (context, c) {
+            const gap = 16.0;
+            final cols = c.maxWidth >= 520 ? 2 : 1;
+            final width = (c.maxWidth - gap * (cols - 1)) / cols;
+            return Wrap(
+              spacing: gap,
+              children: [for (final child in children) SizedBox(width: width, child: child)],
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  /// One assigned printer at a glance; tapping it opens its connection fields.
+  Widget _roleTile(PrinterRole role, bool busy) {
+    final selected = _editing == role;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: busy
+          ? null
+          : () => setState(() {
+                _editing = role;
+                _discovered = [];
+              }),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFFFF7ED) : Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? const Color(0xFFF97316) : const Color(0xFFE2E8F0),
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(role == PrinterRole.kot ? Icons.soup_kitchen : Icons.receipt_long,
+                color: const Color(0xFFF97316)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${_roleLabel(role)} printer',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                  Text(_describe(role),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -444,35 +534,18 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
           'Printers',
           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
         ),
-        const SizedBox(height: 8),
-        SizedBox(
-          width: double.infinity,
-          child: SegmentedButton<PrinterRole>(
-            segments: const [
-              ButtonSegment(
-                value: PrinterRole.bill,
-                icon: Icon(Icons.receipt_long),
-                label: Text('Bill printer'),
-              ),
-              ButtonSegment(
-                value: PrinterRole.kot,
-                icon: Icon(Icons.soup_kitchen),
-                label: Text('KOT printer'),
-              ),
-            ],
-            selected: {_editing},
-            onSelectionChanged: busy
-                ? null
-                : (s) => setState(() {
-                      _editing = s.first;
-                      _discovered = [];
-                    }),
-          ),
+        const Text(
+          'KOTs print only on the KOT printer, bills only on the Bill printer. '
+          'Tap one to set it up.',
+          style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
         ),
-        const SizedBox(height: 6),
-        Text(
-          'Bill: ${_describe(PrinterRole.bill)}   ·   KOT: ${_describe(PrinterRole.kot)}',
-          style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(child: _roleTile(PrinterRole.bill, busy)),
+            const SizedBox(width: 12),
+            Expanded(child: _roleTile(PrinterRole.kot, busy)),
+          ],
         ),
         if (_editing == PrinterRole.kot)
           SwitchListTile(
@@ -507,7 +580,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
       ),
       const SizedBox(height: 8),
-      Row(
+      // Wrap, not Row: three chips don't fit a phone-width card on one line.
+      Wrap(
+        runSpacing: 8,
         children: ['LAN', 'Bluetooth', 'USB'].map((type) {
           final isSelected = slot.type == type;
           return Padding(
@@ -748,10 +823,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         ),
         const SizedBox(height: 8),
 
-        ExpansionTile(
-          tilePadding: EdgeInsets.zero,
-          title: const Text('Header', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          children: [
+        _group('Header', [
             _toggle('Show restaurant name', _receipt.showRestaurantName,
                 (v) => setState(() => _receipt = _receipt.copyWith(showRestaurantName: v)), busy: busy),
             _chips('Alignment', const ['left', 'center', 'right'], _receipt.restaurantNameAlignment,
@@ -768,10 +840,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 (v) => _receipt = _receipt.copyWith(customHeaderLine2: v), busy: busy),
           ],
         ),
-        ExpansionTile(
-          tilePadding: EdgeInsets.zero,
-          title: const Text('KOT', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          children: [
+        _group('KOT', [
+            _chips('Font size', const ['small', 'medium', 'large'], _receipt.kotFontSize,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotFontSize: v)), busy: busy),
             _toggle('Show department', _receipt.kotShowDepartmentName,
                 (v) => setState(() => _receipt = _receipt.copyWith(kotShowDepartmentName: v)), busy: busy),
             _toggle('Show table number', _receipt.kotShowTableNumber,
@@ -790,10 +861,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 (v) => _receipt = _receipt.copyWith(kotCustomMessage: v), busy: busy),
           ],
         ),
-        ExpansionTile(
-          tilePadding: EdgeInsets.zero,
-          title: const Text('Bill', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          children: [
+        _group('Bill', [
+            _chips('Font size', const ['small', 'medium', 'large'], _receipt.billFontSize,
+                (v) => setState(() => _receipt = _receipt.copyWith(billFontSize: v)), busy: busy),
             _toggle('Show date', _receipt.billShowDate,
                 (v) => setState(() => _receipt = _receipt.copyWith(billShowDate: v)), busy: busy),
             _toggle('Show table number', _receipt.billShowTableOrOrderNo,
@@ -830,10 +900,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 (v) => setState(() => _receipt = _receipt.copyWith(billShowCustomerCopy: v)), busy: busy),
           ],
         ),
-        ExpansionTile(
-          tilePadding: EdgeInsets.zero,
-          title: const Text('Footer & General', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-          children: [
+        _group('Footer & General', [
             _textRow('Thank-you message', _receipt.footerThankYouMessage,
                 (v) => _receipt = _receipt.copyWith(footerThankYouMessage: v), busy: busy),
             _textRow('Footer sub-message', _receipt.footerSubMessage,
@@ -911,6 +978,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         final form = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _buildPrinterAssignment(busy),
             if (_kotFollowsBill)
               const Padding(
@@ -922,7 +990,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
               )
             else
               ..._buildConnectionFields(busy),
-
+            ])),
+            _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text(
               'Paper Size',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
@@ -987,94 +1056,89 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   ? null
                   : (v) => setState(() => _kotEnableReleaseTable = v),
             ),
-            const SizedBox(height: 24),
-
-            _buildReceiptCustomizationSection(busy),
-            if (!wide) ...[
-              const SizedBox(height: 12),
-              _buildPreviewPanel(),
-            ],
-            const SizedBox(height: 24),
-
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: ElevatedButton(
-                onPressed: busy ? null : _saveSettings,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFF97316),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: _isSaving
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Text(
-                        'Save Printer Settings',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: OutlinedButton(
-                onPressed: busy ? null : _testPrint,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFFF97316),
-                  side: const BorderSide(color: Color(0xFFF97316)),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: _isTesting
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Text(
-                        'Test ${_roleLabel(_editing)} Printer',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
-                        ),
-                      ),
-              ),
-            ),
+            ])),
+            _card(_buildReceiptCustomizationSection(busy)),
+            if (!wide) _card(_buildPreviewPanel()),
           ],
         );
 
-        if (!wide) {
-          return SingleChildScrollView(padding: const EdgeInsets.all(16), child: form);
-        }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: form),
+        const buttonText = TextStyle(fontWeight: FontWeight.bold, fontSize: 15);
+        final buttonShape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(12));
+        // Pinned under the form so Save/Test are reachable without scrolling to the end.
+        final actions = Container(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            border: Border(top: BorderSide(color: Color(0xFFE2E8F0))),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: busy ? null : _testPrint,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFF97316),
+                        side: const BorderSide(color: Color(0xFFF97316)),
+                        shape: buttonShape,
+                      ),
+                      child: _isTesting
+                          ? const SizedBox(
+                              height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                          : Text('Test ${_roleLabel(_editing)} Printer',
+                              maxLines: 1, overflow: TextOverflow.ellipsis, style: buttonText),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: SizedBox(
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: busy ? null : _saveSettings,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFF97316),
+                        foregroundColor: Colors.white,
+                        shape: buttonShape,
+                      ),
+                      child: _isSaving
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                          : const Text('Save Printer Settings',
+                              maxLines: 1, overflow: TextOverflow.ellipsis, style: buttonText),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            SizedBox(
-              width: 380,
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(0, 16, 16, 16),
-                child: _buildPreviewPanel(),
-              ),
-            ),
-          ],
+          ),
         );
+
+        final content = !wide
+            ? SingleChildScrollView(padding: const EdgeInsets.all(16), child: form)
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: form),
+                  ),
+                  // Sticky: the preview scrolls on its own, so it stays in view
+                  // beside whichever setting is being changed.
+                  SizedBox(
+                    width: 400,
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(0, 16, 16, 16),
+                      child: _card(_buildPreviewPanel()),
+                    ),
+                  ),
+                ],
+              );
+        return Column(children: [Expanded(child: content), actions]);
       }),
     );
   }

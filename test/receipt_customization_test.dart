@@ -127,6 +127,35 @@ void main() {
       expect(on, contains('Payment : UPI QR'));
     });
 
+    test('small font uses Font B widths; large doubles item height', () async {
+      const line = BillLine(name: 'Paneer Tikka', quantity: 1, lineTotal: 120);
+      final bill = BillPrintData(
+        restaurantName: 'X',
+        tableNumber: '1',
+        lines: const [line],
+        subTotal: 120,
+        taxTotal: 0,
+        grandTotal: 120,
+      );
+      final small = latin1.decode(await service.generateBillBytes(
+        bill: bill,
+        paperSize: PaperSize.mm58,
+        customization: ReceiptCustomization.defaults.copyWith(billFontSize: 'small'),
+      ), allowInvalid: true);
+      final row = RegExp(r'1\. Paneer Tikka[^\n\x1b\x1d]*').firstMatch(small)!.group(0)!;
+      expect(row.length, 42); // Font B on 58mm, not Font A's 32
+      expect(small, contains('\x1bM\x01')); // ESC M 1 = Font B
+
+      final large = await service.generateBillBytes(
+        bill: bill,
+        customization: ReceiptCustomization.defaults.copyWith(billFontSize: 'large'),
+      );
+      final medium = await service.generateBillBytes(bill: bill);
+      // GS ! 1 = double height. GRAND TOTAL always uses it; large adds the item rows.
+      int tall(List<int> b) => '\x1d!\x01'.allMatches(latin1.decode(b, allowInvalid: true)).length;
+      expect(tall(large), greaterThan(tall(medium)));
+    });
+
     test('KOT has no restaurant header and its title fits double-width on 58mm', () async {
       final text = latin1.decode(await service.generateKotBytes(
         table: table,

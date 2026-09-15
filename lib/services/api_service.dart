@@ -304,6 +304,12 @@ class ApiService {
     return env.map ?? {};
   }
 
+  /// GET /restaurant/settings/printer-settings → `{ printer_settings }`.
+  Future<Map<String, dynamic>> getPrinterSettings() async {
+    final env = await _client.get(ApiConfig.printerSettings);
+    return env.map ?? {};
+  }
+
   /// PUT /restaurant/settings/update-printer-settings — the SAME endpoint the
   /// admin exe/website write to, so a change made here is visible there too.
   Future<void> updatePrinterSettings({
