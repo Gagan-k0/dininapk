@@ -200,7 +200,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final wide = constraints.maxWidth >= 700;
@@ -288,9 +288,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     final isSelected = prov.selectedTab == index;
     return ChoiceChip(
       showCheckmark: false,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      labelPadding: const EdgeInsets.symmetric(horizontal: 6),
       avatar: Icon(
         icon,
-        size: 16,
+        size: 14,
         color: isSelected ? Colors.white : activeColor,
       ),
       label: Text(label),
@@ -298,7 +302,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       selectedColor: activeColor,
       backgroundColor: activeColor.withValues(alpha: 0.08),
       labelStyle: TextStyle(
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: FontWeight.bold,
         color: isSelected ? Colors.white : activeColor,
       ),
@@ -317,18 +321,18 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     final isSelected = prov.selectedTab == index;
     return Material(
       color: isSelected ? activeColor : activeColor.withValues(alpha: 0.08),
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(16),
       child: InkWell(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(16),
         onTap: () => prov.setSelectedTab(index),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
                 icon,
-                size: 16,
+                size: 14,
                 color: isSelected ? Colors.white : activeColor,
               ),
               const SizedBox(width: 6),
@@ -339,7 +343,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.bold,
                     color: isSelected ? Colors.white : activeColor,
                   ),
@@ -364,7 +368,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       onPressed: onPressed,
       style: IconButton.styleFrom(
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        minimumSize: const Size(36, 36),
+        minimumSize: const Size(32, 32),
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,
       ),
@@ -534,7 +538,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       children: [
         // KPI Summary Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           color: Colors.white,
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -605,10 +609,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
         // Area Selection Filter Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           color: Colors.white,
           child: SizedBox(
-            height: 38,
+            height: 32,
             child: ListView(
               scrollDirection: Axis.horizontal,
               children: [
@@ -638,7 +642,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     ],
                   )
                 : ListView(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
                     children: grouped.entries.map((entry) {
                       final areaName = entry.key;
                       final areaTables = entry.value;
@@ -647,14 +651,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 8,
-                              horizontal: 4,
-                            ),
+                            padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
                             child: Text(
                               areaName,
                               style: const TextStyle(
-                                fontSize: 16,
+                                fontSize: 14,
                                 fontWeight: FontWeight.w800,
                                 color: Color(
                                   0xFFE11D48,
@@ -665,17 +666,19 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                           LayoutBuilder(
                             builder: (context, gridConstraints) {
                               final w = gridConstraints.maxWidth;
+                              // Higher aspect = shorter cards → more rows visible.
+                              // Keep maxExtent ≥200 so badge+actions never overflow.
                               final double maxExtent;
                               final double aspect;
                               if (w < 600) {
                                 maxExtent = 200;
-                                aspect = 0.92;
+                                aspect = 1.2;
                               } else if (w < 900) {
                                 maxExtent = 220;
-                                aspect = 0.95;
+                                aspect = 1.25;
                               } else {
                                 maxExtent = 240;
-                                aspect = 0.95;
+                                aspect = 1.3;
                               }
                               return GridView.builder(
                                 shrinkWrap: true,
@@ -684,8 +687,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                                     SliverGridDelegateWithMaxCrossAxisExtent(
                                   maxCrossAxisExtent: maxExtent,
                                   childAspectRatio: aspect,
-                                  crossAxisSpacing: 12,
-                                  mainAxisSpacing: 12,
+                                  crossAxisSpacing: 8,
+                                  mainAxisSpacing: 8,
                                 ),
                                 itemCount: areaTables.length,
                                 itemBuilder: (context, index) {
@@ -698,7 +701,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                               );
                             },
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 8),
                         ],
                       );
                     }).toList(),
@@ -720,13 +723,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   }) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: Container(
-        width: expand ? null : 140,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        width: expand ? null : 130,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: color.withValues(alpha: selected ? 0.18 : 0.08),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: color.withValues(alpha: selected ? 0.9 : 0.2),
             width: selected ? 1.5 : 1,
@@ -735,8 +738,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
         child: Row(
           mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 8),
+            Icon(icon, color: color, size: 16),
+            const SizedBox(width: 6),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -747,15 +750,17 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 9,
+                      fontSize: 8,
                       fontWeight: FontWeight.bold,
                       color: color,
                     ),
                   ),
                   Text(
                     value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: color,
                     ),
@@ -772,12 +777,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   Widget _buildAreaChip(TableProvider prov, String? areaId, String name) {
     final isSelected = prov.selectedAreaId == areaId;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.only(right: 6),
       child: FilterChip(
         selected: isSelected,
         label: Text(name),
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+        padding: EdgeInsets.zero,
+        labelPadding: const EdgeInsets.symmetric(horizontal: 8),
         labelStyle: TextStyle(
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: FontWeight.bold,
           color: isSelected ? Colors.white : const Color(0xFF64748B),
         ),
@@ -1103,25 +1112,23 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ? () => _showShiftTableDialog(context, tableProv, table)
           : null,
       child: Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
         decoration: BoxDecoration(
           color: cardBg,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: borderCol, width: 1.5),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.02),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+              blurRadius: 6,
+              offset: const Offset(0, 1),
             ),
           ],
         ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Flexible(
                   child: Text(
@@ -1129,7 +1136,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: Color(0xFF0F172A),
                     ),
@@ -1138,6 +1145,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 Flexible(
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.end,
                     children: [
                       if (table.isCombined)
                         const Padding(
@@ -1162,8 +1170,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                           '[${table.noOfPeople} Seats]',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
                           style: const TextStyle(
-                            fontSize: 10,
+                            fontSize: 9,
                             color: Color(0xFF64748B),
                           ),
                         ),
@@ -1173,36 +1182,53 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 ),
               ],
             ),
-            if (table.isOccupied) ...[
-              Text(
-                [
-                  if (seated != null) seated,
-                  if (customer != null)
-                    customer
-                  else if (table.itemCount > 0)
-                    '${table.itemCount} items',
-                ].join(' • '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 9, color: Color(0xFF475569)),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: table.isOccupied
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            [
+                              ?seated,
+                              if (customer != null)
+                                customer
+                              else if (table.itemCount > 0)
+                                '${table.itemCount} items',
+                            ].join(' • '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 9,
+                              color: Color(0xFF475569),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '₹${table.totalPrice.toStringAsFixed(2)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF0F172A),
+                            ),
+                          ),
+                        ],
+                      )
+                    : const Text(
+                        'Tap to Order',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF94A3B8),
+                        ),
+                      ),
               ),
-              Text(
-                '₹${table.totalPrice.toStringAsFixed(2)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF0F172A),
-                ),
-              ),
-            ] else
-              const Text(
-                'Tap to Order',
-                style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
-              ),
-
-            // Quick actions: Accept/Reject (QR), Shift, Print bill, Release
+            ),
+            // Quick actions: Accept/Reject (QR), Shift, Open
             Row(
               children: [
                 Flexible(
@@ -1210,19 +1236,19 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     alignment: Alignment.centerLeft,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
+                        horizontal: 5,
+                        vertical: 1,
                       ),
                       decoration: BoxDecoration(
                         color: badgeColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(6),
+                        borderRadius: BorderRadius.circular(5),
                       ),
                       child: Text(
                         statusText,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 9,
+                          fontSize: 8,
                           fontWeight: FontWeight.bold,
                           color: badgeColor,
                         ),
@@ -1241,7 +1267,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         onPressed: () =>
                             _acceptQrOrder(context, tableProv, table),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 4),
                       _compactIconButton(
                         icon: Icons.close,
                         color: const Color(0xFFDC2626),
@@ -1263,7 +1289,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                           onPressed: () =>
                               _showShiftTableDialog(context, tableProv, table),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 4),
                       ],
                       _compactIconButton(
                         icon: Icons.open_in_new,
