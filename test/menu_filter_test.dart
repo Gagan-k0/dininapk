@@ -107,5 +107,30 @@ void main() {
       expect(item.categoryId, '');
       expect(item.label, 'Soup');
     });
+
+    test('label prefers displayname then name; never blank', () {
+      expect(
+        MenuItem.fromJson({
+          '_id': 'm2',
+          'name': '',
+          'displayname': '  Masala Dosa  ',
+          'attribute': 'VEG',
+          'price': 80,
+        }).label,
+        'Masala Dosa',
+      );
+      expect(
+        MenuItem.fromJson({
+          '_id': 'm3',
+          'name': '   ',
+          'displayname': '',
+          'shortCode': 'MD1',
+          'attribute': 'VEG',
+          'price': 80,
+        }).label,
+        'MD1',
+      );
+      expect(_item(name: '', displayName: '').label, 'Item');
+    });
   });
 }

@@ -170,6 +170,19 @@ class MenuAddon {
   }
 }
 
+/// `name` in API payloads is sometimes `""` while `displayname` holds the title.
+String _parseMenuName(Map<String, dynamic> json) {
+  final name = json['name']?.toString().trim() ?? '';
+  if (name.isNotEmpty) return name;
+  final display = json['displayname']?.toString().trim() ?? '';
+  if (display.isNotEmpty) return display;
+  final code = json['shortCode']?.toString().trim() ??
+      json['short_code']?.toString().trim() ??
+      '';
+  if (code.isNotEmpty) return code;
+  return 'Menu Item';
+}
+
 class MenuItem {
   final String id;
   final String categoryId;
@@ -190,11 +203,13 @@ class MenuItem {
   bool get needsCustomisation =>
       customisable || hasVariants || hasAddons;
 
-  /// Prefer non-empty displayname (empty string must not hide `name`).
+  /// Visible title for POS tiles (never return blank — empty API strings happen).
   String get label {
-    final d = displayName?.trim() ?? '';
-    if (d.isNotEmpty) return d;
-    return name;
+    for (final raw in [displayName, name, shortCode]) {
+      final t = raw?.trim() ?? '';
+      if (t.isNotEmpty) return t;
+    }
+    return 'Item';
   }
 
   MenuItem({
@@ -304,7 +319,7 @@ class MenuItem {
           (categoryIds.isNotEmpty ? categoryIds.first : ''),
       categoryNames: categoryNames,
       categoryIds: categoryIds.toList(),
-      name: json['name']?.toString() ?? 'Menu Item',
+      name: _parseMenuName(json),
       displayName: json['displayname']?.toString(),
       shortCode:
           json['shortCode']?.toString() ?? json['short_code']?.toString(),

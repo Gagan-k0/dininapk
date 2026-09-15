@@ -394,17 +394,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       leftBar = const Color(0xFFF97316);
     }
 
-    // Avoid AnimatedContainer+Align — on some tablets the label got zero paint extent.
+    // No Flexible/Expanded in grid cells — flex in a fixed-height tile can paint zero-size text.
+    final shortCode = item.shortCode?.trim() ?? '';
     return Material(
       color: bg,
       borderRadius: BorderRadius.circular(8),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => _handleItemTap(pos, item),
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          width: double.infinity,
-          height: double.infinity,
-          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+        child: DecoratedBox(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border(
@@ -414,34 +412,40 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               left: BorderSide(color: leftBar, width: 5),
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                item.label,
-                maxLines: 2,
-                softWrap: true,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.black87,
-                  height: 1.2,
-                ),
-              ),
-              if (item.shortCode != null && item.shortCode!.trim().isNotEmpty)
-                Text(
-                  '[ ${item.shortCode!.trim()} ]',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF475569),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1E293B),
+                      height: 1.15,
+                    ),
                   ),
-                ),
-            ],
+                  if (shortCode.isNotEmpty &&
+                      shortCode != item.label.trim())
+                    Text(
+                      '[ $shortCode ]',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF475569),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -568,7 +572,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              item.displayName ?? item.name,
+                              item.label,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
