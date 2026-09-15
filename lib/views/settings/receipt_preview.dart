@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:intl/intl.dart' show DateFormat; // intl's TextDirection would shadow Flutter's
 
 import '../../models/receipt_customization.dart';
 
@@ -55,18 +55,19 @@ class ReceiptPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final mono = TextStyle(fontFamily: 'monospace', fontSize: _size == 'small' ? 10 : 12, height: 1.4);
     final bold = mono.copyWith(fontWeight: FontWeight.bold);
-    final itemStyle = (c.fontWeight.toLowerCase() == 'bold' ? bold : mono)
-        .copyWith(fontSize: _size == 'large' ? 16 : null);
+    final itemStyle = c.fontWeight.toLowerCase() == 'bold' ? bold : mono;
+    final tallItems = _size == 'large';
     // The printer can't render '₹' and prints "Rs." instead.
     final cur = c.currencySymbol.replaceAll('₹', 'Rs.');
     String money(String amount) => '$cur $amount';
     final lines = <Widget>[];
 
-    void line(String text, {TextStyle? style, String align = 'center'}) {
-      lines.add(Align(
-        alignment: _align(align),
-        child: Text(text, style: style ?? mono, textAlign: TextAlign.center),
-      ));
+    /// [tall] mimics ESC/POS double height: same width, stretched vertically.
+    void line(String text, {TextStyle? style, String align = 'center', bool tall = false}) {
+      final t = Text(text, style: style ?? mono, textAlign: TextAlign.center);
+      lines.add(tall
+          ? SizedBox(height: 34, child: FittedBox(fit: BoxFit.fill, child: t))
+          : Align(alignment: _align(align), child: t));
     }
 
     if (isKot) {
@@ -80,7 +81,7 @@ class ReceiptPreview extends StatelessWidget {
       var name = 'Paneer Butter Masala';
       if (c.kotShowVariant) name += ' (Full)';
       if (c.kotShowSerialNumber) name = '1. $name';
-      line(_row(name, 'x2'), style: itemStyle, align: 'left');
+      line(_row(name, 'x2'), style: itemStyle, align: 'left', tall: tallItems);
       if (c.kotShowAddons) line('   + Extra Gravy', align: 'left');
       if (c.kotShowItemDescription) line('   Note: Less spicy', align: 'left');
       if (c.kotCustomMessage.isNotEmpty) {
@@ -108,7 +109,7 @@ class ReceiptPreview extends StatelessWidget {
       var name = 'Paneer Butter Masala';
       if (c.billShowVariant) name += ' (Full)';
       if (c.billShowSerialNumber) name = '1. $name';
-      line(_row(name, money('340.00')), style: itemStyle, align: 'left');
+      line(_row(name, money('340.00')), style: itemStyle, align: 'left', tall: tallItems);
       if (c.billShowAddons) line('   + Extra Gravy', align: 'left');
       if (c.billShowItemDescription) line('   (Less spicy)', align: 'left');
       lines.add(const Divider());
@@ -135,8 +136,23 @@ class ReceiptPreview extends StatelessWidget {
       }
     }
 
-    return Container(
-      width: double.infinity,
+    // Paper exactly one printer line wide, then scaled down to fit the panel —
+    // a 48-character row used to wrap, splitting "Item Name" from "Qty".
+    // Measured exactly as the Text widgets render: merged with the theme's
+    // DefaultTextStyle (its letterSpacing widened every row) and the device font scale.
+    final charWidth = (TextPainter(
+      text: TextSpan(text: 'M' * 10, style: DefaultTextStyle.of(context).style.merge(mono)),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout())
+        .width /
+        10;
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.topCenter,
+      child: Container(
+      // + padding 24, border 2, and slack so sub-pixel rounding can't wrap a full row.
+      width: _cpl * charWidth + 24 + 2 + 4,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -145,6 +161,7 @@ class ReceiptPreview extends StatelessWidget {
         boxShadow: const [BoxShadow(color: Color(0x1A000000), blurRadius: 6)],
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: lines),
+      ),
     );
   }
 }

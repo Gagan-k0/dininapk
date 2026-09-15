@@ -402,6 +402,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 final selected = value.toLowerCase() == o.toLowerCase();
                 return ChoiceChip(
                   label: Text(o, style: const TextStyle(fontSize: 12)),
+                  // No checkmark: it widened the chips so they wrapped in the grid.
+                  showCheckmark: false,
                   selected: selected,
                   selectedColor: const Color(0xFFF97316),
                   labelStyle: TextStyle(color: selected ? Colors.white : Colors.black87),
@@ -981,11 +983,22 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
             _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _buildPrinterAssignment(busy),
             if (_kotFollowsBill)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 20),
-                child: Text(
-                  'Kitchen tickets print on the Bill printer. Switch to "Bill printer" to change it.',
-                  style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+              // The switch alone read as "KOT printer can't be chosen" — offer the way out.
+              Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: OutlinedButton.icon(
+                  onPressed: busy
+                      ? null
+                      : () => setState(() {
+                            _kotSameAsBill = false;
+                            _discovered = [];
+                          }),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Set up a separate KOT printer'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFF97316),
+                    side: const BorderSide(color: Color(0xFFF97316)),
+                  ),
                 ),
               )
             else

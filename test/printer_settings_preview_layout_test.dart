@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:dineinapk/models/receipt_customization.dart';
 import 'package:dineinapk/views/settings/printer_settings_screen.dart';
 import 'package:dineinapk/views/settings/receipt_preview.dart';
 
@@ -51,6 +52,24 @@ void main() {
       find.descendant(of: find.byType(ReceiptPreview), matching: find.text('Serve hot')),
       findsOneWidget,
     );
+  });
+
+  testWidgets('a full 80mm row stays on one line in a narrow panel with theme letter spacing',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData(textTheme: const TextTheme(bodyMedium: TextStyle(letterSpacing: 0.5))),
+      home: const Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 300,
+            child: ReceiptPreview(c: ReceiptCustomization.defaults, isKot: true, charsPerLine: 48),
+          ),
+        ),
+      ),
+    ));
+    final row = tester.getSize(find.textContaining('Paneer Butter Masala'));
+    final single = tester.getSize(find.text('Table #: 5'));
+    expect(row.height, single.height); // wrapped rows are twice as tall
   });
 
   testWidgets('portrait phone: preview stays stacked under the form', (tester) async {
