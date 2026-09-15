@@ -24,6 +24,8 @@ class FoodCategoriesScreen extends StatefulWidget {
 }
 
 class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
+  static const int _cartSlideMs = 420;
+
   bool _initialized = false;
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _cartScrollController = ScrollController();
@@ -31,8 +33,11 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   final MenuPageWindow<MenuItem> _menuPage =
       MenuPageWindow<MenuItem>(pageSize: 80);
   Timer? _searchDebounce;
+  Timer? _cartToggleUnlock;
   bool _railCollapsed = false;
   bool _cartCollapsed = false;
+  bool _cartToggleLocked = false;
+  bool _phoneSheetScrollPending = false;
   final _itemTapGuard = AsyncGuard();
   final _customiseAddGuard = AsyncGuard();
 
@@ -73,12 +78,50 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _cartToggleUnlock?.cancel();
     _menuScrollController.removeListener(_onMenuScroll);
     _menuScrollController.dispose();
     _searchController.dispose();
     _cartScrollController.dispose();
     super.dispose();
   }
+
+  /// New lines append under the sticky totals/KOT row — scroll them into view.
+  void _scrollCartToNewest() {
+    if (!mounted) return;
+    // Tablet drawer only: phone FAB sheet ignores collapse prefs.
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    if (wide && _cartCollapsed) return;
+    void attempt() {
+      if (!mounted || !_cartScrollController.hasClients) return;
+      final max = _cartScrollController.position.maxScrollExtent;
+      if (max <= 0) return;
+      _cartScrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+      );
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => attempt());
+    });
+  }
+
+  void _setCartCollapsed(bool collapsed) {
+    if (_cartToggleLocked || _cartCollapsed == collapsed) return;
+    final wasCollapsed = _cartCollapsed;
+    _cartToggleLocked = true;
+    setState(() => _cartCollapsed = collapsed);
+    PosUiPrefs.saveCartCollapsed(collapsed);
+    _cartToggleUnlock?.cancel();
+    _cartToggleUnlock = Timer(const Duration(milliseconds: _cartSlideMs), () {
+      _cartToggleLocked = false;
+    });
+    if (wasCollapsed && !collapsed) _scrollCartToNewest();
+  }
+
+  void _toggleCartCollapsed() => _setCartCollapsed(!_cartCollapsed);
 
   void _onMenuScroll() {
     if (!_menuScrollController.hasClients) return;
@@ -239,9 +282,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                     ignoring: _cartCollapsed,
                                     child: AnimatedSlide(
                                       duration: const Duration(
-                                        milliseconds: 280,
+                                        milliseconds: _cartSlideMs,
                                       ),
-                                      curve: Curves.easeOutCubic,
+                                      curve: Curves.easeInOutCubic,
                                       offset: _cartCollapsed
                                           ? const Offset(1, 0)
                                           : Offset.zero,
@@ -259,15 +302,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                           child: _CartBottomSheet(
                                             pos: pos,
                                             embedded: true,
-                                            onToggleCollapsed: () {
-                                              setState(
-                                                () => _cartCollapsed =
-                                                    !_cartCollapsed,
-                                              );
-                                              PosUiPrefs.saveCartCollapsed(
-                                                _cartCollapsed,
-                                              );
-                                            },
+                                            scrollController:
+                                                _cartScrollController,
+                                            onToggleCollapsed:
+                                                _toggleCartCollapsed,
                                           ),
                                         ),
                                       ),
@@ -695,6 +733,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     if (amount == null || !mounted) return;
     final success = await pos.addExtraItem(name: item.label, price: amount);
     if (!mounted || success == null) return;
+    if (success) _scrollCartToNewest();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -724,6 +763,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       price: result.price,
     );
     if (!mounted || success == null) return;
+    if (success) _scrollCartToNewest();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -755,6 +795,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
     if (!mounted || success == null) return;
     if (success) {
+      _scrollCartToNewest();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Added ${item.displayName ?? item.name}'),
@@ -1111,18 +1152,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           const SizedBox(height: 8),
           IconButton(
             tooltip: 'Expand cart',
-            onPressed: () {
-              setState(() => _cartCollapsed = false);
-              PosUiPrefs.saveCartCollapsed(false);
-            },
+            onPressed: () => _setCartCollapsed(false),
             icon: const Icon(Icons.menu, color: Color(0xFF475569)),
           ),
           const SizedBox(height: 4),
           InkWell(
-            onTap: () {
-              setState(() => _cartCollapsed = false);
-              PosUiPrefs.saveCartCollapsed(false);
-            },
+            onTap: () => _setCartCollapsed(false),
             child: Column(
               children: [
                 Badge(
@@ -1154,11 +1189,23 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   void _showCartBottomSheet(BuildContext context, PosProvider pos) {
+    _phoneSheetScrollPending = true;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
+      builder: (ctx) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_phoneSheetScrollPending) return;
+          _phoneSheetScrollPending = false;
+          _scrollCartToNewest();
+        });
+        return _CartBottomSheet(
+          pos: pos,
+          embedded: false,
+          scrollController: _cartScrollController,
+        );
+      },
     );
   }
 }
@@ -1351,10 +1398,12 @@ class _CustomExtraDialogState extends State<_CustomExtraDialog> {
 class _CartBottomSheet extends StatelessWidget {
   final PosProvider pos;
   final bool embedded;
+  final ScrollController? scrollController;
   final VoidCallback? onToggleCollapsed;
   const _CartBottomSheet({
     required this.pos,
     this.embedded = false,
+    this.scrollController,
     this.onToggleCollapsed,
   });
 
@@ -1433,6 +1482,7 @@ class _CartBottomSheet extends StatelessWidget {
               );
             }
             return ListView.separated(
+              controller: scrollController,
               padding: const EdgeInsets.symmetric(vertical: 4),
               itemCount: items.length,
               separatorBuilder: (_, _) => const Divider(
@@ -1480,6 +1530,7 @@ class _CartBottomSheet extends StatelessWidget {
             body = LayoutBuilder(
               builder: (context, constraints) {
                 return SingleChildScrollView(
+                  controller: scrollController,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
                       minHeight: constraints.maxHeight,
