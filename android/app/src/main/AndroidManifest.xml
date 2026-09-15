@@ -16,6 +16,8 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <!-- USB / OTG thermal printers; optional so devices without USB host still install -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 
     <application
         android:label="dineinapk"

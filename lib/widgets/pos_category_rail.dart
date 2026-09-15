@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../models/menu_model.dart';
+import '../utils/extra_addons.dart';
 
 /// Vertical category rail for dine-in POS (tablet-friendly).
-/// Collapsible hamburger-style drawer: expanded list or slim icon strip.
+/// Collapsible: expanded list or slim icon strip.
+/// Special tiles: ALL / Favorites / Extra Add-ons (admin dine-in parity).
 class PosCategoryRail extends StatelessWidget {
   const PosCategoryRail({
     super.key,
@@ -12,7 +14,7 @@ class PosCategoryRail extends StatelessWidget {
     required this.onSelect,
     required this.collapsed,
     required this.onToggleCollapsed,
-    this.expandedWidth = 160,
+    this.expandedWidth = 168,
     this.collapsedWidth = 52,
   });
 
@@ -26,7 +28,8 @@ class PosCategoryRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final itemCount = categories.length + 1; // ALL + categories
+    // ALL + Favorites + Extra Add-ons + DB categories
+    final itemCount = categories.length + 3;
     final width = collapsed ? collapsedWidth : expandedWidth;
 
     return Material(
@@ -82,15 +85,35 @@ class PosCategoryRail extends StatelessWidget {
                 itemBuilder: (context, index) {
                   if (index == 0) {
                     return _CategoryRailTile(
-                      label: 'ALL',
+                      label: 'All',
+                      icon: Icons.apps,
                       collapsed: collapsed,
                       selected: selectedCategoryId == null,
                       onTap: () => onSelect(null),
                     );
                   }
-                  final cat = categories[index - 1];
+                  if (index == 1) {
+                    return _CategoryRailTile(
+                      label: 'Favorites',
+                      icon: Icons.star_border,
+                      collapsed: collapsed,
+                      selected: selectedCategoryId == kFavoritesCategoryId,
+                      onTap: () => onSelect(kFavoritesCategoryId),
+                    );
+                  }
+                  if (index == 2) {
+                    return _CategoryRailTile(
+                      label: 'Extra Add-ons',
+                      icon: Icons.add_circle_outline,
+                      collapsed: collapsed,
+                      selected: selectedCategoryId == kExtraAddonsCategoryId,
+                      onTap: () => onSelect(kExtraAddonsCategoryId),
+                    );
+                  }
+                  final cat = categories[index - 3];
                   return _CategoryRailTile(
                     label: cat.categoryName,
+                    imageUrl: cat.image,
                     collapsed: collapsed,
                     selected: selectedCategoryId == cat.id,
                     onTap: () => onSelect(cat.id),
@@ -111,71 +134,112 @@ class _CategoryRailTile extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.collapsed,
+    this.icon,
+    this.imageUrl,
   });
 
   final String label;
   final bool selected;
   final bool collapsed;
   final VoidCallback onTap;
+  final IconData? icon;
+  final String? imageUrl;
 
   @override
   Widget build(BuildContext context) {
     final trimmed = label.trim();
     final initial = trimmed.isEmpty ? '?' : trimmed[0].toUpperCase();
+    final accent = const Color(0xFFF97316);
+    final bg = selected ? const Color(0xFFFFF7ED) : Colors.white;
+    final border = selected ? accent : const Color(0xFFE2E8F0);
+    final fg = selected ? accent : const Color(0xFF1E293B);
+
+    Widget leading() {
+      if (imageUrl != null && imageUrl!.trim().isNotEmpty) {
+        return ClipOval(
+          child: Image.network(
+            imageUrl!,
+            width: collapsed ? 22 : 28,
+            height: collapsed ? 22 : 28,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _iconOrInitial(initial, fg),
+          ),
+        );
+      }
+      if (icon != null) {
+        return Icon(icon, size: collapsed ? 18 : 20, color: fg);
+      }
+      return _iconOrInitial(initial, fg);
+    }
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Material(
-        color: selected ? const Color(0xFFF97316) : const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(10),
+        color: bg,
+        borderRadius: BorderRadius.circular(12),
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(12),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 160),
             curve: Curves.easeOut,
             width: double.infinity,
             padding: EdgeInsets.symmetric(
               horizontal: collapsed ? 0 : 10,
-              vertical: collapsed ? 12 : 11,
+              vertical: collapsed ? 12 : 10,
             ),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: selected
-                    ? const Color(0xFFF97316)
-                    : const Color(0xFFE2E8F0),
-              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: border, width: selected ? 1.5 : 1),
             ),
             child: collapsed
-                ? Center(
-                    child: Text(
-                      initial,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                        color: selected
-                            ? Colors.white
-                            : const Color(0xFF334155),
+                ? Center(child: leading())
+                : Row(
+                    children: [
+                      leading(),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          label,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            height: 1.2,
+                            color: fg,
+                          ),
+                        ),
                       ),
-                    ),
-                  )
-                : Text(
-                    label.toUpperCase(),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      height: 1.2,
-                      letterSpacing: 0.2,
-                      color: selected
-                          ? Colors.white
-                          : const Color(0xFF334155),
-                    ),
+                      Icon(
+                        Icons.chevron_right,
+                        size: 16,
+                        color: selected ? accent : const Color(0xFFCBD5E1),
+                      ),
+                    ],
                   ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _iconOrInitial(String initial, Color fg) {
+    return Container(
+      width: collapsed ? 22 : 28,
+      height: collapsed ? 22 : 28,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F9),
+        shape: BoxShape.circle,
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Text(
+        initial,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          color: fg,
         ),
       ),
     );

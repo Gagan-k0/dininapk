@@ -59,7 +59,11 @@ void main() {
       // User explicitly picks 80mm for Bluetooth (a real 80mm BT printer).
       await tester.tap(find.widgetWithText(ChoiceChip, 'Bluetooth'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(ChoiceChip, '80mm'));
+      // The chip can sit under the pinned Save/Test bar — scroll it into view.
+      final chip80 = find.widgetWithText(ChoiceChip, '80mm');
+      await tester.ensureVisible(chip80);
+      await tester.pumpAndSettle();
+      await tester.tap(chip80);
       await tester.pumpAndSettle();
 
       // Switching away and back must not silently revert their choice.
@@ -104,6 +108,26 @@ void main() {
         find.widgetWithText(ChoiceChip, '58mm'),
       );
       expect(still58.selected, isTrue);
+    },
+  );
+
+  testWidgets(
+    'saving only a printer change succeeds without the admin-only settings API',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await _pump(tester);
+
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Bluetooth'));
+      await tester.pumpAndSettle();
+      final saveButton = find.widgetWithText(ElevatedButton, 'Save Printer Settings');
+      await tester.ensureVisible(saveButton);
+      await tester.pumpAndSettle();
+      await tester.tap(saveButton, warnIfMissed: false);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Printer settings saved successfully!'), findsOneWidget);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('printer_type'), 'Bluetooth');
     },
   );
 

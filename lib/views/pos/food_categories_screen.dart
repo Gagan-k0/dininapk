@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
 import '../../services/pos_ui_prefs.dart';
+import '../../utils/extra_addons.dart';
 import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
@@ -124,6 +125,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     final tableNum = pos.tableNumber.isEmpty ? 'Table' : pos.tableNumber;
     final tableStatus = pos.tableStatus;
     final loadFailed = pos.errorMessage != null && pos.categories.isEmpty && !pos.isLoading;
+    final wideCart = MediaQuery.sizeOf(context).width >= 720;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -161,8 +163,32 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           setState(() => _railCollapsed = !_railCollapsed);
                           PosUiPrefs.saveRailCollapsed(_railCollapsed);
                         },
-                        onSelect: (id) {
+                        onSelect: (id) async {
                           pos.selectCategory(id);
+                          if (id == kExtraAddonsCategoryId) {
+                            await pos.ensureExtraAddonsLoaded();
+                            if (!mounted) return;
+                            if (pos.errorMessage ==
+                                'Failed to load extra add-ons') {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(pos.errorMessage!),
+                                  backgroundColor: const Color(0xFFDC2626),
+                                  behavior: SnackBarBehavior.floating,
+                                  margin: const EdgeInsets.fromLTRB(
+                                    48,
+                                    0,
+                                    48,
+                                    16,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 8,
+                                  ),
+                                ),
+                              );
+                            }
+                          }
                           _menuPage.reset(
                             pos.filteredMenuItems,
                             fingerprint: menuFilterFingerprint(
@@ -173,7 +199,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           if (_menuScrollController.hasClients) {
                             _menuScrollController.jumpTo(0);
                           }
-                          setState(() {});
+                          if (mounted) setState(() {});
                         },
                       ),
                       const VerticalDivider(
@@ -182,13 +208,24 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         color: Color(0xFFE2E8F0),
                       ),
                       Expanded(child: _buildMainContent(pos, tableStatus)),
+                      if (wideCart) ...[
+                        const VerticalDivider(
+                          width: 1,
+                          thickness: 1,
+                          color: Color(0xFFE2E8F0),
+                        ),
+                        SizedBox(
+                          width: 340,
+                          child: _CartBottomSheet(pos: pos, embedded: true),
+                        ),
+                      ],
                     ],
                   ),
                 ),
               ],
             ),
-      // Cart FAB showing item count
-      floatingActionButton: pos.cartMenuItems.isNotEmpty
+      // Phone / narrow: cart via bottom sheet. Wide: persistent right panel.
+      floatingActionButton: (!wideCart && pos.cartMenuItems.isNotEmpty)
           ? FloatingActionButton.extended(
               onPressed: () => _showCartBottomSheet(context, pos),
               backgroundColor: const Color(0xFFF97316),
@@ -415,7 +452,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           ),
         ),
         Expanded(
-          child: items.isEmpty && !pos.isLoading
+          child: items.isEmpty && !pos.isLoading && !pos.isExtraAddonsLoading
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -429,11 +466,20 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                       Text(
                         pos.searchQuery.isNotEmpty
                             ? 'No items found for "${pos.searchQuery}"'
-                            : 'No menu items available',
+                            : pos.selectedCategoryId == kFavoritesCategoryId
+                                ? 'No favorite items yet'
+                                : pos.selectedCategoryId ==
+                                        kExtraAddonsCategoryId
+                                    ? (pos.errorMessage ==
+                                            'Failed to load extra add-ons'
+                                        ? 'Failed to load extra add-ons — tap Extra Add-ons to retry'
+                                        : 'No extra add-ons available')
+                                    : 'No menu items available',
                         style: TextStyle(
                           color: Colors.grey.shade500,
                           fontSize: 14,
                         ),
+                        textAlign: TextAlign.center,
                       ),
                       if (pos.hasActiveFilters) ...[
                         const SizedBox(height: 12),
@@ -445,6 +491,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     ],
                   ),
                 )
+              : items.isEmpty && pos.isExtraAddonsLoading
+                  ? const Center(
+                      child: CircularProgressIndicator(
+                        color: Color(0xFFF97316),
+                      ),
+                    )
               : GridView.builder(
                   controller: _menuScrollController,
                   physics: const BouncingScrollPhysics(
@@ -499,6 +551,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
     if (pos.isLoading || pos.isBusy) return;
 
+    if (item.isCustomAddonTrigger) {
+      await _showCustomExtraDialog(pos);
+      return;
+    }
+    if (item.isExtraAddon) {
+      await _showExtraAmountDialog(pos, item);
+      return;
+    }
+
     var working = item;
     // Admin opens customisable items via viewMenubyId — list payload often
     // lacks fully populated variant/addon value arrays.
@@ -512,6 +573,169 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     }
 
     await _addItemAndShowResult(pos, working);
+  }
+
+  Future<void> _showExtraAmountDialog(PosProvider pos, MenuItem item) async {
+    final controller = TextEditingController(
+      text: item.price > 0 ? item.price.toStringAsFixed(2) : '',
+    );
+    final amount = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item.label),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: 'Amount (₹)',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) {
+            final v = double.tryParse(controller.text.trim());
+            if (v != null && v > 0) Navigator.pop(ctx, v);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final v = double.tryParse(controller.text.trim());
+              if (v == null || v <= 0) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Enter an amount greater than 0'),
+                    backgroundColor: Color(0xFFDC2626),
+                    behavior: SnackBarBehavior.floating,
+                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                );
+                return;
+              }
+              Navigator.pop(ctx, v);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF97316),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (amount == null || !mounted) return;
+    final success = await pos.addExtraItem(name: item.label, price: amount);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added ${item.label} ₹${amount.toStringAsFixed(2)}'
+              : (pos.errorMessage ?? 'Failed to add'),
+        ),
+        duration: const Duration(milliseconds: 800),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+
+  Future<void> _showCustomExtraDialog(PosProvider pos) async {
+    final nameCtrl = TextEditingController();
+    final priceCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        // Keyboard shrinks dialog height; scroll title+content so the
+        // two-field Column does not BOTTOM OVERFLOW (admin modal scrolls).
+        scrollable: true,
+        title: const Text('+ Custom add-on'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: priceCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Amount (₹)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final name = nameCtrl.text.trim();
+              final price = double.tryParse(priceCtrl.text.trim());
+              if (name.isEmpty || price == null || price <= 0) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Enter a name and amount greater than 0'),
+                    backgroundColor: Color(0xFFDC2626),
+                    behavior: SnackBarBehavior.floating,
+                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                );
+                return;
+              }
+              Navigator.pop(ctx, true);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF97316),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    final name = nameCtrl.text.trim();
+    final price = double.tryParse(priceCtrl.text.trim()) ?? 0;
+    nameCtrl.dispose();
+    priceCtrl.dispose();
+    if (ok != true || !mounted) return;
+    final success = await pos.addExtraItem(name: name, price: price);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added $name ₹${price.toStringAsFixed(2)}'
+              : (pos.errorMessage ?? 'Failed to add'),
+        ),
+        duration: const Duration(milliseconds: 800),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
   }
 
   Future<void> _addItemAndShowResult(
@@ -849,18 +1073,19 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _CartBottomSheet(pos: pos),
+      builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
     );
   }
 }
 
 // ============================================================
-// Cart Bottom Sheet
+// Cart panel (bottom sheet on phone, right column on tablet)
 // ============================================================
 
 class _CartBottomSheet extends StatelessWidget {
   final PosProvider pos;
-  const _CartBottomSheet({required this.pos});
+  final bool embedded;
+  const _CartBottomSheet({required this.pos, this.embedded = false});
 
   @override
   Widget build(BuildContext context) {
@@ -871,28 +1096,96 @@ class _CartBottomSheet extends StatelessWidget {
           final items = pos.cartMenuItems;
           final cartObj = pos.cartData.isNotEmpty ? pos.cartData[0] : null;
 
+          // Scrollable body: when keyboard shrinks height, totals/actions scroll
+          // instead of BOTTOM OVERFLOW. When tall enough, footer stays pinned down.
+          final body = items.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text(
+                      'Cart is empty — tap menu items to add',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF94A3B8)),
+                    ),
+                  ),
+                )
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    return SingleChildScrollView(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                for (var i = 0; i < items.length; i++) ...[
+                                  if (i > 0)
+                                    const Divider(
+                                      height: 1,
+                                      color: Color(0xFFF1F5F9),
+                                    ),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 4,
+                                    ),
+                                    child: _buildCartItem(
+                                      context,
+                                      pos,
+                                      items[i],
+                                      cartObj,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Divider(
+                                  height: 1,
+                                  color: Color(0xFFE2E8F0),
+                                ),
+                                _buildTotals(pos, cartObj),
+                                _buildActionButtons(context, pos),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                );
+
           return Container(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.of(context).size.height * 0.75,
-            ),
-            decoration: const BoxDecoration(
+            constraints: embedded
+                ? null
+                : BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.75,
+                  ),
+            decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              borderRadius: embedded
+                  ? BorderRadius.zero
+                  : const BorderRadius.vertical(top: Radius.circular(20)),
             ),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
+              mainAxisSize: embedded ? MainAxisSize.max : MainAxisSize.min,
               children: [
-                // Handle bar
-                Container(
-                  margin: const EdgeInsets.only(top: 10),
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
-                    borderRadius: BorderRadius.circular(2),
+                if (!embedded)
+                  Container(
+                    margin: const EdgeInsets.only(top: 10),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
-                ),
-                // Header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                   child: Row(
@@ -907,7 +1200,7 @@ class _CartBottomSheet extends StatelessWidget {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            'Cart (${pos.totalItemCount} items)',
+                            'Cart (${pos.totalItemCount})',
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
@@ -916,7 +1209,6 @@ class _CartBottomSheet extends StatelessWidget {
                           ),
                         ],
                       ),
-                      // Table badge
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
@@ -939,39 +1231,10 @@ class _CartBottomSheet extends StatelessWidget {
                   ),
                 ),
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
-
-                // Cart items list
-                Flexible(
-                  child: items.isEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.all(32),
-                          child: Text(
-                            'Cart is empty',
-                            style: TextStyle(color: Color(0xFF94A3B8)),
-                          ),
-                        )
-                      : ListView.separated(
-                          shrinkWrap: true,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          itemCount: items.length,
-                          separatorBuilder: (_, index) => const Divider(
-                            height: 1,
-                            color: Color(0xFFF1F5F9),
-                          ),
-                          itemBuilder: (ctx, i) =>
-                              _buildCartItem(ctx, pos, items[i], cartObj),
-                        ),
-                ),
-
-                // Totals + Actions
-                if (items.isNotEmpty) ...[
-                  const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                  _buildTotals(pos, cartObj),
-                  _buildActionButtons(context, pos),
-                ],
+                if (embedded)
+                  Expanded(child: body)
+                else
+                  Flexible(child: body),
               ],
             ),
           );
@@ -991,6 +1254,41 @@ class _CartBottomSheet extends StatelessWidget {
         ? (menuData[0]['displayname'] ?? menuData[0]['name'] ?? 'Item')
               .toString()
         : (item['menu_name'] ?? 'Item').toString();
+
+    final variantRaw = item['variant'];
+    Map<String, dynamic>? variantMap;
+    if (variantRaw is Map) {
+      variantMap = Map<String, dynamic>.from(variantRaw);
+    } else if (variantRaw is List &&
+        variantRaw.isNotEmpty &&
+        variantRaw.first is Map) {
+      variantMap = Map<String, dynamic>.from(variantRaw.first as Map);
+    }
+    final variantName = (variantMap?['valuename'] ??
+            variantMap?['name'] ??
+            item['variant_name'])
+        ?.toString()
+        .trim();
+
+    final addonBits = <String>[];
+    final addonRaw = item['addon'] ?? item['addonData'] ?? item['addons'];
+    if (addonRaw is List) {
+      for (final a in addonRaw) {
+        if (a is! Map) continue;
+        final v = a['value'];
+        final label = (a['valuename'] ??
+                a['value_name'] ??
+                (v is Map ? (v['valuename'] ?? v['name']) : null) ??
+                a['name'])
+            ?.toString()
+            .trim();
+        if (label != null && label.isNotEmpty) addonBits.add(label);
+      }
+    }
+    final subtitleParts = <String>[
+      if (variantName != null && variantName.isNotEmpty) variantName,
+      ...addonBits,
+    ];
 
     final qty = int.tryParse(item['quantity']?.toString() ?? '1') ?? 1;
     final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
@@ -1030,6 +1328,16 @@ class _CartBottomSheet extends StatelessWidget {
                     color: Color(0xFF1E293B),
                   ),
                 ),
+                if (subtitleParts.isNotEmpty)
+                  Text(
+                    subtitleParts.join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
                 const SizedBox(height: 2),
                 Text(
                   '₹${unitPrice.toStringAsFixed(2)} each',
@@ -1772,8 +2080,8 @@ class _CartBottomSheet extends StatelessWidget {
         behavior: SnackBarBehavior.floating,
       ),
     );
-    if (success && context.mounted) {
-      Navigator.pop(context); // close cart sheet
+    if (success && context.mounted && !embedded) {
+      Navigator.pop(context); // close cart sheet only (not POS when embedded)
     }
   }
 }

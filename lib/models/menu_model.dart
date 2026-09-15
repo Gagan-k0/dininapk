@@ -197,11 +197,19 @@ class MenuItem {
   final List<MenuVariant> variants;
   final List<MenuAddon> addons;
   final bool customisable;
+  /// From by-category-itemin `$lookup` on restaurant_favorite_menus.
+  final bool isFavorite;
+  /// Synthetic Extra Add-ons rail card (open-price line, no menu_id).
+  final bool isExtraAddon;
+  /// Leading "+ Custom" card on the Extra Add-ons rail.
+  final bool isCustomAddonTrigger;
 
   bool get hasVariants => variants.isNotEmpty;
   bool get hasAddons => addons.isNotEmpty;
   bool get needsCustomisation =>
-      customisable || hasVariants || hasAddons;
+      !isExtraAddon &&
+      !isCustomAddonTrigger &&
+      (customisable || hasVariants || hasAddons);
 
   /// Visible title for POS tiles (never return blank — empty API strings happen).
   String get label {
@@ -226,6 +234,9 @@ class MenuItem {
     this.variants = const [],
     this.addons = const [],
     this.customisable = false,
+    this.isFavorite = false,
+    this.isExtraAddon = false,
+    this.isCustomAddonTrigger = false,
   });
 
   factory MenuItem.fromJson(Map<String, dynamic> json) {
@@ -313,6 +324,10 @@ class MenuItem {
       }
     }
 
+    final isFavorite = json['is_favorite'] == true ||
+        json['is_favorite'] == 1 ||
+        json['is_favorite'] == '1';
+
     return MenuItem(
       id: json['_id']?.toString() ?? '',
       categoryId: json['category_id']?.toString() ??
@@ -329,6 +344,13 @@ class MenuItem {
       variants: varList,
       addons: addList,
       customisable: customisable,
+      isFavorite: isFavorite,
+      isExtraAddon: json['is_extra_addon'] == true ||
+          json['is_extra_addon'] == 1 ||
+          json['is_extra_addon'] == '1',
+      isCustomAddonTrigger: json['is_custom_addon_trigger'] == true ||
+          json['is_custom_addon_trigger'] == 1 ||
+          json['_id']?.toString() == 'CUSTOM_ADDON_TRIGGER',
     );
   }
 }

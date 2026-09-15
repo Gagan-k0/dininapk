@@ -9,6 +9,7 @@ import '../services/bill_builder.dart';
 import '../services/menu_cache_service.dart';
 import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
+import '../utils/extra_addons.dart';
 import '../utils/menu_filter.dart';
 
 /// Ordering screen state for ONE open table. Mirrors the admin
@@ -48,7 +49,11 @@ class PosProvider with ChangeNotifier {
   // ── Menu ──
   List<MenuCategory> _categories = [];
   List<MenuItem> _allItems = [];
-  String? _selectedCategoryId; // null = 'ALL'
+  String? _selectedCategoryId; // null = 'ALL'; favorites/extra = sentinels
+  List<Map<String, dynamic>>? _extraAddonRawGroups; // null = not loaded / failed
+  bool _extraAddonsLoading = false;
+  /// variant_id → display name from GET /restaurant/variant/all (admin join).
+  Map<String, String> _variantNameById = {};
   String _searchQuery = '';
 
   // ── Cart (live backend snapshot) ──
@@ -79,6 +84,7 @@ class PosProvider with ChangeNotifier {
 
   List<MenuCategory> get categories => _categories;
   String? get selectedCategoryId => _selectedCategoryId;
+  bool get isExtraAddonsLoading => _extraAddonsLoading;
   String get searchQuery => _searchQuery;
   bool get isLoading => _isLoading;
   bool get isBusy => _isBusy;
@@ -125,8 +131,24 @@ class PosProvider with ChangeNotifier {
   }
 
   List<MenuItem> get filteredMenuItems {
+    if (_selectedCategoryId == kFavoritesCategoryId) {
+      final favs = _allItems.where((i) => i.isFavorite).toList();
+      return filterMenuItems(
+        items: favs,
+        search: _searchQuery,
+        alreadySorted: true,
+      );
+    }
+    if (_selectedCategoryId == kExtraAddonsCategoryId) {
+      final groups = _extraAddonRawGroups;
+      if (groups == null) return const [];
+      return mapExtraAddonCards(groups, search: _searchQuery);
+    }
+
     MenuCategory? selected;
-    if (_selectedCategoryId != null && _selectedCategoryId!.isNotEmpty) {
+    if (_selectedCategoryId != null &&
+        _selectedCategoryId!.isNotEmpty &&
+        !isSpecialMenuMode(_selectedCategoryId)) {
       for (final c in _categories) {
         if (c.id == _selectedCategoryId) {
           selected = c;
@@ -140,7 +162,7 @@ class PosProvider with ChangeNotifier {
     return filterMenuItems(
       items: _allItems,
       categoryNames: selected?.filterNames ?? const [],
-      categoryId: _selectedCategoryId,
+      categoryId: selected?.id,
       search: _searchQuery,
       alreadySorted: true,
     );
@@ -243,9 +265,41 @@ class PosProvider with ChangeNotifier {
   }
 
   void selectCategory(String? categoryId) {
-    if (_selectedCategoryId == categoryId) return;
+    if (_selectedCategoryId == categoryId) {
+      // Retry Extra load if a prior attempt failed (cache left null).
+      if (categoryId == kExtraAddonsCategoryId &&
+          _extraAddonRawGroups == null &&
+          !_extraAddonsLoading) {
+        ensureExtraAddonsLoaded(force: true);
+      }
+      return;
+    }
     _selectedCategoryId = categoryId;
     notifyListeners();
+    if (categoryId == kExtraAddonsCategoryId) {
+      ensureExtraAddonsLoaded();
+    }
+  }
+
+  /// Load Extra Add-ons groups once (admin AllAvailableAddons).
+  Future<void> ensureExtraAddonsLoaded({bool force = false}) async {
+    if (_extraAddonsLoading) return;
+    if (!force && _extraAddonRawGroups != null) return;
+    _extraAddonsLoading = true;
+    notifyListeners();
+    try {
+      _extraAddonRawGroups = await _apiService.getAllAvailableAddons();
+      if (_errorMessage == 'Failed to load extra add-ons') {
+        _errorMessage = null;
+      }
+    } catch (e) {
+      debugPrint('[Fatfox POS] Extra add-ons load failed: $e');
+      _extraAddonRawGroups = null; // allow retry on re-select
+      _errorMessage = 'Failed to load extra add-ons';
+    } finally {
+      _extraAddonsLoading = false;
+      notifyListeners();
+    }
   }
 
   void setSearchQuery(String q) {
@@ -264,12 +318,17 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
+  /// getmenu returns `{ variant_id, price }` without names — join `_variantNameById`.
   Future<MenuItem?> enrichMenuItem(MenuItem item) async {
     if (item.id.isEmpty) return null;
     try {
+      await _ensureVariantCatalog();
       final raw = await _apiService.getMenuById(item.id);
       if (raw == null) return null;
       final enriched = MenuItem.fromJson(raw);
+      final variants = _joinVariantNames(
+        enriched.variants.isNotEmpty ? enriched.variants : item.variants,
+      );
       // Keep list-derived category names (detail doc may omit nested category).
       return MenuItem(
         id: enriched.id.isNotEmpty ? enriched.id : item.id,
@@ -288,11 +347,10 @@ class PosProvider with ChangeNotifier {
         attribute: enriched.attribute,
         price: enriched.price > 0 ? enriched.price : item.price,
         image: enriched.image ?? item.image,
-        variants: enriched.variants.isNotEmpty
-            ? enriched.variants
-            : item.variants,
+        variants: variants,
         addons: enriched.addons.isNotEmpty ? enriched.addons : item.addons,
         customisable: enriched.customisable || item.customisable,
+        isFavorite: enriched.isFavorite || item.isFavorite,
       );
     } on ApiException catch (e) {
       if (e.isAuth) {
@@ -305,6 +363,40 @@ class PosProvider with ChangeNotifier {
       debugPrint('[Fatfox POS] enrichMenuItem failed: $e');
       return null;
     }
+  }
+
+  Future<void> _ensureVariantCatalog() async {
+    if (_variantNameById.isNotEmpty) return;
+    try {
+      final rows = await _apiService.getAllVariants();
+      final map = <String, String>{};
+      for (final row in rows) {
+        final id = row['_id']?.toString() ?? '';
+        if (id.isEmpty) continue;
+        final name = (row['name'] ?? row['valuename'] ?? row['displayname'])
+                ?.toString()
+                .trim() ??
+            '';
+        if (name.isNotEmpty) map[id] = name;
+      }
+      _variantNameById = map;
+    } catch (e) {
+      debugPrint('[Fatfox POS] variant catalog load failed: $e');
+    }
+  }
+
+  List<MenuVariant> _joinVariantNames(List<MenuVariant> variants) {
+    if (variants.isEmpty || _variantNameById.isEmpty) return variants;
+    return [
+      for (final v in variants)
+        MenuVariant(
+          id: v.id,
+          name: v.name.isNotEmpty
+              ? v.name
+              : (_variantNameById[v.id] ?? ''),
+          price: v.price,
+        ),
+    ];
   }
 
   void _setSortedMenuItems(List<MenuItem> items) {
@@ -351,6 +443,7 @@ class PosProvider with ChangeNotifier {
         _apiService.getActiveCategoryMaps(),
         _apiService.getDineinMenuMaps(),
         _bestEffortTax(),
+        _bestEffortVariantCatalog(),
       ]);
       _tableDetails = results[0] as Map<String, dynamic>?;
       final catMaps = results[1] as List<Map<String, dynamic>>;
@@ -359,6 +452,21 @@ class PosProvider with ChangeNotifier {
       _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
       _taxConfig = results[3] as List<Map<String, dynamic>>;
       _buildConsolidatedTax();
+      final variantMaps = results[4] as List<Map<String, dynamic>>;
+      if (variantMaps.isNotEmpty) {
+        final map = <String, String>{};
+        for (final row in variantMaps) {
+          final id = row['_id']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          final name =
+              (row['name'] ?? row['valuename'] ?? row['displayname'])
+                      ?.toString()
+                      .trim() ??
+                  '';
+          if (name.isNotEmpty) map[id] = name;
+        }
+        if (map.isNotEmpty) _variantNameById = map;
+      }
 
       await _menuCache.save(
         restaurantId: restaurantId,
@@ -395,6 +503,17 @@ class PosProvider with ChangeNotifier {
       return await _apiService.getTaxConfig();
     } on ApiException catch (e) {
       if (e.isAuth) rethrow;
+      return const [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _bestEffortVariantCatalog() async {
+    try {
+      return await _apiService.getAllVariants();
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      return const [];
+    } catch (_) {
       return const [];
     }
   }
@@ -538,6 +657,10 @@ class PosProvider with ChangeNotifier {
   Future<bool> addExtraItem({required String name, required double price}) {
     final tid = resolvedTableId;
     if (tid.isEmpty || name.trim().isEmpty || price <= 0) {
+      _errorMessage = tid.isEmpty
+          ? 'Table not loaded'
+          : 'Enter a valid name and amount';
+      notifyListeners();
       return Future.value(false);
     }
     return _write(
@@ -775,7 +898,7 @@ class PosProvider with ChangeNotifier {
           paperSize: prefs.paperSize,
           customization: customization,
         );
-        await _printer.printBytes(bytes);
+        await _printer.printBytes(bytes, role: PrinterRole.kot);
         printOk = true;
       } catch (e) {
         printError = friendlyError(e);
@@ -855,6 +978,62 @@ class PosProvider with ChangeNotifier {
   // ============================================================
   // Bill + settle
   // ============================================================
+
+  /// Floor print: bind table cart temporarily, print, then restore prior POS bind
+  /// so an open food-categories screen is not left on the wrong table.
+  Future<String?> printBillForFloorTable({
+    required String tableId,
+    required String areaId,
+  }) async {
+    final prevTableId = _activeTableId;
+    final prevAreaId = _activeAreaId;
+    final prevCart = List<Map<String, dynamic>>.from(_cartData);
+    final prevDetails = _tableDetails;
+    final prevTax = List<Map<String, dynamic>>.from(_taxConfig);
+    final prevConsolidated = _consolidatedTax;
+    try {
+      final prep = await prepareTableForBill(tableId: tableId, areaId: areaId);
+      if (prep != null) return prep;
+      return await printBill();
+    } finally {
+      _activeTableId = prevTableId;
+      _activeAreaId = prevAreaId;
+      _cartData = prevCart;
+      _tableDetails = prevDetails;
+      _taxConfig = prevTax;
+      _consolidatedTax = prevConsolidated;
+      notifyListeners();
+    }
+  }
+
+  /// Lightweight floor bind: table header + cart (+ tax) so [printBill] works
+  /// without loading the full menu (admin floor print path).
+  Future<String?> prepareTableForBill({
+    required String tableId,
+    required String areaId,
+  }) async {
+    _activeTableId = tableId;
+    _activeAreaId = areaId;
+    try {
+      final results = await Future.wait<Object?>([
+        _apiService.viewTableById(tableId),
+        _apiService.getCartItemsByTableId(tableId),
+        _bestEffortTax(),
+      ]);
+      _tableDetails = results[0] as Map<String, dynamic>?;
+      _cartData = results[1] as List<Map<String, dynamic>>;
+      _taxConfig = results[2] as List<Map<String, dynamic>>;
+      _buildConsolidatedTax();
+      notifyListeners();
+      if (cartId.isEmpty) return 'No items on this table yet';
+      return null;
+    } on ApiException catch (e) {
+      _sessionExpired = e.isAuth;
+      return e.message;
+    } catch (e) {
+      return friendlyError(e);
+    }
+  }
 
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
   /// Returns null on success, else the error text. Un-printed items are sent

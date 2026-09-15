@@ -266,6 +266,28 @@ class ApiService {
     return env.mapList;
   }
 
+  /// GET /restaurant/add-on/all-avaliable?searchName= — Extra Add-ons rail.
+  Future<List<Map<String, dynamic>>> getAllAvailableAddons({
+    String search = '',
+  }) async {
+    final env = await _client.get(
+      ApiConfig.allAvailableAddons,
+      query: {'searchName': search},
+    );
+    return env.mapList;
+  }
+
+  /// GET /restaurant/variant/all?searchName= — catalog for joining variant names.
+  Future<List<Map<String, dynamic>>> getAllVariants({
+    String search = '',
+  }) async {
+    final env = await _client.get(
+      ApiConfig.allVariants,
+      query: {'searchName': search},
+    );
+    return env.mapList;
+  }
+
   /// GET /restaurant/menu/getmenu/{menuId} — variant/addon details.
   Future<Map<String, dynamic>?> getMenuById(String menuId) async {
     try {
@@ -301,6 +323,12 @@ class ApiService {
   /// (`{receipt_settings, printer_config}`), shared across every device.
   Future<Map<String, dynamic>> getRestaurantSettingsView() async {
     final env = await _client.get(ApiConfig.restaurantSettingsView);
+    return env.map ?? {};
+  }
+
+  /// GET /restaurant/settings/printer-settings → `{ printer_settings }`.
+  Future<Map<String, dynamic>> getPrinterSettings() async {
+    final env = await _client.get(ApiConfig.printerSettings);
     return env.map ?? {};
   }
 

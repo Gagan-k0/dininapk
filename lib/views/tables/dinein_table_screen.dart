@@ -5,6 +5,8 @@ import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
 import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
+import '../../services/api_service.dart';
+import '../../widgets/payment_mode_sheet.dart';
 
 class DineInTableScreen extends StatefulWidget {
   const DineInTableScreen({super.key});
@@ -207,7 +209,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final wide = constraints.maxWidth >= 700;
@@ -266,6 +268,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ),
           ),
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
+          const SizedBox(height: 4),
 
           // Dynamic Body based on Sub-Tab selection
           if (tableProv.isRefreshing)
@@ -359,25 +362,6 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _compactIconButton({
-    required IconData icon,
-    required Color color,
-    required String tooltip,
-    required VoidCallback onPressed,
-  }) {
-    return IconButton(
-      icon: Icon(icon, size: 16, color: color),
-      tooltip: tooltip,
-      onPressed: onPressed,
-      style: IconButton.styleFrom(
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        minimumSize: const Size(32, 32),
-        padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
       ),
     );
   }
@@ -546,7 +530,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       children: [
         // KPI Summary Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           color: Colors.white,
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -614,10 +598,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ),
         ),
         const Divider(height: 1, color: Color(0xFFE2E8F0)),
+        const SizedBox(height: 4),
 
         // Area Selection Filter Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           color: Colors.white,
           child: SizedBox(
             height: 32,
@@ -675,18 +660,17 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                             builder: (context, gridConstraints) {
                               final w = gridConstraints.maxWidth;
                               // Higher aspect = shorter cards → more rows visible.
-                              // Keep maxExtent ≥200 so badge+actions never overflow.
                               final double maxExtent;
                               final double aspect;
                               if (w < 600) {
                                 maxExtent = 200;
-                                aspect = 1.2;
+                                aspect = 1.05;
                               } else if (w < 900) {
                                 maxExtent = 220;
-                                aspect = 1.25;
+                                aspect = 1.1;
                               } else {
                                 maxExtent = 240;
-                                aspect = 1.3;
+                                aspect = 1.15;
                               }
                               return GridView.builder(
                                 shrinkWrap: true,
@@ -1085,245 +1069,414 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) {
-    Color cardBg = Colors.white;
-    Color borderCol = const Color(0xFFE2E8F0);
-    String statusText = 'AVAILABLE';
-    Color badgeColor = const Color(0xFF64748B);
-
+    // Admin dinein-table-list pastel tokens.
+    final Color bg;
+    final Color border;
+    final bool dashed;
     if (table.isPending) {
-      cardBg = const Color(0xFFF3E8FF); // soft purple
-      borderCol = const Color(0xFFF59E0B); // amber border
-      statusText = 'PENDING';
-      badgeColor = const Color(0xFF7C3AED); // purple badge
-    } else if (table.isKot) {
-      cardBg = const Color(0xFFFEF3C7);
-      borderCol = const Color(0xFFFCD34D);
-      statusText = 'KOT RUNNING';
-      badgeColor = const Color(0xFFD97706);
-    } else if (table.isPrinted || table.isPaid) {
-      cardBg = const Color(0xFFEDE9FE);
-      borderCol = const Color(0xFFC4B5FD);
-      statusText = table.isPaid ? 'PAID' : 'BILL PRINTED';
-      badgeColor = const Color(0xFF6D28D9);
-    } else if (table.isOccupied) {
-      cardBg = const Color(0xFFDCFCE7);
-      borderCol = const Color(0xFF86EFAC);
-      statusText = 'OCCUPIED';
-      badgeColor = const Color(0xFF15803D);
+      bg = const Color(0xFFF3E8FF);
+      border = const Color(0xFFA78BFA);
+      dashed = false;
+    } else if (table.isPaid) {
+      bg = const Color(0xFFFFEDD5);
+      border = const Color(0xFFFB923C);
+      dashed = false;
+    } else if (table.isPrinted) {
+      bg = const Color(0xFFDCFCE7);
+      border = const Color(0xFF4ADE80);
+      dashed = false;
+    } else if (table.isKot ||
+        table.tableStatus == 'RUNNING' ||
+        table.isOccupied) {
+      // Occupied / KOT / RUNNING → yellow wash (admin status-kot / running).
+      bg = const Color(0xFFFEF9C3);
+      border = const Color(0xFFFACC15);
+      dashed = false;
+    } else {
+      bg = Colors.white;
+      border = const Color(0xFFCBD5E1);
+      dashed = true;
     }
 
     final cartId = table.cartId;
     final canShift = table.isOccupied && !table.isPending && cartId != null;
-    final seated = table.seatedLabel;
-    final customer = table.customerName;
+    final mins = table.seatedMinutes;
+    final covers = () {
+      final g = table.cartDetails?['no_of_guest'] ??
+          table.cartDetails?['no_of_people'] ??
+          table.reservation?['reservation_members'];
+      return int.tryParse(g?.toString() ?? '') ?? table.noOfPeople;
+    }();
 
-    return InkWell(
-      onTap: () {
-        if (table.isPending) {
-          _toast(
-            'Accept the QR order first to open POS',
-            color: const Color(0xFF7C3AED),
-          );
-          return;
-        }
-        _openPos(context, tableProv, table);
-      },
-      onLongPress: canShift
-          ? () => _showShiftTableDialog(context, tableProv, table)
-          : null,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
-        decoration: BoxDecoration(
-          color: cardBg,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: borderCol, width: 1.5),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.02),
-              blurRadius: 6,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    table.tableNumber,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF0F172A),
-                    ),
-                  ),
-                ),
-                Flexible(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      if (table.isCombined)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.link,
-                            size: 12,
-                            color: Color(0xFF64748B),
-                          ),
-                        ),
-                      if (table.isPreBooking)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 4),
-                          child: Icon(
-                            Icons.event_seat,
-                            size: 12,
-                            color: Color(0xFF2563EB),
-                          ),
-                        ),
-                      Flexible(
-                        child: Text(
-                          '[${table.noOfPeople} Seats]',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            fontSize: 9,
-                            color: Color(0xFF64748B),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: table.isOccupied
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            [
-                              ?seated,
-                              if (customer != null)
-                                customer
-                              else if (table.itemCount > 0)
-                                '${table.itemCount} items',
-                            ].join(' • '),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          if (table.isPending) {
+            _toast(
+              'Accept the QR order first to open POS',
+              color: const Color(0xFF7C3AED),
+            );
+            return;
+          }
+          _openPos(context, tableProv, table);
+        },
+        onLongPress: canShift
+            ? () => _showShiftTableDialog(context, tableProv, table)
+            : null,
+        borderRadius: BorderRadius.circular(14),
+        child: Ink(
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(14),
+            border: dashed
+                ? null
+                : Border.all(color: border, width: 1.5),
+          ),
+          child: CustomPaint(
+            foregroundPainter: dashed
+                ? _DashedBorderPainter(color: border, radius: 14)
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+              child: Column(
+                children: [
+                  if (table.isOccupied) ...[
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            mins != null ? '$mins Min' : '—',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 9,
-                              color: Color(0xFF475569),
+                              fontSize: 10,
+                              color: Color(0xFF64748B),
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
+                        ),
+                        Text(
+                          '• $covers Covers',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF64748B),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          table.tableNumber,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF0F172A),
+                            height: 1.1,
+                          ),
+                        ),
+                        if (table.isOccupied) ...[
                           const SizedBox(height: 2),
                           Text(
                             '₹${table.totalPrice.toStringAsFixed(2)}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 13,
+                              fontSize: 14,
                               fontWeight: FontWeight.w800,
                               color: Color(0xFF0F172A),
                             ),
                           ),
                         ],
-                      )
-                    : const Text(
-                        'Tap to Order',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF94A3B8),
+                        const SizedBox(height: 2),
+                        Text(
+                          '[${table.noOfPeople} Seats]',
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF64748B),
+                          ),
                         ),
-                      ),
-              ),
-            ),
-            // Quick actions: Accept/Reject (QR), Shift, Open
-            Row(
-              children: [
-                Flexible(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 5,
-                        vertical: 1,
-                      ),
-                      decoration: BoxDecoration(
-                        color: badgeColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(5),
-                      ),
-                      child: Text(
-                        statusText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 8,
-                          fontWeight: FontWeight.bold,
-                          color: badgeColor,
-                        ),
-                      ),
+                      ],
                     ),
                   ),
-                ),
-                if (table.isPending && cartId != null)
                   Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      _compactIconButton(
-                        icon: Icons.check,
-                        color: const Color(0xFF16A34A),
-                        tooltip: 'Accept QR order',
-                        onPressed: () =>
-                            _acceptQrOrder(context, tableProv, table),
-                      ),
-                      const SizedBox(width: 4),
-                      _compactIconButton(
-                        icon: Icons.close,
-                        color: const Color(0xFFDC2626),
-                        tooltip: 'Reject QR order',
-                        onPressed: () =>
-                            _rejectQrOrder(context, tableProv, table),
-                      ),
-                    ],
-                  )
-                else if (table.isOccupied)
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (canShift) ...[
-                        _compactIconButton(
-                          icon: Icons.swap_horiz,
-                          color: const Color(0xFFF97316),
-                          tooltip: 'Shift Table',
-                          onPressed: () =>
-                              _showShiftTableDialog(context, tableProv, table),
+                      if (table.isPending && cartId != null) ...[
+                        _floorActionChip(
+                          Icons.check,
+                          const Color(0xFF16A34A),
+                          'Accept',
+                          () => _acceptQrOrder(context, tableProv, table),
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: 6),
+                        _floorActionChip(
+                          Icons.close,
+                          const Color(0xFFDC2626),
+                          'Reject',
+                          () => _rejectQrOrder(context, tableProv, table),
+                        ),
+                      ] else ...[
+                        _floorActionChip(
+                          Icons.visibility_outlined,
+                          const Color(0xFF64748B),
+                          'View',
+                          () => _showTableQuickView(context, table),
+                        ),
+                        if (table.isOccupied && !table.isPending) ...[
+                          const SizedBox(width: 6),
+                          _floorActionChip(
+                            Icons.print_outlined,
+                            const Color(0xFF64748B),
+                            'Print bill',
+                            () => _printBillFromFloor(context, tableProv, table),
+                          ),
+                          const SizedBox(width: 6),
+                          _floorActionChip(
+                            Icons.check_circle_outline,
+                            table.canRelease
+                                ? const Color(0xFF16A34A)
+                                : const Color(0xFF94A3B8),
+                            'Settle',
+                            table.canRelease
+                                ? () => _settleFromFloor(
+                                      context,
+                                      tableProv,
+                                      table,
+                                    )
+                                : () => _toast(
+                                      'Print the bill before settling',
+                                      color: const Color(0xFFD97706),
+                                    ),
+                          ),
+                        ],
                       ],
-                      _compactIconButton(
-                        icon: Icons.open_in_new,
-                        color: const Color(0xFF16A34A),
-                        tooltip: 'Open table to print or release',
-                        onPressed: () => _openPos(context, tableProv, table),
-                      ),
                     ],
                   ),
-              ],
+                ],
+              ),
             ),
-          ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _floorActionChip(
+    IconData icon,
+    Color color,
+    String tooltip,
+    VoidCallback onPressed,
+  ) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.white,
+        shape: const CircleBorder(),
+        elevation: 1,
+        shadowColor: Colors.black26,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Icon(icon, size: 16, color: color),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTableQuickView(
+    BuildContext context,
+    DineInTable table,
+  ) async {
+    final tableProv = Provider.of<TableProvider>(context, listen: false);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetCtx) {
+        return FutureBuilder<List<Map<String, dynamic>>>(
+          future: ApiService().getCartItemsByTableId(table.id),
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const SizedBox(
+                height: 160,
+                child: Center(
+                  child: CircularProgressIndicator(color: Color(0xFFF97316)),
+                ),
+              );
+            }
+            final carts = snap.data ?? const [];
+            final cart = carts.isNotEmpty ? carts.first : null;
+            final lines = cart?['cartMenuData'];
+            final items = lines is List
+                ? lines.whereType<Map>().where(
+                      (m) =>
+                          m['cancel_status'] != 1 && m['cancel_status'] != '1',
+                    )
+                : const Iterable.empty();
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Table ${table.tableNumber}',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      '₹${table.totalPrice.toStringAsFixed(2)} · ${table.tableStatus}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (items.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Center(
+                          child: Text(
+                            'No items on this table',
+                            style: TextStyle(color: Color(0xFF94A3B8)),
+                          ),
+                        ),
+                      )
+                    else
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: MediaQuery.sizeOf(context).height * 0.4,
+                        ),
+                        child: ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final m in items)
+                              ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(
+                                  () {
+                                    final md = m['menuData'];
+                                    if (md is List &&
+                                        md.isNotEmpty &&
+                                        md.first is Map) {
+                                      final row = Map<String, dynamic>.from(
+                                        md.first as Map,
+                                      );
+                                      return (row['displayname'] ??
+                                              row['name'] ??
+                                              'Item')
+                                          .toString();
+                                    }
+                                    return (m['menu_name'] ?? 'Item')
+                                        .toString();
+                                  }(),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                trailing: Text(
+                                  'x${m['quantity'] ?? 1}',
+                                  style: const TextStyle(
+                                    color: Color(0xFF64748B),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(sheetCtx);
+                          _openPos(this.context, tableProv, table);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFF97316),
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text('Open POS'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _printBillFromFloor(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final pos = Provider.of<PosProvider>(context, listen: false);
+    _toast('Preparing bill…', color: const Color(0xFF64748B));
+    final err = await pos.printBillForFloorTable(
+      tableId: table.id,
+      areaId: table.areaId,
+    );
+    if (!mounted) return;
+    _toast(
+      err ?? 'Bill printed ✓',
+      error: err != null,
+      color: err == null ? const Color(0xFF16A34A) : null,
+    );
+    await tableProv.refresh();
+  }
+
+  Future<void> _settleFromFloor(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    final cartId = table.cartId;
+    if (cartId == null || cartId.isEmpty) {
+      _toast('No cart on this table', error: true);
+      return;
+    }
+    if (!table.canRelease) {
+      _toast('Print the bill before settling', color: const Color(0xFFD97706));
+      return;
+    }
+    final mode = await showPaymentModeSheet(
+      context,
+      title: 'Settle Table ${table.tableNumber}',
+      amount: table.totalPrice,
+    );
+    if (mode == null || !context.mounted) return;
+    final ok = await tableProv.settleTable(
+      cartId: cartId,
+      paymentType: mode,
+    );
+    if (!context.mounted) return;
+    _toast(
+      ok ? 'Table settled ✓' : (tableProv.errorMessage ?? 'Settle failed'),
+      error: !ok,
+      color: ok ? const Color(0xFF16A34A) : null,
     );
   }
 
@@ -1606,4 +1759,42 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       },
     );
   }
+}
+
+/// Admin-style dashed outline for available (BLANK) table cards.
+class _DashedBorderPainter extends CustomPainter {
+  _DashedBorderPainter({required this.color, required this.radius});
+
+  final Color color;
+  final double radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    final rrect = RRect.fromRectAndRadius(
+      Offset.zero & size,
+      Radius.circular(radius),
+    );
+    final path = Path()..addRRect(rrect);
+    const dashWidth = 5.0;
+    const dashSpace = 3.0;
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = distance + dashWidth;
+        canvas.drawPath(
+          metric.extractPath(distance, next.clamp(0, metric.length)),
+          paint,
+        );
+        distance = next + dashSpace;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedBorderPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.radius != radius;
 }
