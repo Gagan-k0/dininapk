@@ -108,6 +108,26 @@ void main() {
   );
 
   testWidgets(
+    'saving only a printer change succeeds without the admin-only settings API',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await _pump(tester);
+
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Bluetooth'));
+      await tester.pumpAndSettle();
+      final saveButton = find.widgetWithText(ElevatedButton, 'Save Printer Settings');
+      await tester.ensureVisible(saveButton);
+      await tester.pumpAndSettle();
+      await tester.tap(saveButton, warnIfMissed: false);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Printer settings saved successfully!'), findsOneWidget);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('printer_type'), 'Bluetooth');
+    },
+  );
+
+  testWidgets(
     'a previously saved paper size is never overridden by the smart default',
     (tester) async {
       SharedPreferences.setMockInitialValues({

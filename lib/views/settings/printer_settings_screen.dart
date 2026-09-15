@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:esc_pos_utils/esc_pos_utils.dart';
@@ -70,6 +72,10 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   List<DiscoveredPrinter> _discovered = [];
 
   ReceiptCustomization _receipt = ReceiptCustomization.defaults;
+
+  /// The receipt layout as last loaded/synced — Save only uploads when it
+  /// changed, so picking a printer never needs the admin-only settings API.
+  String _receiptBaseline = jsonEncode(ReceiptCustomization.defaults.toJson());
   DateTime? _lastSynced;
   bool _previewIsKot = true;
 
@@ -119,6 +125,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _kotEnableReleaseTable =
           prefs.getBool('kot_enable_release_table') ?? false;
       _receipt = receipt;
+      _receiptBaseline = jsonEncode(receipt.toJson());
       _lastSynced = syncedAt;
     });
   }
@@ -156,6 +163,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       if (!mounted) return;
       setState(() {
         _receipt = receipt;
+        _receiptBaseline = jsonEncode(receipt.toJson());
         _lastSynced = syncedAt;
       });
       _showSnackBar('Synced receipt settings from server', backgroundColor: Colors.green);
@@ -212,22 +220,29 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   Future<void> _saveSettings() async {
     setState(() => _isSaving = true);
     await _persistSettings();
-    var pushed = false;
-    String message = 'Saved on this device — will sync to server when online';
-    var color = Colors.orange;
-    try {
-      pushed = await _receiptService.saveAndPush(_receipt);
-      if (pushed) {
-        final syncedAt = await _receiptService.lastSyncedAt();
-        if (mounted) setState(() => _lastSynced = syncedAt);
-        message = 'Printer settings saved successfully!';
-        color = Colors.green;
+    String message = 'Printer settings saved successfully!';
+    var color = Colors.green;
+    final layout = jsonEncode(_receipt.toJson());
+    if (layout != _receiptBaseline) {
+      try {
+        if (await _receiptService.saveAndPush(_receipt)) {
+          _receiptBaseline = layout;
+          final syncedAt = await _receiptService.lastSyncedAt();
+          if (mounted) setState(() => _lastSynced = syncedAt);
+        } else {
+          message = 'Printer saved. Receipt layout saved on this device — will sync when online';
+          color = Colors.orange;
+        }
+      } on ApiException catch (e) {
+        // Waiter accounts lack the server's `private` permission for the
+        // restaurant-wide layout (403). Everything is already saved locally
+        // and prints from there, so this is a note, not a failure.
+        final forbidden = e.code == 403 || e.httpStatus == 403;
+        message = forbidden
+            ? 'Printer saved. Receipt layout applies to this device only — ask an admin to change it for all devices.'
+            : 'Printer saved. Receipt layout not synced — ${friendlyError(e)}';
+        color = Colors.orange;
       }
-    } on ApiException catch (e) {
-      // A real refusal (e.g. this staff account lacks permission to edit
-      // shared receipt settings) is not a connectivity problem — say so.
-      message = 'Saved on this device only — ${friendlyError(e)}';
-      color = Colors.red;
     }
     if (!mounted) return;
     setState(() => _isSaving = false);
