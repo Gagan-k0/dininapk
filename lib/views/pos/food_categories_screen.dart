@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
+import '../../utils/menu_page_window.dart';
+import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
@@ -16,6 +18,17 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   bool _initialized = false;
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _cartScrollController = ScrollController();
+  final ScrollController _menuScrollController = ScrollController();
+  final MenuPageWindow<MenuItem> _menuPage =
+      MenuPageWindow<MenuItem>(pageSize: 80);
+  String? _pagedForCategoryId;
+  String _pagedForSearch = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _menuScrollController.addListener(_onMenuScroll);
+  }
 
   @override
   void didChangeDependencies() {
@@ -38,9 +51,44 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
 
   @override
   void dispose() {
+    _menuScrollController.removeListener(_onMenuScroll);
+    _menuScrollController.dispose();
     _searchController.dispose();
     _cartScrollController.dispose();
     super.dispose();
+  }
+
+  void _onMenuScroll() {
+    if (!_menuScrollController.hasClients) return;
+    final position = _menuScrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 120) {
+      if (_menuPage.loadMore()) {
+        setState(() {});
+      }
+    }
+  }
+
+  void _syncMenuPage(PosProvider pos) {
+    final cat = pos.selectedCategoryId;
+    final search = pos.searchQuery;
+    final items = pos.filteredMenuItems;
+    final filterChanged =
+        cat != _pagedForCategoryId || search != _pagedForSearch;
+    final sourceChanged = items.length != _menuPage.totalCount;
+
+    if (filterChanged || sourceChanged) {
+      _pagedForCategoryId = cat;
+      _pagedForSearch = search;
+      _menuPage.reset(items);
+      // Defer scroll reset — never jump during build.
+      if (filterChanged) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_menuScrollController.hasClients) {
+            _menuScrollController.jumpTo(0);
+          }
+        });
+      }
+    }
   }
 
   @override
@@ -74,11 +122,34 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 if (pos.isBusy)
                   const LinearProgressIndicator(minHeight: 2, color: Color(0xFFF97316)),
                 if (pos.cartError != null) _buildCartErrorBar(pos),
-                // Category horizontal scroll bar
-                _buildCategoryBar(pos),
-                const Divider(height: 1, color: Color(0xFFE2E8F0)),
-                // Menu grid + Cart panel
-                Expanded(child: _buildMainContent(pos, tableStatus)),
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      PosCategoryRail(
+                        categories: pos.categories,
+                        selectedCategoryId: pos.selectedCategoryId,
+                        onSelect: (id) {
+                          pos.selectCategory(id);
+                          setState(() {
+                            _pagedForCategoryId = id;
+                            _pagedForSearch = pos.searchQuery;
+                            _menuPage.reset(pos.filteredMenuItems);
+                          });
+                          if (_menuScrollController.hasClients) {
+                            _menuScrollController.jumpTo(0);
+                          }
+                        },
+                      ),
+                      const VerticalDivider(
+                        width: 1,
+                        thickness: 1,
+                        color: Color(0xFFE2E8F0),
+                      ),
+                      Expanded(child: _buildMainContent(pos, tableStatus)),
+                    ],
+                  ),
+                ),
               ],
             ),
       // Cart FAB showing item count
@@ -262,102 +333,84 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
   }
 
-  Widget _buildCategoryBar(PosProvider pos) {
-    return Container(
-      height: 50,
-      color: Colors.white,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        itemCount: pos.categories.length + 1, // +1 for "ALL"
-        itemBuilder: (context, index) {
-          final isAll = index == 0;
-          final isSelected = isAll
-              ? pos.selectedCategoryId == null
-              : pos.selectedCategoryId == pos.categories[index - 1].id;
-          final label = isAll ? 'ALL' : pos.categories[index - 1].categoryName;
-
-          return Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: GestureDetector(
-              onTap: () {
-                if (isAll) {
-                  pos.selectCategory(null);
-                } else {
-                  pos.selectCategory(pos.categories[index - 1].id);
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? const Color(0xFFF97316)
-                      : const Color(0xFFF1F5F9),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: isSelected
-                        ? const Color(0xFFF97316)
-                        : const Color(0xFFE2E8F0),
-                    width: 1,
-                  ),
-                ),
-                child: Center(
-                  child: Text(
-                    label.toUpperCase(),
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: isSelected
-                          ? Colors.white
-                          : const Color(0xFF475569),
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   Widget _buildMainContent(PosProvider pos, String tableStatus) {
-    final items = pos.filteredMenuItems;
+    _syncMenuPage(pos);
+    final items = _menuPage.visible;
+    final total = _menuPage.totalCount;
 
-    if (items.isEmpty && !pos.isLoading) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.restaurant_menu, size: 64, color: Colors.grey.shade300),
-            const SizedBox(height: 12),
-            Text(
-              pos.searchQuery.isNotEmpty
-                  ? 'No items found for "${pos.searchQuery}"'
-                  : 'No menu items available',
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: Text(
+            total == 0
+                ? '0 ITEMS'
+                : '${_menuPage.visibleCount} OF $total ITEMS',
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+              color: Color(0xFF64748B),
             ),
-          ],
+          ),
         ),
-      );
-    }
-
-    // Admin compact POS: ~150px columns, fixed row height, text-only cards.
-    return GridView.builder(
-      padding: const EdgeInsets.all(10),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 160,
-        mainAxisExtent: 70,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-      ),
-      itemCount: items.length,
-      itemBuilder: (context, index) => _buildFoodCard(pos, items[index]),
+        Expanded(
+          child: items.isEmpty && !pos.isLoading
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.restaurant_menu,
+                        size: 64,
+                        color: Colors.grey.shade300,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        pos.searchQuery.isNotEmpty
+                            ? 'No items found for "${pos.searchQuery}"'
+                            : 'No menu items available',
+                        style: TextStyle(
+                          color: Colors.grey.shade500,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : GridView.builder(
+                  controller: _menuScrollController,
+                  physics: const BouncingScrollPhysics(
+                    parent: AlwaysScrollableScrollPhysics(),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(10, 6, 10, 88),
+                  gridDelegate:
+                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 160,
+                    mainAxisExtent: 70,
+                    crossAxisSpacing: 10,
+                    mainAxisSpacing: 10,
+                  ),
+                  itemCount: items.length + (_menuPage.hasMore ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    if (index >= items.length) {
+                      return const Center(
+                        child: SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFFF97316),
+                          ),
+                        ),
+                      );
+                    }
+                    return _buildFoodCard(pos, items[index]);
+                  },
+                ),
+        ),
+      ],
     );
   }
 
