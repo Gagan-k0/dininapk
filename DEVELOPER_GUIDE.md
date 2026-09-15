@@ -20,14 +20,22 @@ flutter run -d <deviceId>
 
 Tablet must resolve `backend.fatfox.testfox.in` in Chrome before login works (DNS/Wi‑Fi).
 
-## Silent LAN print
+## Silent thermal print (auto-detect)
 
-1. Open **Printer Settings** in the app.
-2. Connection type **LAN**, set printer IP, port `9100`, paper 58/80mm.
-3. **Test Print** — must succeed with no system dialog.
-4. **KOT PRINT** — `setcartstatus(KOT)` → `viewmenu?status=kot` → TCP print → `setcartstatus(KOT_PRINT)` only if print OK.
-5. **PRINT BILL** — open the table, build the receipt from its complete cart snapshot, print over LAN, then mark the cart `PRINTED`.
-6. **RELEASE** — from the opened table only, enabled for `PRINTED`/`PAID`; payment sheet (Cash/Card/UPI) → `setcarttobill`. Release never calls `deletecart`.
+Keeps **ESC/POS silent** print (no Android PrintManager / system dialog).
+
+1. Open **Printer Settings**.
+2. Choose **LAN** or **Bluetooth** (USB/Sunmi not wired yet).
+3. Tap **Scan for printers**:
+   - **LAN** — probes the tablet Wi‑Fi `/24` subnet for TCP port `9100` (override port if needed).
+   - **Bluetooth** — lists paired classic devices (pair the printer in Android Settings first).
+4. Tap a result to select, or type a LAN IP manually. Save. **Test Print** must succeed with no system dialog.
+5. Optional: **Allow release without printed bill** (`kot_enable_release_table`) — matches admin `kotEnableReleaseTable`.
+6. **KOT PRINT** — `setcartstatus(KOT)` → print → `setcartstatus(KOT_PRINT)` only if print OK.
+7. **PRINT BILL** — complete cart snapshot → ESC/POS → mark `PRINTED`.
+8. **RELEASE** — from the opened table; `PRINTED`/`PAID` (or KOT path when the toggle is on) → payment → `setcarttobill`. Never `deletecart`.
+
+Prefs keys: `printer_type`, `printer_ip`, `printer_port`, `printer_bt_mac`, `printer_bt_name`, `printer_paper`, `printer_header`, `kot_enable_release_table`.
 
 ## API response rule
 

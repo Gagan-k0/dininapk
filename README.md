@@ -29,7 +29,7 @@ This document presents a **feature-by-feature comparative audit** between the An
 | **Food Item Search & Filters** | Instant text search + Veg/Non-Veg filter chips | Integrated Search Bar + Veg/Non-Veg filter | `[x] COMPLETED` | Instant client-side & API search filtering |
 | **Live Backend Cart Sync** | Add to cart, update qty (+/-), remove item via REST API | Live synchronization via `PosProvider` | `[x] COMPLETED` | Calls `/cart/add-to-cart`, `/cart/update-quantity`, `/cart/remove-item` |
 | **KOT Order Submission** | "Print KOT" / "Create Order" button | KOT PRINT via setcartstatus | `[x] COMPLETED` | Live path: KOT → print → KOT_PRINT |
-| **Thermal Printer Integration** | Web browser `window.print()` / ESC-POS service | `ThermalPrinterService` (Bluetooth / Sunmi / ESC-POS) | `[x] COMPLETED` | Native ESC/POS printing over Bluetooth & USB |
+| **Thermal Printer Integration** | Web browser `window.print()` / ESC-POS service | `ThermalPrinterService` + `PrinterDiscoveryService` | `[x] COMPLETED` | Silent ESC/POS: LAN :9100 auto-scan + Bluetooth paired list |
 | **Variants & Addons Selection** | Modal popup when tapping items with variants/addons | Bottom sheet on item tap | `[x] COMPLETED` | Wired 2026-09-12 |
 | **Payment Settlement & Billing** | Print bill, then settle/release | Real cart receipt + LAN print; Release only for PRINTED/PAID via `setcarttobill` | `[x] COMPLETED` | Never uses destructive `deletecart`; Room Charge / split still deferred |
 | **Split Bill Functionality** | `dinein-split-bill` modal (split by seat/equal) | Not yet exposed in UI | `[ ] PENDING` | Backend API `/cart/split-bill` needs Flutter UI screen |
@@ -89,14 +89,15 @@ Dineinapk/lib/
 │   ├── api_service.dart         # Typed restaurant API operations
 │   ├── bill_builder.dart        # Complete cart snapshot → receipt data
 │   ├── auth_service.dart        # Persistent SharedPreferences auth storage
-│   └── thermal_printer_service.dart # Bluetooth & ESC/POS Thermal Printer driver
+│   ├── printer_discovery_service.dart # LAN :9100 subnet scan + BT paired list
+│   └── thermal_printer_service.dart # Silent ESC/POS (LAN TCP / Bluetooth SPP)
 └── views/
     ├── auth/
     │   └── login_screen.dart    # Login UI
     ├── pos/
     │   └── food_categories_screen.dart # Canonical Flutter dine-in POS
     ├── settings/
-    │   └── printer_settings_screen.dart # ESC/POS Printer configuration & testing
+    │   └── printer_settings_screen.dart # Scan, select, test silent printer
     └── tables/
         └── dinein_table_screen.dart    # Table Dashboard & Live Metrics UI (Web Parity)
 ```
