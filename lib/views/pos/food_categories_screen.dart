@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
+import '../../widgets/pos_menu_tile.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
   const FoodCategoriesScreen({super.key});
@@ -351,7 +352,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       padding: const EdgeInsets.all(10),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 160,
-        mainAxisExtent: 78,
+        mainAxisExtent: 70,
         crossAxisSpacing: 10,
         mainAxisSpacing: 10,
       ),
@@ -361,24 +362,6 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final attr = item.attribute.toUpperCase().replaceAll('_', '');
-    final isNonVeg = attr == 'NONVEG';
-    final isEgg = attr == 'EGG';
-
-    // Admin dine-in compact card colors (.veg-card / .non-veg-card / .egg-card).
-    Color bg = const Color(0xFFF1FFF3);
-    Color border = const Color(0xFF81C784);
-    Color leftBar = const Color(0xFF2E7D32);
-    if (isNonVeg) {
-      bg = const Color(0xFFFFF2F2);
-      border = const Color(0xFFEF9A9A);
-      leftBar = const Color(0xFFC62828);
-    } else if (isEgg) {
-      bg = const Color(0xFFFFF8E1);
-      border = const Color(0xFFFFCC80);
-      leftBar = const Color(0xFFFB8C00);
-    }
-
     final inCart = pos.cartMenuItems.any((ci) {
       final menuData = ci['menuData'];
       if (menuData is List && menuData.isNotEmpty) {
@@ -388,67 +371,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       return false;
     });
 
-    if (inCart) {
-      bg = const Color(0xFFFFF7ED);
-      border = const Color(0xFFFDBA74);
-      leftBar = const Color(0xFFF97316);
-    }
-
-    // No Flexible/Expanded in grid cells — flex in a fixed-height tile can paint zero-size text.
-    final shortCode = item.shortCode?.trim() ?? '';
-    return Material(
-      color: bg,
-      borderRadius: BorderRadius.circular(8),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => _handleItemTap(pos, item),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border(
-              top: BorderSide(color: border),
-              right: BorderSide(color: border),
-              bottom: BorderSide(color: border),
-              left: BorderSide(color: leftBar, width: 5),
-            ),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.label,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1E293B),
-                      height: 1.15,
-                    ),
-                  ),
-                  if (shortCode.isNotEmpty &&
-                      shortCode != item.label.trim())
-                    Text(
-                      '[ $shortCode ]',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF475569),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+    return PosMenuTile(
+      label: item.label,
+      shortCode: item.shortCode,
+      attribute: item.attribute,
+      inCart: inCart,
+      onTap: () => _handleItemTap(pos, item),
     );
   }
 
