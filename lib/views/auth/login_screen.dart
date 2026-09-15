@@ -11,11 +11,21 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  static const _debugStaffUser = 'test';
+  static const _debugStaffPass = 'test';
+  static const _debugRestaurantNo = '10000';
+
   final _formKey = GlobalKey<FormState>();
-  // Empty by default — enter real restaurant/staff credentials.
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _restaurantNoController = TextEditingController();
+  // Release builds stay empty. Debug prefills Krishna Vilas staff smoke creds.
+  final _emailController = TextEditingController(
+    text: kDebugMode ? _debugStaffUser : '',
+  );
+  final _passwordController = TextEditingController(
+    text: kDebugMode ? _debugStaffPass : '',
+  );
+  final _restaurantNoController = TextEditingController(
+    text: kDebugMode ? _debugRestaurantNo : '',
+  );
   final _urlController = TextEditingController(
     text: 'https://backend.fatfox.testfox.in/api/v1',
   );
@@ -36,6 +46,21 @@ class _LoginScreenState extends State<LoginScreen> {
     if (success && mounted) {
       nav.pushReplacementNamed('/tables');
     }
+  }
+
+  Future<void> _quickStaffLogin(AuthProvider auth) async {
+    _emailController.text = _debugStaffUser;
+    _passwordController.text = _debugStaffPass;
+    _restaurantNoController.text = _debugRestaurantNo;
+    await _goTables(
+      auth,
+      () => auth.login(
+        email: _debugStaffUser,
+        password: _debugStaffPass,
+        baseUrl: _urlController.text.trim(),
+        restaurantNo: _debugRestaurantNo,
+      ),
+    );
   }
 
   @override
@@ -234,6 +259,23 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   if (kDebugMode) ...[
                     const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: OutlinedButton(
+                        onPressed:
+                            auth.isLoading ? null : () => _quickStaffLogin(auth),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFF97316),
+                          side: const BorderSide(color: Color(0xFFF97316)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: const Text('Quick staff login (10000)'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
                       height: 44,

@@ -25,13 +25,13 @@ This document presents a **feature-by-feature comparative audit** between the An
 | **Dashboard Metrics Cards** | Total Tables (40), Available (28), Occupied (7), KOT (5), Pre-Booking, Live Orders | Dynamic metric cards header | `[x] COMPLETED` | Live dynamic counts from API |
 | **Area Filtering Tabs** | AC Dining, Family Section, Non-AC Dining, Outdoor, VIP Lounge | Horizontal scrollable chip bar for areas | `[x] COMPLETED` | Fetched dynamically from `/table/area/all-avaliable?searchName=` |
 | **Table Card Status & Details** | Status colors (Blank/Occupied/KOT), Timer, Total Amount, Capacity, Customer | Custom responsive table cards matching Web UI | `[x] COMPLETED` | Real-time status badges and pricing |
-| **Food Categories & Menu Grid** | `/#/dineIn-food-categories?tableId=...&areaId=...` | `FoodCategoriesScreen` (`/pos`) | `[x] COMPLETED` | Dynamic category tabs & 235+ menu items |
+| **Food Categories & Menu Grid** | `/#/dineIn-food-categories?tableId=...&areaId=...` | `FoodCategoriesScreen` (`/food-categories`) | `[x] COMPLETED` | Dynamic category tabs & 235+ menu items; legacy `/pos` removed |
 | **Food Item Search & Filters** | Instant text search + Veg/Non-Veg filter chips | Integrated Search Bar + Veg/Non-Veg filter | `[x] COMPLETED` | Instant client-side & API search filtering |
 | **Live Backend Cart Sync** | Add to cart, update qty (+/-), remove item via REST API | Live synchronization via `PosProvider` | `[x] COMPLETED` | Calls `/cart/add-to-cart`, `/cart/update-quantity`, `/cart/remove-item` |
 | **KOT Order Submission** | "Print KOT" / "Create Order" button | KOT PRINT via setcartstatus | `[x] COMPLETED` | Live path: KOT → print → KOT_PRINT |
 | **Thermal Printer Integration** | Web browser `window.print()` / ESC-POS service | `ThermalPrinterService` (Bluetooth / Sunmi / ESC-POS) | `[x] COMPLETED` | Native ESC/POS printing over Bluetooth & USB |
 | **Variants & Addons Selection** | Modal popup when tapping items with variants/addons | Bottom sheet on item tap | `[x] COMPLETED` | Wired 2026-09-12 |
-| **Payment Settlement & Billing** | Settlement modal: Cash, Card, UPI, Room Charge, Split Pay | Settle sheet Cash/Card/UPI→ONLINE + discount | `[x] COMPLETED` | Room Charge / split still deferred |
+| **Payment Settlement & Billing** | Print bill, then settle/release | Real cart receipt + LAN print; Release only for PRINTED/PAID via `setcarttobill` | `[x] COMPLETED` | Never uses destructive `deletecart`; Room Charge / split still deferred |
 | **Split Bill Functionality** | `dinein-split-bill` modal (split by seat/equal) | Not yet exposed in UI | `[ ] PENDING` | Backend API `/cart/split-bill` needs Flutter UI screen |
 | **Table Shift / Merge Table** | Move cart items from Table A to Table B | Shift via long-press / swap icon | `[/] PARTIAL` | Shift done; merge deferred |
 | **Discounts & Coupon Codes** | Apply percentage/flat discount to cart | Available-discount chips on settle sheet | `[x] COMPLETED` | Uses setcartdiscount |
@@ -42,6 +42,19 @@ This document presents a **feature-by-feature comparative audit** between the An
 ---
 
 ## 🐛 Bug Fixes & Gotchas History (Crucial for Future Agents)
+
+### API envelope and floor reliability
+
+FatFox often returns HTTP 200 for refused requests. The app's `ApiClient` treats
+`status.code` as authoritative (`200`/`0` success; `401`/`2024` session expiry)
+and surfaces the server message for all other refusal codes. A failed refresh
+keeps the last-known table floor visible and marks it stale instead of replacing
+it with an empty floor.
+
+For billing, `total_price` is the grand total. Release is a settlement
+(`POST /restaurant/cart/setcarttobill`) and is allowed only after the bill has
+been printed (`PRINTED`/`PAID`). Receipt/printer options remain local to the
+Android device.
 
 ### 1. 🚨 Backend Query Parameter Regex Matching Bug (`table.controller.js` & `table_area.controller.js`)
 * **Symptom**: Mobile app table list and area list returned 0 results (`[]`), whereas the website showed 40 tables and 5 areas.
@@ -72,15 +85,16 @@ Dineinapk/lib/
 │   ├── table_provider.dart      # State for Table Grid, Area Tabs, Metrics, Live Orders
 │   └── pos_provider.dart        # State for Active Cart, Menu Items, Categories, KOT Submit
 ├── services/
-│   ├── api_service.dart         # HTTP Client (GET/POST/PUT/DELETE) with Bearer token
+│   ├── api_client.dart          # Shared HTTP/envelope/session-expiry handling
+│   ├── api_service.dart         # Typed restaurant API operations
+│   ├── bill_builder.dart        # Complete cart snapshot → receipt data
 │   ├── auth_service.dart        # Persistent SharedPreferences auth storage
 │   └── thermal_printer_service.dart # Bluetooth & ESC/POS Thermal Printer driver
 └── views/
     ├── auth/
     │   └── login_screen.dart    # Login UI
     ├── pos/
-    │   ├── food_categories_screen.dart # Dynamic Food Categories & Menu POS UI (Web Parity)
-    │   └── pos_ordering_screen.dart    # Fullscreen POS layout
+    │   └── food_categories_screen.dart # Canonical Flutter dine-in POS
     ├── settings/
     │   └── printer_settings_screen.dart # ESC/POS Printer configuration & testing
     └── tables/

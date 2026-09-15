@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
 import '../../models/table_model.dart';
-import '../../services/thermal_printer_service.dart';
 
 class DineInTableScreen extends StatefulWidget {
   const DineInTableScreen({super.key});
@@ -38,10 +38,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             const SizedBox(width: 8),
             Flexible(
               child: Text(
-                auth.restaurantName.isEmpty ? 'FATFOX DINE-IN' : auth.restaurantName,
+                auth.restaurantName.isEmpty
+                    ? 'FATFOX DINE-IN'
+                    : auth.restaurantName,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Color(0xFF0F172A), fontWeight: FontWeight.bold, fontSize: 16),
+                style: const TextStyle(
+                  color: Color(0xFF0F172A),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
               ),
             ),
           ],
@@ -61,13 +67,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             UserAccountsDrawerHeader(
               decoration: const BoxDecoration(color: Color(0xFFF97316)),
               accountName: Text(
-                auth.restaurantName.isEmpty ? 'FATFOX RESTAURANT' : auth.restaurantName,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                auth.restaurantName.isEmpty
+                    ? 'FATFOX RESTAURANT'
+                    : auth.restaurantName,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
               ),
-              accountEmail: const Text('Staff Dine-In Terminal', style: TextStyle(fontSize: 12)),
+              accountEmail: const Text(
+                'Staff Dine-In Terminal',
+                style: TextStyle(fontSize: 12),
+              ),
               currentAccountPicture: const CircleAvatar(
                 backgroundColor: Colors.white,
-                child: Icon(Icons.restaurant_menu, color: Color(0xFFF97316), size: 30),
+                child: Icon(
+                  Icons.restaurant_menu,
+                  color: Color(0xFFF97316),
+                  size: 30,
+                ),
               ),
             ),
             ListTile(
@@ -81,7 +99,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.event_seat, color: Color(0xFF2563EB)),
-              title: Text('Pre Booking Dine In (${tableProv.reservations.length})'),
+              title: Text(
+                'Pre Booking Dine In (${tableProv.reservations.length})',
+              ),
               selected: tableProv.selectedTab == 1,
               onTap: () {
                 tableProv.setSelectedTab(1);
@@ -123,7 +143,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.logout, color: Color(0xFFEF4444)),
-              title: const Text('Logout', style: TextStyle(color: Color(0xFFEF4444))),
+              title: const Text(
+                'Logout',
+                style: TextStyle(color: Color(0xFFEF4444)),
+              ),
               onTap: () async {
                 await auth.logout();
                 if (context.mounted) {
@@ -140,15 +163,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             Material(
               color: const Color(0xFFFEF3C7),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
                 child: Row(
                   children: [
-                    const Icon(Icons.info_outline, color: Color(0xFF92400E), size: 18),
+                    const Icon(
+                      Icons.info_outline,
+                      color: Color(0xFF92400E),
+                      size: 18,
+                    ),
                     const SizedBox(width: 8),
                     const Expanded(
                       child: Text(
                         'Demo mode — UI only. Tables/KOT/print need a real restaurant login (not superadmin).',
-                        style: TextStyle(fontSize: 12, color: Color(0xFF92400E)),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF92400E),
+                        ),
                       ),
                     ),
                     TextButton(
@@ -172,11 +205,29 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  _buildSubTabChip(0, 'Dine In', Icons.table_bar, Colors.orange, tableProv),
+                  _buildSubTabChip(
+                    0,
+                    'Dine In',
+                    Icons.table_bar,
+                    Colors.orange,
+                    tableProv,
+                  ),
                   const SizedBox(width: 8),
-                  _buildSubTabChip(1, 'Pre Booking Dine In (${tableProv.reservations.length})', Icons.calendar_today, Colors.blue, tableProv),
+                  _buildSubTabChip(
+                    1,
+                    'Pre Booking Dine In (${tableProv.reservations.length})',
+                    Icons.calendar_today,
+                    Colors.blue,
+                    tableProv,
+                  ),
                   const SizedBox(width: 8),
-                  _buildSubTabChip(2, 'Live Orders (${tableProv.liveOrders.length})', Icons.flash_on, Colors.purple, tableProv),
+                  _buildSubTabChip(
+                    2,
+                    'Live Orders (${tableProv.liveOrders.length})',
+                    Icons.flash_on,
+                    Colors.purple,
+                    tableProv,
+                  ),
                 ],
               ),
             ),
@@ -184,9 +235,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
 
           // Dynamic Body based on Sub-Tab selection
+          if (tableProv.isRefreshing)
+            const LinearProgressIndicator(
+              minHeight: 2,
+              color: Color(0xFFF97316),
+            ),
           Expanded(
-            child: tableProv.isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFFF97316)))
+            child: tableProv.isLoading && !tableProv.hasFloor
+                ? const Center(
+                    child: CircularProgressIndicator(color: Color(0xFFF97316)),
+                  )
                 : _buildTabBody(tableProv),
           ),
         ],
@@ -194,11 +252,21 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
-  Widget _buildSubTabChip(int index, String label, IconData icon, Color activeColor, TableProvider prov) {
+  Widget _buildSubTabChip(
+    int index,
+    String label,
+    IconData icon,
+    Color activeColor,
+    TableProvider prov,
+  ) {
     final isSelected = prov.selectedTab == index;
     return ChoiceChip(
       showCheckmark: false,
-      avatar: Icon(icon, size: 16, color: isSelected ? Colors.white : activeColor),
+      avatar: Icon(
+        icon,
+        size: 16,
+        color: isSelected ? Colors.white : activeColor,
+      ),
       label: Text(label),
       selected: isSelected,
       selectedColor: activeColor,
@@ -213,32 +281,107 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   }
 
   Widget _buildTabBody(TableProvider prov) {
-    if (prov.errorMessage != null && prov.errorMessage!.isNotEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.cloud_off, size: 48, color: Color(0xFFEF4444)),
-              const SizedBox(height: 12),
-              Text(
-                'Live Backend Error',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+    final hasError = prov.errorMessage != null && prov.errorMessage!.isNotEmpty;
+    if (hasError && !prov.hasFloor) {
+      return _buildFullError(prov);
+    }
+
+    return Column(
+      children: [
+        if (hasError) _buildStaleBanner(prov),
+        Expanded(child: _buildTabContent(prov)),
+      ],
+    );
+  }
+
+  Widget _buildStaleBanner(TableProvider prov) {
+    final expired = prov.sessionExpired;
+    return Material(
+      color: expired ? const Color(0xFFFEE2E2) : const Color(0xFFFEF3C7),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Icon(
+              expired ? Icons.lock_outline : Icons.cloud_off,
+              size: 18,
+              color: expired
+                  ? const Color(0xFFB91C1C)
+                  : const Color(0xFF92400E),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                expired
+                    ? 'Session expired — log in again to keep working.'
+                    : "Couldn't refresh the floor — showing what was loaded "
+                          "${prov.lastSyncedLabel.isEmpty ? 'earlier' : prov.lastSyncedLabel}. "
+                          "${prov.errorMessage}",
+                style: TextStyle(
+                  fontSize: 12,
+                  color: expired
+                      ? const Color(0xFFB91C1C)
+                      : const Color(0xFF92400E),
+                ),
               ),
-              const SizedBox(height: 6),
-              Text(
-                prov.errorMessage!,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+            ),
+            TextButton(
+              onPressed: expired ? () => _relogin() : () => prov.refresh(),
+              child: Text(
+                expired ? 'LOG IN' : 'RETRY',
+                style: const TextStyle(fontSize: 12),
               ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _relogin() async {
+    final auth = Provider.of<AuthProvider>(context, listen: false);
+    Provider.of<TableProvider>(context, listen: false).reset();
+    await auth.logout();
+    if (!mounted) return;
+    Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
+  }
+
+  Widget _buildFullError(TableProvider prov) {
+    final expired = prov.sessionExpired;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              expired ? Icons.lock_outline : Icons.cloud_off,
+              size: 48,
+              color: const Color(0xFFEF4444),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              expired ? 'Session expired' : "Couldn't load the floor",
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF0F172A),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              prov.errorMessage ?? '',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!expired) ...[
                   ElevatedButton.icon(
                     icon: const Icon(Icons.refresh, size: 18),
-                    label: const Text('RETRY LIVE SYNC'),
+                    label: const Text('RETRY'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFF97316),
                       foregroundColor: Colors.white,
@@ -246,24 +389,21 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     onPressed: () => prov.loadDashboardData(),
                   ),
                   const SizedBox(width: 12),
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.login, size: 18),
-                    label: const Text('RE-LOGIN'),
-                    onPressed: () async {
-                      final auth = Provider.of<AuthProvider>(context, listen: false);
-                      await auth.logout();
-                      if (!mounted) return;
-                      Navigator.pushReplacementNamed(context, '/login');
-                    },
-                  ),
                 ],
-              ),
-            ],
-          ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('RE-LOGIN'),
+                  onPressed: _relogin,
+                ),
+              ],
+            ),
+          ],
         ),
-      );
-    }
+      ),
+    );
+  }
 
+  Widget _buildTabContent(TableProvider prov) {
     switch (prov.selectedTab) {
       case 1:
         return _buildReservationsView(prov);
@@ -282,7 +422,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     // Group tables by Area Name
     final Map<String, List<DineInTable>> grouped = {};
     for (var area in prov.areas) {
-      final areaTables = filteredTables.where((t) => t.areaId == area.id).toList();
+      final areaTables = filteredTables
+          .where((t) => t.areaId == area.id)
+          .toList();
       if (areaTables.isNotEmpty) {
         grouped[area.name] = areaTables;
       }
@@ -290,7 +432,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     // Add unassigned tables if any
     final assignedIds = prov.areas.map((a) => a.id).toSet();
-    final unassigned = filteredTables.where((t) => !assignedIds.contains(t.areaId)).toList();
+    final unassigned = filteredTables
+        .where((t) => !assignedIds.contains(t.areaId))
+        .toList();
     if (unassigned.isNotEmpty) {
       grouped['Other Section'] = unassigned;
     }
@@ -305,13 +449,41 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                _buildKpiCard('TOTAL TABLES', '${prov.totalTablesCount}', Colors.blue, Icons.table_restaurant),
+                _buildKpiCard(
+                  'TOTAL TABLES',
+                  '${prov.totalTablesCount}',
+                  Colors.blue,
+                  Icons.table_restaurant,
+                  selected: prov.selectedStatusFilter == 'ALL',
+                  onTap: () => prov.setStatusFilter('ALL'),
+                ),
                 const SizedBox(width: 10),
-                _buildKpiCard('AVAILABLE', '${prov.availableTablesCount}', Colors.green, Icons.event_seat),
+                _buildKpiCard(
+                  'AVAILABLE',
+                  '${prov.availableTablesCount}',
+                  Colors.green,
+                  Icons.event_seat,
+                  selected: prov.selectedStatusFilter == 'AVAILABLE',
+                  onTap: () => prov.setStatusFilter('AVAILABLE'),
+                ),
                 const SizedBox(width: 10),
-                _buildKpiCard('OCCUPIED', '${prov.occupiedTablesCount}', Colors.orange, Icons.people),
+                _buildKpiCard(
+                  'OCCUPIED',
+                  '${prov.occupiedTablesCount}',
+                  Colors.orange,
+                  Icons.people,
+                  selected: prov.selectedStatusFilter == 'OCCUPIED',
+                  onTap: () => prov.setStatusFilter('OCCUPIED'),
+                ),
                 const SizedBox(width: 10),
-                _buildKpiCard('KOT / RUNNING', '${prov.kotTablesCount}', Colors.purple, Icons.receipt_long),
+                _buildKpiCard(
+                  'KOT / RUNNING',
+                  '${prov.kotTablesCount}',
+                  Colors.purple,
+                  Icons.receipt_long,
+                  selected: prov.selectedStatusFilter == 'KOT',
+                  onTap: () => prov.setStatusFilter('KOT'),
+                ),
               ],
             ),
           ),
@@ -337,85 +509,131 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
         // Grouped Area Headings & Table Grids
         Expanded(
-          child: grouped.isEmpty
-              ? const Center(child: Text('No tables found for this area', style: TextStyle(color: Color(0xFF64748B))))
-              : ListView(
-                  padding: const EdgeInsets.all(12),
-                  children: grouped.entries.map((entry) {
-                    final areaName = entry.key;
-                    final areaTables = entry.value;
+          child: RefreshIndicator(
+            color: const Color(0xFFF97316),
+            onRefresh: () => prov.refresh(),
+            child: grouped.isEmpty
+                ? ListView(
+                    children: const [
+                      SizedBox(height: 120),
+                      Center(
+                        child: Text(
+                          'No tables found',
+                          style: TextStyle(color: Color(0xFF64748B)),
+                        ),
+                      ),
+                    ],
+                  )
+                : ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: grouped.entries.map((entry) {
+                      final areaName = entry.key;
+                      final areaTables = entry.value;
 
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                          child: Text(
-                            areaName,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xFFE11D48), // Dark Pink / Red Area Heading matching web
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 8,
+                              horizontal: 4,
+                            ),
+                            child: Text(
+                              areaName,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                                color: Color(
+                                  0xFFE11D48,
+                                ), // Dark Pink / Red Area Heading matching web
+                              ),
                             ),
                           ),
-                        ),
-                        GridView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                            maxCrossAxisExtent: 180,
-                            childAspectRatio: 1.05,
-                            crossAxisSpacing: 12,
-                            mainAxisSpacing: 12,
+                          GridView.builder(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            gridDelegate:
+                                const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 180,
+                                  childAspectRatio: 1.05,
+                                  crossAxisSpacing: 12,
+                                  mainAxisSpacing: 12,
+                                ),
+                            itemCount: areaTables.length,
+                            itemBuilder: (context, index) {
+                              return _buildTableCard(
+                                context,
+                                prov,
+                                areaTables[index],
+                              );
+                            },
                           ),
-                          itemCount: areaTables.length,
-                          itemBuilder: (context, index) {
-                            return _buildTableCard(context, prov, areaTables[index]);
-                          },
-                        ),
-                        const SizedBox(height: 16),
-                      ],
-                    );
-                  }).toList(),
-                ),
+                          const SizedBox(height: 16),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildKpiCard(String label, String value, Color color, IconData icon) {
-    return Container(
-      width: 135,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.2)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: color),
-                ),
-                Text(
-                  value,
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: color),
-                ),
-              ],
-            ),
+  Widget _buildKpiCard(
+    String label,
+    String value,
+    Color color,
+    IconData icon, {
+    bool selected = false,
+    VoidCallback? onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: 135,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: selected ? 0.18 : 0.08),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: color.withValues(alpha: selected ? 0.9 : 0.2),
+            width: selected ? 1.5 : 1,
           ),
-        ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      color: color,
+                    ),
+                  ),
+                  Text(
+                    value,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -440,14 +658,19 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
-  String? _cartIdForTable(DineInTable table) {
-    final cart = table.cartDetails;
-    if (cart == null) return null;
-    final id = cart['_id']?.toString() ??
-        cart['cart_id']?.toString() ??
-        cart['cartId']?.toString();
-    if (id == null || id.isEmpty) return null;
-    return id;
+  String? _cartIdForTable(DineInTable table) => table.cartId;
+
+  void _toast(String text, {bool error = false, Color? color}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        backgroundColor:
+            color ??
+            (error ? const Color(0xFFEF4444) : const Color(0xFF16A34A)),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   Future<void> _showShiftTableDialog(
@@ -467,10 +690,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     }
 
     final blankSameArea = tableProv.tables
-        .where((t) => t.isAvailable && t.id != source.id && t.areaId == source.areaId)
+        .where(
+          (t) =>
+              t.isAvailable && t.id != source.id && t.areaId == source.areaId,
+        )
         .toList();
     final blankOthers = tableProv.tables
-        .where((t) => t.isAvailable && t.id != source.id && t.areaId != source.areaId)
+        .where(
+          (t) =>
+              t.isAvailable && t.id != source.id && t.areaId != source.areaId,
+        )
         .toList();
     final targets = [...blankSameArea, ...blankOthers];
 
@@ -516,24 +745,33 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                           return ListTile(
                             dense: true,
                             selected: selected,
-                            selectedTileColor: const Color(0xFFF97316).withValues(alpha: 0.08),
+                            selectedTileColor: const Color(0xFFF97316)
+                                .withValues(alpha: 0.08),
                             leading: Icon(
-                              selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                              selected
+                                  ? Icons.radio_button_checked
+                                  : Icons.radio_button_off,
                               color: const Color(0xFFF97316),
                               size: 20,
                             ),
                             title: Text(
                               'Table ${t.tableNumber}',
-                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 14,
+                              ),
                             ),
                             subtitle: Text(
                               sameArea ? 'Same area' : 'Other area',
                               style: TextStyle(
                                 fontSize: 11,
-                                color: sameArea ? const Color(0xFF16A34A) : const Color(0xFF64748B),
+                                color: sameArea
+                                    ? const Color(0xFF16A34A)
+                                    : const Color(0xFF64748B),
                               ),
                             ),
-                            onTap: () => setDialogState(() => selectedId = t.id),
+                            onTap: () =>
+                                setDialogState(() => selectedId = t.id),
                           );
                         },
                       ),
@@ -547,7 +785,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   child: const Text('Cancel'),
                 ),
                 ElevatedButton(
-                  onPressed: selectedId == null ? null : () => Navigator.pop(ctx, true),
+                  onPressed: selectedId == null
+                      ? null
+                      : () => Navigator.pop(ctx, true),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFF97316),
                     foregroundColor: Colors.white,
@@ -563,7 +803,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     if (confirmed != true || selectedId == null || !context.mounted) return;
 
-    final ok = await tableProv.shiftTable(cartId: cartId, newTableId: selectedId!);
+    final ok = await tableProv.shiftTable(
+      cartId: cartId,
+      newTableId: selectedId!,
+    );
     if (!context.mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -613,10 +856,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     Navigator.pushNamed(
       context,
       '/food-categories',
-      arguments: {
-        'tableId': table.id,
-        'areaId': table.areaId,
-      },
+      arguments: {'tableId': table.id, 'areaId': table.areaId},
     );
   }
 
@@ -676,7 +916,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
   }
 
-  Widget _buildTableCard(BuildContext context, TableProvider tableProv, DineInTable table) {
+  Widget _buildTableCard(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) {
     Color cardBg = Colors.white;
     Color borderCol = const Color(0xFFE2E8F0);
     String statusText = 'AVAILABLE';
@@ -692,6 +936,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       borderCol = const Color(0xFFFCD34D);
       statusText = 'KOT RUNNING';
       badgeColor = const Color(0xFFD97706);
+    } else if (table.isPrinted || table.isPaid) {
+      cardBg = const Color(0xFFEDE9FE);
+      borderCol = const Color(0xFFC4B5FD);
+      statusText = table.isPaid ? 'PAID' : 'BILL PRINTED';
+      badgeColor = const Color(0xFF6D28D9);
     } else if (table.isOccupied) {
       cardBg = const Color(0xFFDCFCE7);
       borderCol = const Color(0xFF86EFAC);
@@ -699,30 +948,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       badgeColor = const Color(0xFF15803D);
     }
 
-    final covers = table.cartDetails?['covers'] ?? 4;
-    final timeMins = table.cartDetails?['time_mins'] ?? '';
-    final cartId = _cartIdForTable(table);
+    final cartId = table.cartId;
     final canShift = table.isOccupied && !table.isPending && cartId != null;
+    final seated = table.seatedLabel;
+    final customer = table.customerName;
 
     return InkWell(
       onTap: () {
         if (table.isPending) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Accept the QR order first to open POS'),
-              backgroundColor: Color(0xFF7C3AED),
-            ),
+          _toast(
+            'Accept the QR order first to open POS',
+            color: const Color(0xFF7C3AED),
           );
           return;
         }
         Navigator.pushNamed(
           context,
           '/food-categories',
-          arguments: {
-            'tableId': table.id,
-            'areaId': table.areaId,
-          },
-        );
+          arguments: {'tableId': table.id, 'areaId': table.areaId},
+        ).then((_) => tableProv.refresh());
       },
       onLongPress: canShift
           ? () => _showShiftTableDialog(context, tableProv, table)
@@ -750,58 +994,119 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               children: [
                 Text(
                   table.tableNumber,
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF0F172A),
+                  ),
                 ),
-                Text(
-                  '[${table.noOfPeople} Seats]',
-                  style: const TextStyle(fontSize: 10, color: Color(0xFF64748B)),
+                Row(
+                  children: [
+                    if (table.isCombined)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.link,
+                          size: 12,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    if (table.isPreBooking)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(
+                          Icons.event_seat,
+                          size: 12,
+                          color: Color(0xFF2563EB),
+                        ),
+                      ),
+                    Text(
+                      '[${table.noOfPeople} Seats]',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
             if (table.isOccupied) ...[
-              if (timeMins.isNotEmpty)
-                Text('$timeMins • $covers Covers', style: const TextStyle(fontSize: 9, color: Color(0xFF475569)))
-              else
-                Text('$covers Covers', style: const TextStyle(fontSize: 9, color: Color(0xFF475569))),
+              Text(
+                [
+                  if (seated != null) seated,
+                  if (customer != null)
+                    customer
+                  else if (table.itemCount > 0)
+                    '${table.itemCount} items',
+                ].join(' • '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 9, color: Color(0xFF475569)),
+              ),
               Text(
                 '₹${table.totalPrice.toStringAsFixed(2)}',
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF0F172A)),
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF0F172A),
+                ),
               ),
             ] else
-              const Text('Tap to Order', style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8))),
+              const Text(
+                'Tap to Order',
+                style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
+              ),
 
-            // Quick Action Buttons on Cards (Accept/Reject, Shift, Printer, Release)
+            // Quick actions: Accept/Reject (QR), Shift, Print bill, Release
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: badgeColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
                     statusText,
-                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: badgeColor),
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      color: badgeColor,
+                    ),
                   ),
                 ),
                 if (table.isPending && cartId != null)
                   Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.check, size: 16, color: Color(0xFF16A34A)),
+                        icon: const Icon(
+                          Icons.check,
+                          size: 16,
+                          color: Color(0xFF16A34A),
+                        ),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
                         tooltip: 'Accept QR order',
-                        onPressed: () => _acceptQrOrder(context, tableProv, table),
+                        onPressed: () =>
+                            _acceptQrOrder(context, tableProv, table),
                       ),
                       const SizedBox(width: 6),
                       IconButton(
-                        icon: const Icon(Icons.close, size: 16, color: Color(0xFFDC2626)),
+                        icon: const Icon(
+                          Icons.close,
+                          size: 16,
+                          color: Color(0xFFDC2626),
+                        ),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
                         tooltip: 'Reject QR order',
-                        onPressed: () => _rejectQrOrder(context, tableProv, table),
+                        onPressed: () =>
+                            _rejectQrOrder(context, tableProv, table),
                       ),
                     ],
                   )
@@ -810,80 +1115,37 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     children: [
                       if (canShift) ...[
                         IconButton(
-                          icon: const Icon(Icons.swap_horiz, size: 16, color: Color(0xFFF97316)),
+                          icon: const Icon(
+                            Icons.swap_horiz,
+                            size: 16,
+                            color: Color(0xFFF97316),
+                          ),
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(),
                           tooltip: 'Shift Table',
-                          onPressed: () => _showShiftTableDialog(context, tableProv, table),
+                          onPressed: () =>
+                              _showShiftTableDialog(context, tableProv, table),
                         ),
                         const SizedBox(width: 6),
                       ],
                       IconButton(
-                        icon: const Icon(Icons.print, size: 16, color: Color(0xFF2563EB)),
+                        icon: const Icon(
+                          Icons.open_in_new,
+                          size: 16,
+                          color: Color(0xFF16A34A),
+                        ),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(),
-                        tooltip: 'Quick Print Bill',
-                        onPressed: () async {
-                          final auth = Provider.of<AuthProvider>(context, listen: false);
-                          final printerService = ThermalPrinterService();
-                          try {
-                            final bytes = await printerService.generateBillBytes(
-                              table: table,
-                              items: const [],
-                              subTotal: table.totalPrice,
-                              taxAmount: 0,
-                              grandTotal: table.totalPrice,
-                              restaurantName: auth.restaurantName,
-                              paperSize: '80mm',
-                            );
-                            await printerService.printBytes(bytes);
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Bill sent to printer'),
-                                  backgroundColor: Color(0xFF2563EB),
-                                ),
-                              );
-                            }
-                          } catch (e) {
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    e.toString().replaceAll('Exception: ', ''),
-                                  ),
-                                  backgroundColor: const Color(0xFFEF4444),
-                                ),
-                              );
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 6),
-                      IconButton(
-                        icon: const Icon(Icons.check_circle_outline, size: 16, color: Color(0xFF16A34A)),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                        tooltip: 'Release Table',
-                        onPressed: () async {
-                          final confirm = await showDialog<bool>(
-                            context: context,
-                            builder: (ctx) => AlertDialog(
-                              title: const Text('Release Table'),
-                              content: Text('Mark Table ${table.tableNumber} paid and available?'),
-                              actions: [
-                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                                ElevatedButton(
-                                  onPressed: () => Navigator.pop(ctx, true),
-                                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
-                                  child: const Text('Release'),
-                                ),
-                              ],
-                            ),
-                          );
-                          if (confirm == true) {
-                            await tableProv.releaseTable(table.id);
-                          }
+                        tooltip: 'Open table to print or release',
+                        onPressed: () {
+                          Navigator.pushNamed(
+                            context,
+                            '/food-categories',
+                            arguments: {
+                              'tableId': table.id,
+                              'areaId': table.areaId,
+                            },
+                          ).then((_) => tableProv.refresh());
                         },
                       ),
                     ],
@@ -905,7 +1167,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           children: [
             Icon(Icons.event_seat, size: 48, color: Color(0xFFCBD5E1)),
             SizedBox(height: 12),
-            Text('No Pre-Booking Reservations Found', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.bold)),
+            Text(
+              'No Pre-Booking Reservations Found',
+              style: TextStyle(
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ],
         ),
       );
@@ -916,11 +1184,33 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       itemCount: prov.reservations.length,
       itemBuilder: (context, index) {
         final item = prov.reservations[index];
-        final name = item['customer_name'] ?? item['name'] ?? 'Rahul Sharma';
-        final phone = item['phone'] ?? item['mobile'] ?? '+91 98765 43210';
-        final tableNo = item['table_number'] ?? item['table'] ?? '10';
-        final guests = item['guest_count'] ?? item['no_of_people'] ?? 4;
-        final timeStr = item['reservation_time'] ?? item['time'] ?? 'Today 07:30 PM';
+        final user = item['user'] is Map ? item['user'] as Map : const {};
+        final name = (item['customer_name'] ?? user['name'] ?? 'Guest')
+            .toString();
+        final phone = (item['customer_mobile'] ?? user['mobile'] ?? '')
+            .toString();
+        final tableNos =
+            item['table_numbers'] is List &&
+                (item['table_numbers'] as List).isNotEmpty
+            ? (item['table_numbers'] as List).join(' + ')
+            : (item['table_number'] ?? '—').toString();
+        final tableNo = tableNos;
+        final guests =
+            item['reservation_members'] ?? item['no_of_people'] ?? '';
+        // reservation_date is a wall-clock labelled Z: read the UTC date parts.
+        final rd = DateTime.tryParse(item['reservation_date']?.toString() ?? '')
+            ?.toUtc();
+        final dateStr = rd == null
+            ? ''
+            : '${rd.day.toString().padLeft(2, '0')}/${rd.month.toString().padLeft(2, '0')}';
+        final timeStr = [
+          dateStr,
+          (item['reservation_time'] ?? '').toString(),
+        ].where((e) => e.isNotEmpty).join(' ');
+        final state =
+            (item['state'] ??
+                    (item['accepted_status'] == 1 ? 'CONFIRMED' : 'REQUESTED'))
+                .toString();
 
         return Card(
           margin: const EdgeInsets.only(bottom: 10),
@@ -934,18 +1224,40 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               backgroundColor: Color(0xFFDBEAFE),
               child: Icon(Icons.person, color: Color(0xFF2563EB)),
             ),
-            title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+            title: Text(
+              name,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+            ),
             subtitle: Text('📞 $phone • 👥 $guests Guests • ⏰ $timeStr'),
             trailing: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text('Table $tableNo', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFFF97316))),
+                Text(
+                  'Table $tableNo',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFFF97316),
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(color: const Color(0xFFDCFCE7), borderRadius: BorderRadius.circular(4)),
-                  child: const Text('CONFIRMED', style: TextStyle(fontSize: 9, color: Colors.green, fontWeight: FontWeight.bold)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDCFCE7),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    state,
+                    style: const TextStyle(
+                      fontSize: 9,
+                      color: Colors.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -965,7 +1277,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   }
 
   String _liveOrderTableLabel(Map<String, dynamic> order, TableProvider prov) {
-    final fromNested = _mapGet(order['table_id'], 'table_number') ??
+    final fromNested =
+        _mapGet(order['table_id'], 'table_number') ??
         _mapGet(order['table_id'], 'table_no');
     if (fromNested != null && fromNested.toString().isNotEmpty) {
       return fromNested.toString();
@@ -975,8 +1288,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       return direct.toString();
     }
     final tableId = order['table_id'] is Map
-        ? (_mapGet(order['table_id'], '_id') ?? _mapGet(order['table_id'], 'id'))
-            ?.toString()
+        ? (_mapGet(order['table_id'], '_id') ??
+                  _mapGet(order['table_id'], 'id'))
+              ?.toString()
         : order['table_id']?.toString();
     if (tableId != null && tableId.isNotEmpty) {
       for (final t in prov.tables) {
@@ -1028,14 +1342,15 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       itemCount: prov.liveOrders.length,
       itemBuilder: (context, index) {
         final order = prov.liveOrders[index];
-        final orderId =
-            (order['_id'] ?? order['id'] ?? 'ORD-${index + 1}').toString();
+        final orderId = (order['_id'] ?? order['id'] ?? 'ORD-${index + 1}')
+            .toString();
         final tableNo = _liveOrderTableLabel(order, prov);
         final total = _asDouble(
           order['grand_total'] ?? order['total_price'] ?? order['menu_total'],
         );
-        final status =
-            (order['table_status'] ?? 'ACTIVE').toString().toUpperCase();
+        final status = (order['table_status'] ?? 'ACTIVE')
+            .toString()
+            .toUpperCase();
         final guest = order['customer_name']?.toString();
         final statusColor = _statusColor(status);
 

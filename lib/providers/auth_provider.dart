@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../config/api_config.dart';
+import '../services/api_client.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 
@@ -15,8 +16,15 @@ class AuthProvider with ChangeNotifier {
   String? _restaurantId;
   String _restaurantName = 'Fatfox Restaurant';
   String? _errorMessage;
+  String? _sessionNotice;
 
   bool get isLoggedIn => _isLoggedIn;
+
+  /// Why the user was sent back to login (expired session). Shown once.
+  String? get sessionNotice => _sessionNotice;
+  void clearSessionNotice() {
+    _sessionNotice = null;
+  }
   bool get isLoading => _isLoading;
   bool get isDemoMode => _isDemoMode;
   String? get token => _token;
@@ -137,6 +145,8 @@ class AuthProvider with ChangeNotifier {
         _isDemoMode = false;
         _isLoggedIn = true;
         _isLoading = false;
+        _sessionNotice = null;
+        ApiClient.sessionRefreshed();
         notifyListeners();
         return true;
       } else {
@@ -158,6 +168,15 @@ class AuthProvider with ChangeNotifier {
     _isDemoMode = false;
     _token = null;
     _restaurantId = null;
+    ApiClient.sessionRefreshed();
     notifyListeners();
+  }
+
+  /// The server rejected the JWT (HTTP 401 / envelope 401). Drop the session
+  /// and remember why so the login screen can say so.
+  Future<void> sessionExpired(String reason) async {
+    if (!_isLoggedIn) return;
+    _sessionNotice = reason.isEmpty ? 'Session expired. Please log in again.' : reason;
+    await logout();
   }
 }

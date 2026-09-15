@@ -45,13 +45,16 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   @override
   Widget build(BuildContext context) {
     final pos = Provider.of<PosProvider>(context);
-    final tableNum = pos.tableDetails?['table_number']?.toString() ?? 'Table';
-    final tableStatus = pos.tableDetails?['table_status']?.toString() ?? '';
+    final tableNum = pos.tableNumber.isEmpty ? 'Table' : pos.tableNumber;
+    final tableStatus = pos.tableStatus;
+    final loadFailed = pos.errorMessage != null && pos.categories.isEmpty && !pos.isLoading;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: _buildAppBar(pos, tableNum),
-      body: pos.isLoading && pos.categories.isEmpty
+      body: loadFailed
+          ? _buildLoadError(pos)
+          : pos.isLoading && pos.categories.isEmpty
           ? const Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -67,6 +70,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
             )
           : Column(
               children: [
+                if (pos.isBusy)
+                  const LinearProgressIndicator(minHeight: 2, color: Color(0xFFF97316)),
+                if (pos.cartError != null) _buildCartErrorBar(pos),
                 // Category horizontal scroll bar
                 _buildCategoryBar(pos),
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
@@ -89,6 +95,83 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               ),
             )
           : null,
+    );
+  }
+
+  Widget _buildLoadError(PosProvider pos) {
+    final expired = pos.sessionExpired;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(expired ? Icons.lock_outline : Icons.cloud_off, size: 48, color: const Color(0xFFEF4444)),
+            const SizedBox(height: 12),
+            Text(
+              expired ? 'Session expired' : "Couldn't open this table",
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              pos.errorMessage ?? '',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!expired) ...[
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('RETRY'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFF97316),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () {
+                      final tid = pos.activeTableId ?? '';
+                      if (tid.isNotEmpty) pos.loadTableAndMenu(tid, pos.activeAreaId ?? '');
+                    },
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.arrow_back, size: 18),
+                  label: const Text('BACK TO FLOOR'),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCartErrorBar(PosProvider pos) {
+    return Material(
+      color: const Color(0xFFFEF3C7),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFF92400E)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                "Couldn't load this table's order: ${pos.cartError}",
+                style: const TextStyle(fontSize: 11, color: Color(0xFF92400E)),
+              ),
+            ),
+            TextButton(
+              onPressed: () => pos.reloadCart(),
+              child: const Text('RETRY', style: TextStyle(fontSize: 11)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -263,11 +346,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       );
     }
 
+    // Admin compact POS: ~150px columns, fixed row height, text-only cards.
     return GridView.builder(
       padding: const EdgeInsets.all(10),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        childAspectRatio: 1.15,
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 160,
+        mainAxisExtent: 78,
         crossAxisSpacing: 10,
         mainAxisSpacing: 10,
       ),
@@ -277,18 +361,24 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final isNonVeg = item.attribute.toUpperCase() == 'NONVEG';
-    final isEgg = item.attribute.toUpperCase() == 'EGG';
+    final attr = item.attribute.toUpperCase().replaceAll('_', '');
+    final isNonVeg = attr == 'NONVEG';
+    final isEgg = attr == 'EGG';
 
-    Color attrColor = const Color(0xFF16A34A); // green default
-    if (isNonVeg) attrColor = const Color(0xFFDC2626);
-    if (isEgg) attrColor = const Color(0xFFD97706);
+    // Admin dine-in compact card colors (.veg-card / .non-veg-card / .egg-card).
+    Color bg = const Color(0xFFF1FFF3);
+    Color border = const Color(0xFF81C784);
+    Color leftBar = const Color(0xFF2E7D32);
+    if (isNonVeg) {
+      bg = const Color(0xFFFFF2F2);
+      border = const Color(0xFFEF9A9A);
+      leftBar = const Color(0xFFC62828);
+    } else if (isEgg) {
+      bg = const Color(0xFFFFF8E1);
+      border = const Color(0xFFFFCC80);
+      leftBar = const Color(0xFFFB8C00);
+    }
 
-    final displayName = item.displayName ?? item.name;
-    final hasImage =
-        item.image != null && item.image!.isNotEmpty && item.image != 'null';
-
-    // Check if item is already in cart
     final inCart = pos.cartMenuItems.any((ci) {
       final menuData = ci['menuData'];
       if (menuData is List && menuData.isNotEmpty) {
@@ -298,158 +388,82 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       return false;
     });
 
-    return GestureDetector(
-      onTap: () => _handleItemTap(pos, item),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        decoration: BoxDecoration(
-          color: inCart ? const Color(0xFFFFF7ED) : Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: inCart ? const Color(0xFFFDBA74) : const Color(0xFFE2E8F0),
-            width: inCart ? 1.5 : 1,
+    if (inCart) {
+      bg = const Color(0xFFFFF7ED);
+      border = const Color(0xFFFDBA74);
+      leftBar = const Color(0xFFF97316);
+    }
+
+    // Avoid AnimatedContainer+Align — on some tablets the label got zero paint extent.
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: () => _handleItemTap(pos, item),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: double.infinity,
+          height: double.infinity,
+          padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border(
+              top: BorderSide(color: border),
+              right: BorderSide(color: border),
+              bottom: BorderSide(color: border),
+              left: BorderSide(color: leftBar, width: 5),
+            ),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Image or placeholder
-            Expanded(
-              flex: 3,
-              child: Container(
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF8FAFC),
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(13),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                item.label,
+                maxLines: 2,
+                softWrap: true,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                  height: 1.2,
+                ),
+              ),
+              if (item.shortCode != null && item.shortCode!.trim().isNotEmpty)
+                Text(
+                  '[ ${item.shortCode!.trim()} ]',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF475569),
                   ),
-                  image: hasImage
-                      ? DecorationImage(
-                          image: NetworkImage(item.image!),
-                          fit: BoxFit.cover,
-                        )
-                      : null,
                 ),
-                child: hasImage
-                    ? null
-                    : Center(
-                        child: Icon(
-                          Icons.restaurant,
-                          size: 32,
-                          color: Colors.grey.shade300,
-                        ),
-                      ),
-              ),
-            ),
-            // Item details
-            Expanded(
-              flex: 3,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // VEG/NONVEG indicator + name
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          margin: const EdgeInsets.only(top: 2, right: 4),
-                          width: 14,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            border: Border.all(color: attrColor, width: 1.5),
-                            borderRadius: BorderRadius.circular(3),
-                          ),
-                          child: Center(
-                            child: Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: attrColor,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: Text(
-                            displayName,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1E293B),
-                              height: 1.2,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    // Short code + Price
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        if (item.shortCode != null &&
-                            item.shortCode!.isNotEmpty)
-                          Text(
-                            item.shortCode!,
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Color(0xFF94A3B8),
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF97316)
-                                .withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '₹${item.price.toStringAsFixed(0)}',
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFFF97316),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
-    if (pos.isLoading) return;
+    if (pos.isLoading || pos.isBusy) return;
 
-    if (item.hasVariants || item.hasAddons) {
-      await _showItemCustomisationSheet(pos, item);
-      return;
+    var working = item;
+    // Admin opens customisable items via viewMenubyId — list payload often
+    // lacks fully populated variant/addon value arrays.
+    if (item.needsCustomisation) {
+      final enriched = await pos.enrichMenuItem(item);
+      if (enriched != null) working = enriched;
+      if (working.hasVariants || working.hasAddons) {
+        await _showItemCustomisationSheet(pos, working);
+        return;
+      }
     }
 
-    await _addItemAndShowResult(pos, item);
+    await _addItemAndShowResult(pos, working);
   }
 
   Future<void> _addItemAndShowResult(
@@ -940,11 +954,11 @@ class _CartBottomSheet extends StatelessWidget {
         ) ??
         (qty > 0 ? price / qty : 0);
 
-    final cartItemId = cartObj?['_id']?.toString() ?? '';
     final cartmenuId = item['_id']?.toString() ?? '';
 
-    final isKot = item['kot_status'] == 1 || item['kotprint_status'] == 1;
+    final isKot = PosProvider.isKotLine(item);
     final isCancelled = item['cancel_status'] == 1;
+    final note = item['description']?.toString() ?? '';
 
     if (isCancelled) return const SizedBox.shrink();
 
@@ -976,6 +990,13 @@ class _CartBottomSheet extends StatelessWidget {
                     color: Color(0xFF94A3B8),
                   ),
                 ),
+                if (note.isNotEmpty)
+                  Text(
+                    'Note: $note',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10, color: Color(0xFF64748B), fontStyle: FontStyle.italic),
+                  ),
                 if (isKot)
                   Container(
                     margin: const EdgeInsets.only(top: 2),
@@ -999,50 +1020,71 @@ class _CartBottomSheet extends StatelessWidget {
               ],
             ),
           ),
-          // Qty controls
+          // Qty controls — locked once the line is KOT'd (admin rule);
+          // a KOT'd line can only be CANCELLED with a reason.
           Expanded(
             flex: 3,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _qtyButton(
-                  icon: Icons.remove,
-                  onTap: () async {
-                    if (qty > 1) {
-                      await pos.updateItemQuantity(
-                        cartItemId,
-                        cartmenuId,
-                        qty - 1,
-                      );
-                    } else {
-                      await pos.removeCartItem(cartItemId, cartmenuId);
-                    }
-                  },
-                ),
-                Container(
-                  constraints: const BoxConstraints(minWidth: 32),
-                  alignment: Alignment.center,
-                  child: Text(
-                    '$qty',
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF1E293B),
-                    ),
+            child: isKot
+                ? Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        'x$qty',
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF1E293B),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(Icons.cancel_outlined, size: 18, color: Color(0xFFDC2626)),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        tooltip: 'Cancel item (KOT already sent)',
+                        onPressed: pos.isBusy ? null : () => _cancelKotLine(context, pos, cartmenuId, menuName),
+                      ),
+                    ],
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _qtyButton(
+                        icon: Icons.remove,
+                        onTap: pos.isBusy
+                            ? null
+                            : () => _runCartWrite(
+                                  context,
+                                  pos,
+                                  () => qty > 1
+                                      ? pos.updateItemQuantity(cartmenuId, qty - 1)
+                                      : pos.removeCartItem(cartmenuId),
+                                ),
+                      ),
+                      Container(
+                        constraints: const BoxConstraints(minWidth: 32),
+                        alignment: Alignment.center,
+                        child: Text(
+                          '$qty',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF1E293B),
+                          ),
+                        ),
+                      ),
+                      _qtyButton(
+                        icon: Icons.add,
+                        onTap: pos.isBusy
+                            ? null
+                            : () => _runCartWrite(
+                                  context,
+                                  pos,
+                                  () => pos.updateItemQuantity(cartmenuId, qty + 1),
+                                ),
+                      ),
+                    ],
                   ),
-                ),
-                _qtyButton(
-                  icon: Icons.add,
-                  onTap: () async {
-                    await pos.updateItemQuantity(
-                      cartItemId,
-                      cartmenuId,
-                      qty + 1,
-                    );
-                  },
-                ),
-              ],
-            ),
           ),
           // Line total
           Expanded(
@@ -1062,7 +1104,68 @@ class _CartBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _qtyButton({required IconData icon, required VoidCallback onTap}) {
+  Future<void> _runCartWrite(
+    BuildContext context,
+    PosProvider pos,
+    Future<bool> Function() write,
+  ) async {
+    final ok = await write();
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(pos.errorMessage ?? 'Could not update the order'),
+          backgroundColor: const Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _cancelKotLine(
+    BuildContext context,
+    PosProvider pos,
+    String cartmenuId,
+    String itemName,
+  ) async {
+    final controller = TextEditingController(text: 'Removed from order');
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('KOT already sent'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Cancel "$itemName" from this order? The kitchen was already told to make it.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Keep item')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Cancel item'),
+          ),
+        ],
+      ),
+    );
+    if (reason == null || !context.mounted) return;
+    await _runCartWrite(context, pos, () => pos.cancelKotLine(cartmenuId, reason: reason));
+  }
+
+  Widget _qtyButton({required IconData icon, required VoidCallback? onTap}) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
@@ -1099,6 +1202,10 @@ class _CartBottomSheet extends StatelessWidget {
               '-₹${discountPrice.toStringAsFixed(2)}',
               valueColor: const Color(0xFF16A34A),
             ),
+          if (pos.containerCharge > 0)
+            _totalRow('Container Charge', '₹${pos.containerCharge.toStringAsFixed(2)}'),
+          if (pos.areaCharge > 0)
+            _totalRow('AC / Area Charge', '₹${pos.areaCharge.toStringAsFixed(2)}'),
           if (taxPrice > 0) _totalRow('Tax', '₹${taxPrice.toStringAsFixed(2)}'),
           if (roundOff != 0)
             _totalRow('Round Off', '₹${roundOff.toStringAsFixed(2)}'),
@@ -1207,16 +1314,16 @@ class _CartBottomSheet extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 14),
-                      const Row(
+                      Row(
                         children: [
-                          Icon(
+                          const Icon(
                             Icons.receipt_long,
                             color: Color(0xFFF97316),
                             size: 22,
                           ),
-                          SizedBox(width: 8),
+                          const SizedBox(width: 8),
                           Text(
-                            'Settle & Print Bill',
+                            pos.canRelease ? 'Settle & Release Table' : 'Print Bill & Settle',
                             style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
@@ -1385,9 +1492,9 @@ class _CartBottomSheet extends StatelessWidget {
                         onPressed: () =>
                             Navigator.of(sheetContext).pop(true),
                         icon: const Icon(Icons.check, size: 18),
-                        label: const Text(
-                          'Confirm & Print',
-                          style: TextStyle(
+                        label: Text(
+                          pos.canRelease ? 'Confirm & Release' : 'Print Bill & Release',
+                          style: const TextStyle(
                             fontWeight: FontWeight.bold,
                             fontSize: 14,
                           ),
@@ -1416,20 +1523,15 @@ class _CartBottomSheet extends StatelessWidget {
     final success = await pos.settleAndPrintBill(paymentType: paymentType);
     if (!context.mounted) return;
     if (success) {
-      final printNote = pos.printError;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            printNote == null
-                ? 'Bill settled + printed ✓'
-                : 'Bill settled. Print failed: $printNote',
-          ),
-          backgroundColor: printNote == null
-              ? const Color(0xFF16A34A)
-              : const Color(0xFFD97706),
+        const SnackBar(
+          content: Text('Table released ✓'),
+          backgroundColor: Color(0xFF16A34A),
           behavior: SnackBarBehavior.floating,
         ),
       );
+      // Cart no longer exists — back to the floor.
+      Navigator.of(context).popUntil((r) => r.isFirst || r.settings.name == '/tables');
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1442,6 +1544,7 @@ class _CartBottomSheet extends StatelessWidget {
   }
 
   Widget _buildActionButtons(BuildContext context, PosProvider pos) {
+    final busy = pos.isBusy;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -1449,72 +1552,80 @@ class _CartBottomSheet extends StatelessWidget {
           children: [
             Expanded(
               child: ElevatedButton.icon(
-                onPressed: pos.isLoading
+                onPressed: busy || !pos.hasUnprintedItems
                     ? null
                     : () async {
                         final success = await pos.sendKotOrder();
                         if (!context.mounted) return;
-                        if (success) {
-                          final printNote = pos.printError;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                printNote == null
-                                    ? 'KOT sent + printed ✓'
-                                    : 'KOT sent to kitchen. Print failed: $printNote',
-                              ),
-                              backgroundColor: printNote == null
-                                  ? const Color(0xFF16A34A)
-                                  : const Color(0xFFD97706),
-                              behavior: SnackBarBehavior.floating,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                        final printNote = pos.printError;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              !success
+                                  ? (pos.errorMessage ?? 'KOT failed')
+                                  : printNote == null
+                                      ? 'KOT sent + printed ✓'
+                                      : 'KOT sent to kitchen. Print failed: $printNote',
                             ),
-                          );
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(pos.errorMessage ?? 'KOT failed'),
-                              backgroundColor: const Color(0xFFDC2626),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        }
+                            backgroundColor: !success
+                                ? const Color(0xFFDC2626)
+                                : printNote == null
+                                    ? const Color(0xFF16A34A)
+                                    : const Color(0xFFD97706),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
                       },
-                icon: const Icon(Icons.print, size: 18),
-                label: const Text(
-                  'KOT PRINT',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                ),
+                icon: const Icon(Icons.soup_kitchen, size: 18),
+                label: const Text('KOT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF2563EB),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
             Expanded(
               child: ElevatedButton.icon(
-                onPressed: pos.isLoading
+                onPressed: busy
                     ? null
-                    : () => _showSettlePaymentSheet(context, pos),
-                icon: const Icon(Icons.receipt_long, size: 18),
-                label: const Text(
-                  'SAVE & PRINT',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    : () async {
+                        final err = await pos.printBill();
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(err == null ? 'Bill printed ✓' : err),
+                            backgroundColor: err == null ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                icon: const Icon(Icons.print, size: 18),
+                label: Text(
+                  pos.tableStatus == 'PRINTED' ? 'REPRINT' : 'BILL',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                 ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF7C3AED),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: busy ? null : () => _showSettlePaymentSheet(context, pos),
+                icon: const Icon(Icons.check_circle_outline, size: 18),
+                label: const Text('SETTLE', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF97316),
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 ),
               ),
             ),
