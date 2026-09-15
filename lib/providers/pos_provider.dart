@@ -9,6 +9,7 @@ import '../services/bill_builder.dart';
 import '../services/menu_cache_service.dart';
 import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
+import '../utils/extra_addons.dart';
 import '../utils/menu_filter.dart';
 
 /// Ordering screen state for ONE open table. Mirrors the admin
@@ -48,7 +49,9 @@ class PosProvider with ChangeNotifier {
   // ── Menu ──
   List<MenuCategory> _categories = [];
   List<MenuItem> _allItems = [];
-  String? _selectedCategoryId; // null = 'ALL'
+  String? _selectedCategoryId; // null = 'ALL'; favorites/extra = sentinels
+  List<Map<String, dynamic>>? _extraAddonRawGroups; // null = not loaded / failed
+  bool _extraAddonsLoading = false;
   String _searchQuery = '';
 
   // ── Cart (live backend snapshot) ──
@@ -79,6 +82,7 @@ class PosProvider with ChangeNotifier {
 
   List<MenuCategory> get categories => _categories;
   String? get selectedCategoryId => _selectedCategoryId;
+  bool get isExtraAddonsLoading => _extraAddonsLoading;
   String get searchQuery => _searchQuery;
   bool get isLoading => _isLoading;
   bool get isBusy => _isBusy;
@@ -125,8 +129,24 @@ class PosProvider with ChangeNotifier {
   }
 
   List<MenuItem> get filteredMenuItems {
+    if (_selectedCategoryId == kFavoritesCategoryId) {
+      final favs = _allItems.where((i) => i.isFavorite).toList();
+      return filterMenuItems(
+        items: favs,
+        search: _searchQuery,
+        alreadySorted: true,
+      );
+    }
+    if (_selectedCategoryId == kExtraAddonsCategoryId) {
+      final groups = _extraAddonRawGroups;
+      if (groups == null) return const [];
+      return mapExtraAddonCards(groups, search: _searchQuery);
+    }
+
     MenuCategory? selected;
-    if (_selectedCategoryId != null && _selectedCategoryId!.isNotEmpty) {
+    if (_selectedCategoryId != null &&
+        _selectedCategoryId!.isNotEmpty &&
+        !isSpecialMenuMode(_selectedCategoryId)) {
       for (final c in _categories) {
         if (c.id == _selectedCategoryId) {
           selected = c;
@@ -140,7 +160,7 @@ class PosProvider with ChangeNotifier {
     return filterMenuItems(
       items: _allItems,
       categoryNames: selected?.filterNames ?? const [],
-      categoryId: _selectedCategoryId,
+      categoryId: selected?.id,
       search: _searchQuery,
       alreadySorted: true,
     );
@@ -243,9 +263,41 @@ class PosProvider with ChangeNotifier {
   }
 
   void selectCategory(String? categoryId) {
-    if (_selectedCategoryId == categoryId) return;
+    if (_selectedCategoryId == categoryId) {
+      // Retry Extra load if a prior attempt failed (cache left null).
+      if (categoryId == kExtraAddonsCategoryId &&
+          _extraAddonRawGroups == null &&
+          !_extraAddonsLoading) {
+        ensureExtraAddonsLoaded(force: true);
+      }
+      return;
+    }
     _selectedCategoryId = categoryId;
     notifyListeners();
+    if (categoryId == kExtraAddonsCategoryId) {
+      ensureExtraAddonsLoaded();
+    }
+  }
+
+  /// Load Extra Add-ons groups once (admin AllAvailableAddons).
+  Future<void> ensureExtraAddonsLoaded({bool force = false}) async {
+    if (_extraAddonsLoading) return;
+    if (!force && _extraAddonRawGroups != null) return;
+    _extraAddonsLoading = true;
+    notifyListeners();
+    try {
+      _extraAddonRawGroups = await _apiService.getAllAvailableAddons();
+      if (_errorMessage == 'Failed to load extra add-ons') {
+        _errorMessage = null;
+      }
+    } catch (e) {
+      debugPrint('[Fatfox POS] Extra add-ons load failed: $e');
+      _extraAddonRawGroups = null; // allow retry on re-select
+      _errorMessage = 'Failed to load extra add-ons';
+    } finally {
+      _extraAddonsLoading = false;
+      notifyListeners();
+    }
   }
 
   void setSearchQuery(String q) {
@@ -538,6 +590,10 @@ class PosProvider with ChangeNotifier {
   Future<bool> addExtraItem({required String name, required double price}) {
     final tid = resolvedTableId;
     if (tid.isEmpty || name.trim().isEmpty || price <= 0) {
+      _errorMessage = tid.isEmpty
+          ? 'Table not loaded'
+          : 'Enter a valid name and amount';
+      notifyListeners();
       return Future.value(false);
     }
     return _write(

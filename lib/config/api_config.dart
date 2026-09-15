@@ -40,6 +40,9 @@ class ApiConfig {
   static String getAllMenu = '/restaurant/menu/all';
   static String getMenuByCategory = '/restaurant/menu/by-category-itemin'; // ?categoryId=&searchItemIn=dinein&searchName=
   static String viewMenuById = '/restaurant/menu/getmenu'; // + /{menuId}
+  /// Backend spelling is "avaliable". Extra Add-ons rail (admin AllAvailableAddons).
+  static String allAvailableAddons =
+      '/restaurant/add-on/all-avaliable'; // ?searchName=
 
   // Restaurant & Printer Settings
   static String getRestaurantView = '/restaurant/view';

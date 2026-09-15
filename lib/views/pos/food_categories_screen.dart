@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
 import '../../services/pos_ui_prefs.dart';
+import '../../utils/extra_addons.dart';
 import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
@@ -427,7 +428,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           ),
         ),
         Expanded(
-          child: items.isEmpty && !pos.isLoading
+          child: items.isEmpty && !pos.isLoading && !pos.isExtraAddonsLoading
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -441,11 +442,20 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                       Text(
                         pos.searchQuery.isNotEmpty
                             ? 'No items found for "${pos.searchQuery}"'
-                            : 'No menu items available',
+                            : pos.selectedCategoryId == kFavoritesCategoryId
+                                ? 'No favorite items yet'
+                                : pos.selectedCategoryId ==
+                                        kExtraAddonsCategoryId
+                                    ? (pos.errorMessage ==
+                                            'Failed to load extra add-ons'
+                                        ? 'Failed to load extra add-ons — tap Extra Add-ons to retry'
+                                        : 'No extra add-ons available')
+                                    : 'No menu items available',
                         style: TextStyle(
                           color: Colors.grey.shade500,
                           fontSize: 14,
                         ),
+                        textAlign: TextAlign.center,
                       ),
                       if (pos.hasActiveFilters) ...[
                         const SizedBox(height: 12),
@@ -457,6 +467,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     ],
                   ),
                 )
+              : items.isEmpty && pos.isExtraAddonsLoading
+                  ? const Center(
+                      child: CircularProgressIndicator(
+                        color: Color(0xFFF97316),
+                      ),
+                    )
               : GridView.builder(
                   controller: _menuScrollController,
                   physics: const BouncingScrollPhysics(
@@ -511,6 +527,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
     if (pos.isLoading || pos.isBusy) return;
 
+    if (item.isCustomAddonTrigger) {
+      await _showCustomExtraDialog(pos);
+      return;
+    }
+    if (item.isExtraAddon) {
+      await _showExtraAmountDialog(pos, item);
+      return;
+    }
+
     var working = item;
     // Admin opens customisable items via viewMenubyId — list payload often
     // lacks fully populated variant/addon value arrays.
@@ -524,6 +549,144 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     }
 
     await _addItemAndShowResult(pos, working);
+  }
+
+  Future<void> _showExtraAmountDialog(PosProvider pos, MenuItem item) async {
+    final controller = TextEditingController(
+      text: item.price > 0 ? item.price.toStringAsFixed(2) : '',
+    );
+    final amount = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item.label),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: 'Amount (₹)',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) {
+            final v = double.tryParse(controller.text.trim());
+            if (v != null && v > 0) Navigator.pop(ctx, v);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final v = double.tryParse(controller.text.trim());
+              if (v == null || v <= 0) return;
+              Navigator.pop(ctx, v);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF97316),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (amount == null || !mounted) return;
+    final success = await pos.addExtraItem(name: item.label, price: amount);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added ${item.label} ₹${amount.toStringAsFixed(2)}'
+              : (pos.errorMessage ?? 'Failed to add'),
+        ),
+        duration: const Duration(milliseconds: 800),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+
+  Future<void> _showCustomExtraDialog(PosProvider pos) async {
+    final nameCtrl = TextEditingController();
+    final priceCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('+ Custom add-on'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: priceCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Amount (₹)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final name = nameCtrl.text.trim();
+              final price = double.tryParse(priceCtrl.text.trim());
+              if (name.isEmpty || price == null || price <= 0) return;
+              Navigator.pop(ctx, true);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF97316),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    final name = nameCtrl.text.trim();
+    final price = double.tryParse(priceCtrl.text.trim()) ?? 0;
+    nameCtrl.dispose();
+    priceCtrl.dispose();
+    if (ok != true || !mounted) return;
+    final success = await pos.addExtraItem(name: name, price: price);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added $name ₹${price.toStringAsFixed(2)}'
+              : (pos.errorMessage ?? 'Failed to add'),
+        ),
+        duration: const Duration(milliseconds: 800),
+        backgroundColor:
+            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
   }
 
   Future<void> _addItemAndShowResult(
