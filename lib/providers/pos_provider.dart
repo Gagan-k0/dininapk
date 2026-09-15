@@ -563,7 +563,8 @@ class PosProvider with ChangeNotifier {
 
   /// Paints the cart from a write response when it carries the full snapshot
   /// (createcart / updatecartmenuquantity / deletemenu / cancelmenu all do),
-  /// otherwise refetches.
+  /// otherwise refetches. Empty success (last-line delete) clears locally —
+  /// no listallcartmenus follow-up.
   Future<void> _paintFromWrite(ApiEnvelope env) async {
     final list = env.mapList;
     final looksLikeSnapshot =
@@ -576,8 +577,9 @@ class PosProvider with ChangeNotifier {
       return;
     }
     if (env.data == null || list.isEmpty) {
-      // Cart may have been emptied (last line deleted) — confirm with a refetch.
-      await _reloadCartData();
+      // Last-line deletemenu returns [] — cart is already gone server-side.
+      _cartData = [];
+      _cartError = null;
       return;
     }
     await _reloadCartData();
