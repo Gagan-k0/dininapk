@@ -116,12 +116,31 @@ class PosProvider with ChangeNotifier {
     }
 
     // Admin dine-in: match by category name (by-category-itemin strips ids).
+    // [_allItems] is kept sorted by label so filter skips re-sort.
     return filterMenuItems(
       items: _allItems,
       categoryNames: selected?.filterNames ?? const [],
       categoryId: _selectedCategoryId,
       search: _searchQuery,
+      alreadySorted: true,
     );
+  }
+
+  bool get hasActiveFilters =>
+      (_selectedCategoryId != null && _selectedCategoryId!.isNotEmpty) ||
+      _searchQuery.trim().isNotEmpty;
+
+  /// Menu ids currently in the live cart (for O(1) tile highlight).
+  Set<String> get cartMenuIds {
+    final out = <String>{};
+    for (final ci in cartMenuItems) {
+      final menuData = ci['menuData'];
+      if (menuData is List && menuData.isNotEmpty) {
+        final id = menuData[0]['_id']?.toString();
+        if (id != null && id.isNotEmpty) out.add(id);
+      }
+    }
+    return out;
   }
 
   // ── Cart computed values (cancelled rows excluded everywhere) ──
@@ -204,13 +223,24 @@ class PosProvider with ChangeNotifier {
   }
 
   void selectCategory(String? categoryId) {
+    if (_selectedCategoryId == categoryId) return;
     _selectedCategoryId = categoryId;
     notifyListeners();
   }
 
   void setSearchQuery(String q) {
+    if (_searchQuery == q) return;
     _searchQuery = q;
     notifyListeners();
+  }
+
+  /// Reset category + search (ALL menu, empty query).
+  void clearFilters() {
+    final had =
+        _selectedCategoryId != null || _searchQuery.trim().isNotEmpty;
+    _selectedCategoryId = null;
+    _searchQuery = '';
+    if (had) notifyListeners();
   }
 
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
@@ -257,6 +287,14 @@ class PosProvider with ChangeNotifier {
     }
   }
 
+  void _setSortedMenuItems(List<MenuItem> items) {
+    final sorted = List<MenuItem>.from(items);
+    sorted.sort(
+      (a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()),
+    );
+    _allItems = sorted;
+  }
+
   // ============================================================
   // Loading (admin ngOnInit chain)
   // ============================================================
@@ -283,7 +321,7 @@ class PosProvider with ChangeNotifier {
       if (cached != null &&
           (cached.categories.isNotEmpty || cached.items.isNotEmpty)) {
         _categories = cached.categories;
-        _allItems = cached.items;
+        _setSortedMenuItems(cached.items);
         // Let the grid paint while table + network refresh continue.
         notifyListeners();
       }
@@ -298,7 +336,7 @@ class PosProvider with ChangeNotifier {
       final catMaps = results[1] as List<Map<String, dynamic>>;
       final itemMaps = results[2] as List<Map<String, dynamic>>;
       _categories = catMaps.map(MenuCategory.fromJson).toList();
-      _allItems = itemMaps.map(MenuItem.fromJson).toList();
+      _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
       _taxConfig = results[3] as List<Map<String, dynamic>>;
       _buildConsolidatedTax();
 

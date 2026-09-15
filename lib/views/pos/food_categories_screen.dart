@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../models/menu_model.dart';
 import '../../services/pos_ui_prefs.dart';
+import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
@@ -22,14 +25,16 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   final ScrollController _menuScrollController = ScrollController();
   final MenuPageWindow<MenuItem> _menuPage =
       MenuPageWindow<MenuItem>(pageSize: 80);
-  String? _pagedForCategoryId;
-  String _pagedForSearch = '';
+  Timer? _searchDebounce;
   bool _railCollapsed = false;
 
   @override
   void initState() {
     super.initState();
     _menuScrollController.addListener(_onMenuScroll);
+    _searchController.addListener(() {
+      if (mounted) setState(() {});
+    });
     PosUiPrefs.loadRailCollapsed().then((v) {
       if (mounted) setState(() => _railCollapsed = v);
     });
@@ -56,6 +61,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _menuScrollController.removeListener(_onMenuScroll);
     _menuScrollController.dispose();
     _searchController.dispose();
@@ -73,26 +79,42 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     }
   }
 
-  void _syncMenuPage(PosProvider pos) {
-    final cat = pos.selectedCategoryId;
-    final search = pos.searchQuery;
-    final items = pos.filteredMenuItems;
-    final filterChanged =
-        cat != _pagedForCategoryId || search != _pagedForSearch;
-    final sourceChanged = items.length != _menuPage.totalCount;
+  void _onSearchChanged(PosProvider pos, String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 200), () {
+      if (!mounted) return;
+      pos.setSearchQuery(value);
+    });
+  }
 
-    if (filterChanged || sourceChanged) {
-      _pagedForCategoryId = cat;
-      _pagedForSearch = search;
-      _menuPage.reset(items);
-      // Defer scroll reset — never jump during build.
-      if (filterChanged) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_menuScrollController.hasClients) {
-            _menuScrollController.jumpTo(0);
-          }
-        });
-      }
+  void _clearAllFilters(PosProvider pos) {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    pos.clearFilters();
+    _menuPage.reset(
+      pos.filteredMenuItems,
+      fingerprint: menuFilterFingerprint(),
+    );
+    if (_menuScrollController.hasClients) {
+      _menuScrollController.jumpTo(0);
+    }
+    setState(() {});
+  }
+
+  void _syncMenuPage(PosProvider pos) {
+    final items = pos.filteredMenuItems;
+    final fp = menuFilterFingerprint(
+      categoryId: pos.selectedCategoryId,
+      search: pos.searchQuery,
+    );
+    final previousFp = _menuPage.fingerprint;
+    final changed = _menuPage.reset(items, fingerprint: fp);
+    if (changed && previousFp != fp) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_menuScrollController.hasClients) {
+          _menuScrollController.jumpTo(0);
+        }
+      });
     }
   }
 
@@ -141,14 +163,17 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         },
                         onSelect: (id) {
                           pos.selectCategory(id);
-                          setState(() {
-                            _pagedForCategoryId = id;
-                            _pagedForSearch = pos.searchQuery;
-                            _menuPage.reset(pos.filteredMenuItems);
-                          });
+                          _menuPage.reset(
+                            pos.filteredMenuItems,
+                            fingerprint: menuFilterFingerprint(
+                              categoryId: id,
+                              search: pos.searchQuery,
+                            ),
+                          );
                           if (_menuScrollController.hasClients) {
                             _menuScrollController.jumpTo(0);
                           }
+                          setState(() {});
                         },
                       ),
                       const VerticalDivider(
@@ -291,7 +316,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               height: 38,
               child: TextField(
                 controller: _searchController,
-                onChanged: (v) => pos.setSearchQuery(v),
+                onChanged: (v) => _onSearchChanged(pos, v),
                 style: const TextStyle(fontSize: 13),
                 decoration: InputDecoration(
                   hintText: 'Search food or short code...',
@@ -306,10 +331,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                   ),
                   suffixIcon: _searchController.text.isNotEmpty
                       ? IconButton(
+                          tooltip: 'Clear search',
                           icon: const Icon(Icons.close, size: 16),
                           onPressed: () {
+                            _searchDebounce?.cancel();
                             _searchController.clear();
                             pos.setSearchQuery('');
+                            setState(() {});
                           },
                         )
                       : null,
@@ -347,22 +375,43 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     _syncMenuPage(pos);
     final items = _menuPage.visible;
     final total = _menuPage.totalCount;
+    final cartIds = pos.cartMenuIds;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-          child: Text(
-            total == 0
-                ? '0 ITEMS'
-                : '${_menuPage.visibleCount} OF $total ITEMS',
-            style: const TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.5,
-              color: Color(0xFF64748B),
-            ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  total == 0
+                      ? '0 ITEMS'
+                      : '${_menuPage.visibleCount} OF $total ITEMS',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ),
+              if (pos.hasActiveFilters)
+                TextButton.icon(
+                  onPressed: () => _clearAllFilters(pos),
+                  icon: const Icon(Icons.filter_alt_off, size: 16),
+                  label: const Text(
+                    'Clear filters',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                  ),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFFEA580C),
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                ),
+            ],
           ),
         ),
         Expanded(
@@ -386,6 +435,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           fontSize: 14,
                         ),
                       ),
+                      if (pos.hasActiveFilters) ...[
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: () => _clearAllFilters(pos),
+                          child: const Text('Clear filters'),
+                        ),
+                      ],
                     ],
                   ),
                 )
@@ -416,7 +472,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         ),
                       );
                     }
-                    return _buildFoodCard(pos, items[index]);
+                    return _buildFoodCard(pos, items[index], cartIds);
                   },
                 ),
         ),
@@ -424,15 +480,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
   }
 
-  Widget _buildFoodCard(PosProvider pos, MenuItem item) {
-    final inCart = pos.cartMenuItems.any((ci) {
-      final menuData = ci['menuData'];
-      if (menuData is List && menuData.isNotEmpty) {
-        return menuData[0]['_id']?.toString() == item.id ||
-            menuData[0]['name']?.toString() == item.name;
-      }
-      return false;
-    });
+  Widget _buildFoodCard(
+    PosProvider pos,
+    MenuItem item,
+    Set<String> cartIds,
+  ) {
+    final inCart = cartIds.contains(item.id);
 
     return PosMenuTile(
       label: item.label,

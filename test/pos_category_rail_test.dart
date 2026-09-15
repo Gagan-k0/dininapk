@@ -11,7 +11,7 @@ void main() {
   group('MenuPageWindow', () {
     test('resets to first page and loads more', () {
       final page = MenuPageWindow<int>(pageSize: 3);
-      page.reset(List.generate(10, (i) => i));
+      expect(page.reset(List.generate(10, (i) => i), fingerprint: 'all'), isTrue);
       expect(page.visible, [0, 1, 2]);
       expect(page.hasMore, isTrue);
       expect(page.loadMore(), isTrue);
@@ -21,11 +21,14 @@ void main() {
       expect(page.visible.length, 10);
       expect(page.hasMore, isFalse);
       expect(page.loadMore(), isFalse);
+      // Same fingerprint does not wipe the window.
+      expect(page.reset(List.generate(10, (i) => i), fingerprint: 'all'), isFalse);
+      expect(page.visible.length, 10);
     });
 
     test('empty source stays empty', () {
       final page = MenuPageWindow<String>(pageSize: 5);
-      page.reset(const []);
+      page.reset(const [], fingerprint: 'empty');
       expect(page.visible, isEmpty);
       expect(page.hasMore, isFalse);
     });

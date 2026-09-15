@@ -12,9 +12,12 @@ class MenuPageWindow<T> {
 
   List<T> _source = const [];
   int _visibleCount = 0;
+  String _fingerprint = '';
+  bool _loadingMore = false;
 
-  List<T> get visible =>
-      _source.isEmpty ? const [] : _source.sublist(0, _visibleCount.clamp(0, _source.length));
+  List<T> get visible => _source.isEmpty
+      ? const []
+      : _source.sublist(0, _visibleCount.clamp(0, _source.length));
 
   bool get hasMore => _visibleCount < _source.length;
 
@@ -22,18 +25,41 @@ class MenuPageWindow<T> {
 
   int get visibleCount => _visibleCount;
 
-  /// Replace source (category / search change) and show the first page.
-  void reset(List<T> source) {
+  String get fingerprint => _fingerprint;
+
+  /// Sync source to [fingerprint]. Returns true when the visible window changed.
+  bool reset(List<T> source, {required String fingerprint}) {
+    final filterChanged = fingerprint != _fingerprint;
+    if (!filterChanged && source.length == _source.length) {
+      return false;
+    }
+
+    _fingerprint = fingerprint;
     _source = List<T>.unmodifiable(source);
-    _visibleCount = _source.isEmpty ? 0 : _source.length.clamp(0, pageSize);
+    if (filterChanged || _visibleCount == 0) {
+      _visibleCount =
+          _source.isEmpty ? 0 : _source.length.clamp(0, pageSize);
+    } else {
+      _visibleCount = _visibleCount.clamp(
+        0,
+        _source.isEmpty ? 0 : _source.length,
+      );
+      if (_visibleCount == 0 && _source.isNotEmpty) {
+        _visibleCount = _source.length.clamp(0, pageSize);
+      }
+    }
+    _loadingMore = false;
+    return true;
   }
 
   /// Append the next page. Returns true if more items were revealed.
   bool loadMore() {
-    if (!hasMore) return false;
+    if (_loadingMore || !hasMore) return false;
+    _loadingMore = true;
     final next = (_visibleCount + pageSize).clamp(0, _source.length);
-    if (next == _visibleCount) return false;
+    final grew = next > _visibleCount;
     _visibleCount = next;
-    return true;
+    _loadingMore = false;
+    return grew;
   }
 }
