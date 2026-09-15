@@ -201,35 +201,61 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           Container(
             color: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _buildSubTabChip(
-                    0,
-                    'Dine In',
-                    Icons.table_bar,
-                    Colors.orange,
-                    tableProv,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= 700;
+                final tabs = <({int i, String label, IconData icon, Color color})>[
+                  (i: 0, label: 'Dine In', icon: Icons.table_bar, color: Colors.orange),
+                  (
+                    i: 1,
+                    label:
+                        'Pre Booking Dine In (${tableProv.reservations.length})',
+                    icon: Icons.calendar_today,
+                    color: Colors.blue,
                   ),
-                  const SizedBox(width: 8),
-                  _buildSubTabChip(
-                    1,
-                    'Pre Booking Dine In (${tableProv.reservations.length})',
-                    Icons.calendar_today,
-                    Colors.blue,
-                    tableProv,
+                  (
+                    i: 2,
+                    label: 'Live Orders (${tableProv.liveOrders.length})',
+                    icon: Icons.flash_on,
+                    color: Colors.purple,
                   ),
-                  const SizedBox(width: 8),
-                  _buildSubTabChip(
-                    2,
-                    'Live Orders (${tableProv.liveOrders.length})',
-                    Icons.flash_on,
-                    Colors.purple,
-                    tableProv,
+                ];
+                if (wide) {
+                  return Row(
+                    children: [
+                      for (var t = 0; t < tabs.length; t++) ...[
+                        if (t > 0) const SizedBox(width: 8),
+                        Expanded(
+                          child: _buildFullWidthSubTab(
+                            tabs[t].i,
+                            tabs[t].label,
+                            tabs[t].icon,
+                            tabs[t].color,
+                            tableProv,
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                }
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var t = 0; t < tabs.length; t++) ...[
+                        if (t > 0) const SizedBox(width: 8),
+                        _buildSubTabChip(
+                          tabs[t].i,
+                          tabs[t].label,
+                          tabs[t].icon,
+                          tabs[t].color,
+                          tableProv,
+                        ),
+                      ],
+                    ],
                   ),
-                ],
-              ),
+                );
+              },
             ),
           ),
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
@@ -277,6 +303,71 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
         color: isSelected ? Colors.white : activeColor,
       ),
       onSelected: (_) => prov.setSelectedTab(index),
+    );
+  }
+
+  /// Wide-layout tab that fills its [Expanded] slot (ChoiceChip cannot stretch).
+  Widget _buildFullWidthSubTab(
+    int index,
+    String label,
+    IconData icon,
+    Color activeColor,
+    TableProvider prov,
+  ) {
+    final isSelected = prov.selectedTab == index;
+    return Material(
+      color: isSelected ? activeColor : activeColor.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => prov.setSelectedTab(index),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: isSelected ? Colors.white : activeColor,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: isSelected ? Colors.white : activeColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _compactIconButton({
+    required IconData icon,
+    required Color color,
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      icon: Icon(icon, size: 16, color: color),
+      tooltip: tooltip,
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        minimumSize: const Size(36, 36),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+      ),
     );
   }
 
@@ -445,10 +536,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           color: Colors.white,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 700;
+              final cards = <Widget>[
                 _buildKpiCard(
                   'TOTAL TABLES',
                   '${prov.totalTablesCount}',
@@ -456,8 +547,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.table_restaurant,
                   selected: prov.selectedStatusFilter == 'ALL',
                   onTap: () => prov.setStatusFilter('ALL'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'AVAILABLE',
                   '${prov.availableTablesCount}',
@@ -465,8 +556,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.event_seat,
                   selected: prov.selectedStatusFilter == 'AVAILABLE',
                   onTap: () => prov.setStatusFilter('AVAILABLE'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'OCCUPIED',
                   '${prov.occupiedTablesCount}',
@@ -474,8 +565,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.people,
                   selected: prov.selectedStatusFilter == 'OCCUPIED',
                   onTap: () => prov.setStatusFilter('OCCUPIED'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'KOT / RUNNING',
                   '${prov.kotTablesCount}',
@@ -483,9 +574,31 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.receipt_long,
                   selected: prov.selectedStatusFilter == 'KOT',
                   onTap: () => prov.setStatusFilter('KOT'),
+                  expand: wide,
                 ),
-              ],
-            ),
+              ];
+              if (wide) {
+                return Row(
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 10),
+                      Expanded(child: cards[i]),
+                    ],
+                  ],
+                );
+              }
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 10),
+                      cards[i],
+                    ],
+                  ],
+                ),
+              );
+            },
           ),
         ),
         const Divider(height: 1, color: Color(0xFFE2E8F0)),
@@ -549,22 +662,39 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                               ),
                             ),
                           ),
-                          GridView.builder(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            gridDelegate:
-                                const SliverGridDelegateWithMaxCrossAxisExtent(
-                                  maxCrossAxisExtent: 180,
-                                  childAspectRatio: 1.05,
+                          LayoutBuilder(
+                            builder: (context, gridConstraints) {
+                              final w = gridConstraints.maxWidth;
+                              final double maxExtent;
+                              final double aspect;
+                              if (w < 600) {
+                                maxExtent = 200;
+                                aspect = 0.92;
+                              } else if (w < 900) {
+                                maxExtent = 220;
+                                aspect = 0.95;
+                              } else {
+                                maxExtent = 240;
+                                aspect = 0.95;
+                              }
+                              return GridView.builder(
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                gridDelegate:
+                                    SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: maxExtent,
+                                  childAspectRatio: aspect,
                                   crossAxisSpacing: 12,
                                   mainAxisSpacing: 12,
                                 ),
-                            itemCount: areaTables.length,
-                            itemBuilder: (context, index) {
-                              return _buildTableCard(
-                                context,
-                                prov,
-                                areaTables[index],
+                                itemCount: areaTables.length,
+                                itemBuilder: (context, index) {
+                                  return _buildTableCard(
+                                    context,
+                                    prov,
+                                    areaTables[index],
+                                  );
+                                },
                               );
                             },
                           ),
@@ -586,12 +716,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     IconData icon, {
     bool selected = false,
     VoidCallback? onTap,
+    bool expand = false,
   }) {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Container(
-        width: 135,
+        width: expand ? null : 140,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: color.withValues(alpha: selected ? 0.18 : 0.08),
@@ -602,7 +733,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ),
         ),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
           children: [
             Icon(icon, color: color, size: 20),
             const SizedBox(width: 8),
@@ -992,42 +1123,53 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  table.tableNumber,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF0F172A),
+                Flexible(
+                  child: Text(
+                    table.tableNumber,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F172A),
+                    ),
                   ),
                 ),
-                Row(
-                  children: [
-                    if (table.isCombined)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(
-                          Icons.link,
-                          size: 12,
-                          color: Color(0xFF64748B),
+                Flexible(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (table.isCombined)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(
+                            Icons.link,
+                            size: 12,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      if (table.isPreBooking)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(
+                            Icons.event_seat,
+                            size: 12,
+                            color: Color(0xFF2563EB),
+                          ),
+                        ),
+                      Flexible(
+                        child: Text(
+                          '[${table.noOfPeople} Seats]',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFF64748B),
+                          ),
                         ),
                       ),
-                    if (table.isPreBooking)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(
-                          Icons.event_seat,
-                          size: 12,
-                          color: Color(0xFF2563EB),
-                        ),
-                      ),
-                    Text(
-                      '[${table.noOfPeople} Seats]',
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Color(0xFF64748B),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1046,6 +1188,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
               ),
               Text(
                 '₹${table.totalPrice.toStringAsFixed(2)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w800,
@@ -1060,50 +1204,47 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
             // Quick actions: Accept/Reject (QR), Shift, Print bill, Release
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: badgeColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    statusText,
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      color: badgeColor,
+                Flexible(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: badgeColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        statusText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: badgeColor,
+                        ),
+                      ),
                     ),
                   ),
                 ),
                 if (table.isPending && cartId != null)
                   Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      IconButton(
-                        icon: const Icon(
-                          Icons.check,
-                          size: 16,
-                          color: Color(0xFF16A34A),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      _compactIconButton(
+                        icon: Icons.check,
+                        color: const Color(0xFF16A34A),
                         tooltip: 'Accept QR order',
                         onPressed: () =>
                             _acceptQrOrder(context, tableProv, table),
                       ),
                       const SizedBox(width: 6),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.close,
-                          size: 16,
-                          color: Color(0xFFDC2626),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      _compactIconButton(
+                        icon: Icons.close,
+                        color: const Color(0xFFDC2626),
                         tooltip: 'Reject QR order',
                         onPressed: () =>
                             _rejectQrOrder(context, tableProv, table),
@@ -1112,30 +1253,21 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   )
                 else if (table.isOccupied)
                   Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       if (canShift) ...[
-                        IconButton(
-                          icon: const Icon(
-                            Icons.swap_horiz,
-                            size: 16,
-                            color: Color(0xFFF97316),
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
+                        _compactIconButton(
+                          icon: Icons.swap_horiz,
+                          color: const Color(0xFFF97316),
                           tooltip: 'Shift Table',
                           onPressed: () =>
                               _showShiftTableDialog(context, tableProv, table),
                         ),
                         const SizedBox(width: 6),
                       ],
-                      IconButton(
-                        icon: const Icon(
-                          Icons.open_in_new,
-                          size: 16,
-                          color: Color(0xFF16A34A),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      _compactIconButton(
+                        icon: Icons.open_in_new,
+                        color: const Color(0xFF16A34A),
                         tooltip: 'Open table to print or release',
                         onPressed: () {
                           Navigator.pushNamed(
