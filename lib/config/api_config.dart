@@ -43,6 +43,13 @@ class ApiConfig {
 
   // Restaurant & Printer Settings
   static String getRestaurantView = '/restaurant/view';
+  /// Same endpoint the admin exe/website read for `printer_settings` (and
+  /// everything else on the Restaurant Settings page).
+  static String restaurantSettingsView = '/restaurant/settings/view';
+  /// Same endpoint the admin exe/website PUT `receipt_settings`/`printer_config`
+  /// to — shared source of truth across every device for one restaurant.
+  static String updatePrinterSettings =
+      '/restaurant/settings/update-printer-settings';
 
   // Tax Configuration
   static String getTaxConfig =
