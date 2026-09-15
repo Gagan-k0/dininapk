@@ -296,6 +296,29 @@ class ApiService {
     return env.mapList;
   }
 
+  /// GET /restaurant/settings/view — the SAME endpoint the admin exe/website
+  /// read. Returns the whole restaurant doc, including `printer_settings`
+  /// (`{receipt_settings, printer_config}`), shared across every device.
+  Future<Map<String, dynamic>> getRestaurantSettingsView() async {
+    final env = await _client.get(ApiConfig.restaurantSettingsView);
+    return env.map ?? {};
+  }
+
+  /// PUT /restaurant/settings/update-printer-settings — the SAME endpoint the
+  /// admin exe/website write to, so a change made here is visible there too.
+  Future<void> updatePrinterSettings({
+    Map<String, dynamic>? receiptSettings,
+    Map<String, dynamic>? printerConfig,
+  }) async {
+    await _client.put(
+      ApiConfig.updatePrinterSettings,
+      body: {
+        if (receiptSettings != null) 'receipt_settings': receiptSettings,
+        if (printerConfig != null) 'printer_config': printerConfig,
+      },
+    );
+  }
+
   // ============================================================
   // Cart (live, matches admin dinein-food-categories)
   // ============================================================

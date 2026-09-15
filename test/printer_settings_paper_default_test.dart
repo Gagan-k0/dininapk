@@ -86,15 +86,16 @@ void main() {
       await tester.pumpAndSettle();
       // Save while still on this screen instance (no reload in between).
       final saveButton = find.widgetWithText(ElevatedButton, 'Save Printer Settings');
-      await tester.drag(find.byType(SingleChildScrollView), const Offset(0, -600));
+      await tester.ensureVisible(saveButton);
       await tester.pumpAndSettle();
-      await tester.tap(saveButton);
-      await tester.pumpAndSettle();
-      await tester.drag(find.byType(SingleChildScrollView), const Offset(0, 600));
+      await tester.tap(saveButton, warnIfMissed: false);
       await tester.pumpAndSettle();
 
       // Switching to LAN and back must not silently revert the saved 58mm.
-      await tester.tap(find.widgetWithText(ChoiceChip, 'LAN'));
+      final lanChip = find.widgetWithText(ChoiceChip, 'LAN');
+      await tester.ensureVisible(lanChip);
+      await tester.pumpAndSettle();
+      await tester.tap(lanChip);
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(ChoiceChip, 'Bluetooth'));
       await tester.pumpAndSettle();

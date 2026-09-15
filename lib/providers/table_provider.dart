@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/table_model.dart';
 import '../services/api_service.dart';
+import '../services/auth_service.dart';
 
 /// Floor state. Mirrors the admin `dinein-table-list` contract:
 /// * areas + tables are the floor (mandatory); reservations + live orders are
@@ -12,8 +13,11 @@ import '../services/api_service.dart';
 ///   not the transport.
 class TableProvider with ChangeNotifier {
   final ApiService _apiService;
+  final AuthService _authService;
 
-  TableProvider({ApiService? api}) : _apiService = api ?? ApiService();
+  TableProvider({ApiService? api, AuthService? auth})
+      : _apiService = api ?? ApiService(),
+        _authService = auth ?? AuthService();
 
   List<TableArea> _areas = [];
   List<DineInTable> _tables = [];
@@ -30,6 +34,11 @@ class TableProvider with ChangeNotifier {
   bool _sessionExpired = false;
   String? _errorMessage;
   DateTime? _lastSyncedAt;
+  String? _syncedRestaurantId;
+  /// Bumped in [reset] so in-flight [_load] results are discarded.
+  int _loadEpoch = 0;
+
+  static const Duration floorTtl = Duration(seconds: 45);
 
   List<TableArea> get areas => _areas;
   List<DineInTable> get tables => _tables;
@@ -122,18 +131,43 @@ class TableProvider with ChangeNotifier {
   /// Clears everything on logout so the next login never paints another
   /// restaurant's floor.
   void reset() {
+    _loadEpoch++;
     _areas = [];
     _tables = [];
     _reservations = [];
     _liveOrders = [];
     _errorMessage = null;
     _lastSyncedAt = null;
+    _syncedRestaurantId = null;
     _sessionExpired = false;
+    _isLoading = false;
+    _isRefreshing = false;
     _selectedAreaId = null;
     _selectedStatusFilter = 'ALL';
     _searchQuery = '';
     _selectedTab = 0;
     notifyListeners();
+  }
+
+  bool _isFresh(Duration ttl) {
+    final t = _lastSyncedAt;
+    if (t == null) return false;
+    return DateTime.now().difference(t) < ttl;
+  }
+
+  /// Skip network when the in-memory floor is healthy and recent for this restaurant.
+  Future<void> ensureLoaded({Duration ttl = floorTtl}) async {
+    final rid = await _authService.getRestaurantId();
+    if (hasFloor &&
+        !isStale &&
+        !_sessionExpired &&
+        _isFresh(ttl) &&
+        rid != null &&
+        rid.isNotEmpty &&
+        rid == _syncedRestaurantId) {
+      return;
+    }
+    await _load(background: hasFloor);
   }
 
   /// Initial / explicit load (spinner only while there is nothing to show).
@@ -144,6 +178,10 @@ class TableProvider with ChangeNotifier {
 
   Future<void> _load({required bool background}) async {
     if (_isLoading || _isRefreshing) return;
+    final epoch = _loadEpoch;
+    final expectedRid = await _authService.getRestaurantId();
+    if (epoch != _loadEpoch) return;
+
     if (background) {
       _isRefreshing = true;
     } else {
@@ -159,9 +197,15 @@ class TableProvider with ChangeNotifier {
         _apiService.getAreas(),
         _apiService.getTables(),
       ]);
+      if (epoch != _loadEpoch) return;
+
+      final rid = await _authService.getRestaurantId();
+      if (epoch != _loadEpoch || rid != expectedRid) return;
+
       _areas = results[0] as List<TableArea>;
       _tables = results[1] as List<DineInTable>;
       _lastSyncedAt = DateTime.now();
+      _syncedRestaurantId = rid;
       _sessionExpired = false;
 
       // Best-effort feeds — a failure here must not touch the floor.
@@ -169,24 +213,30 @@ class TableProvider with ChangeNotifier {
         _apiService.getReservations,
         _reservations,
       );
+      if (epoch != _loadEpoch) return;
       _liveOrders = await _bestEffort(_apiService.getLiveOrders, _liveOrders);
+      if (epoch != _loadEpoch) return;
 
       debugPrint(
         '[Fatfox TableProvider] ${_areas.length} areas, ${_tables.length} tables, '
         '${_reservations.length} reservations, ${_liveOrders.length} live orders',
       );
     } on ApiException catch (e) {
+      if (epoch != _loadEpoch) return;
       debugPrint('[Fatfox TableProvider] floor load refused: $e');
       _errorMessage = e.message;
       _sessionExpired = e.isAuth;
     } catch (e) {
+      if (epoch != _loadEpoch) return;
       debugPrint('[Fatfox TableProvider] floor load error: $e');
       _errorMessage = friendlyError(e);
+    } finally {
+      if (epoch == _loadEpoch) {
+        _isLoading = false;
+        _isRefreshing = false;
+        notifyListeners();
+      }
     }
-
-    _isLoading = false;
-    _isRefreshing = false;
-    notifyListeners();
   }
 
   Future<List<Map<String, dynamic>>> _bestEffort(

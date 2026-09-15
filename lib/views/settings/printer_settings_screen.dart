@@ -3,8 +3,12 @@ import 'package:flutter/services.dart';
 import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../models/receipt_customization.dart';
+import '../../services/api_service.dart' show ApiException, friendlyError;
 import '../../services/printer_discovery_service.dart';
+import '../../services/receipt_customization_service.dart';
 import '../../services/thermal_printer_service.dart';
+import 'receipt_preview.dart';
 
 class PrinterSettingsScreen extends StatefulWidget {
   const PrinterSettingsScreen({super.key});
@@ -18,6 +22,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   final _portController = TextEditingController(text: '9100');
   final _headerController = TextEditingController(text: 'THE FAT FOX');
   final _discovery = PrinterDiscoveryService();
+  final _receiptService = ReceiptCustomizationService();
 
   String _connectionType = 'LAN'; // LAN, Bluetooth, USB
   String _paperSize = '80mm'; // 80mm, 58mm
@@ -35,9 +40,14 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   bool _isSaving = false;
   bool _isTesting = false;
   bool _isScanning = false;
+  bool _isSyncing = false;
   int _scanChecked = 0;
   int _scanTotal = 0;
   List<DiscoveredPrinter> _discovered = [];
+
+  ReceiptCustomization _receipt = ReceiptCustomization.defaults;
+  DateTime? _lastSynced;
+  bool _previewIsKot = true;
 
   @override
   void initState() {
@@ -62,6 +72,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final savedPaper = prefs.getString('printer_paper');
+    final receipt = await _receiptService.loadCached();
+    final syncedAt = await _receiptService.lastSyncedAt();
     setState(() {
       _connectionType = prefs.getString('printer_type') ?? 'LAN';
       _paperSizeExplicit = savedPaper != null;
@@ -74,6 +86,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _btName = prefs.getString('printer_bt_name') ?? '';
       _kotEnableReleaseTable =
           prefs.getBool('kot_enable_release_table') ?? false;
+      _receipt = receipt;
+      _lastSynced = syncedAt;
     });
   }
 
@@ -90,6 +104,30 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     await prefs.setString('printer_bt_mac', _btMac);
     await prefs.setString('printer_bt_name', _btName);
     await prefs.setBool('kot_enable_release_table', _kotEnableReleaseTable);
+  }
+
+  /// Pulls the SAME `receipt_settings` the admin exe/website edit. Only
+  /// touches the network here — printing always reads the cached copy
+  /// [_loadSettings] already loaded, so a failed sync never blocks printing.
+  Future<void> _syncFromServer() async {
+    setState(() => _isSyncing = true);
+    try {
+      final receipt = await _receiptService.fetchAndCache();
+      final syncedAt = await _receiptService.lastSyncedAt();
+      if (!mounted) return;
+      setState(() {
+        _receipt = receipt;
+        _lastSynced = syncedAt;
+      });
+      _showSnackBar('Synced receipt settings from server', backgroundColor: Colors.green);
+    } catch (e) {
+      _showSnackBar(
+        'Could not sync (${friendlyError(e)}) — using last saved settings',
+        backgroundColor: Colors.orange,
+      );
+    } finally {
+      if (mounted) setState(() => _isSyncing = false);
+    }
   }
 
   void _showSnackBar(String message, {required Color backgroundColor}) {
@@ -117,12 +155,26 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   Future<void> _saveSettings() async {
     setState(() => _isSaving = true);
     await _persistSettings();
+    var pushed = false;
+    String message = 'Saved on this device — will sync to server when online';
+    var color = Colors.orange;
+    try {
+      pushed = await _receiptService.saveAndPush(_receipt);
+      if (pushed) {
+        final syncedAt = await _receiptService.lastSyncedAt();
+        if (mounted) setState(() => _lastSynced = syncedAt);
+        message = 'Printer settings saved successfully!';
+        color = Colors.green;
+      }
+    } on ApiException catch (e) {
+      // A real refusal (e.g. this staff account lacks permission to edit
+      // shared receipt settings) is not a connectivity problem — say so.
+      message = 'Saved on this device only — ${friendlyError(e)}';
+      color = Colors.red;
+    }
     if (!mounted) return;
     setState(() => _isSaving = false);
-    _showSnackBar(
-      'Printer settings saved successfully!',
-      backgroundColor: Colors.green,
-    );
+    _showSnackBar(message, backgroundColor: color);
   }
 
   Future<void> _scan() async {
@@ -248,9 +300,231 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     }
   }
 
+  Widget _toggle(String label, bool value, ValueChanged<bool> onChanged, {bool busy = false}) {
+    return SwitchListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Text(label, style: const TextStyle(fontSize: 13)),
+      value: value,
+      activeThumbColor: const Color(0xFFF97316),
+      onChanged: busy ? null : onChanged,
+    );
+  }
+
+  Widget _chips(String label, List<String> options, String value, ValueChanged<String> onChanged, {bool busy = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          SizedBox(width: 100, child: Text(label, style: const TextStyle(fontSize: 13))),
+          Expanded(
+            child: Wrap(
+              spacing: 6,
+              children: options.map((o) {
+                final selected = value.toLowerCase() == o.toLowerCase();
+                return ChoiceChip(
+                  label: Text(o, style: const TextStyle(fontSize: 12)),
+                  selected: selected,
+                  selectedColor: const Color(0xFFF97316),
+                  labelStyle: TextStyle(color: selected ? Colors.white : Colors.black87),
+                  onSelected: busy ? null : (_) => onChanged(o),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _textRow(String label, String value, ValueChanged<String> onChanged, {bool busy = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: TextFormField(
+        initialValue: value,
+        enabled: !busy,
+        onChanged: onChanged,
+        style: const TextStyle(fontSize: 13),
+        decoration: InputDecoration(
+          labelText: label,
+          isDense: true,
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReceiptCustomizationSection(bool busy) {
+    final charsPerLine = _paperSize == '58mm' ? 32 : 48;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Receipt Customization',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+              ),
+            ),
+            TextButton.icon(
+              onPressed: busy || _isSyncing ? null : _syncFromServer,
+              icon: _isSyncing
+                  ? const SizedBox(
+                      width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.sync, size: 16),
+              label: const Text('Sync from server', style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+        Text(
+          _lastSynced == null
+              ? 'Never synced — shared with admin exe/website once you sync or save'
+              : 'Last synced: ${_lastSynced!.toLocal()}'.split('.').first,
+          style: const TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+        ),
+        const SizedBox(height: 8),
+
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('Header', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          children: [
+            _toggle('Show restaurant name', _receipt.showRestaurantName,
+                (v) => setState(() => _receipt = _receipt.copyWith(showRestaurantName: v)), busy: busy),
+            _chips('Alignment', const ['left', 'center', 'right'], _receipt.restaurantNameAlignment,
+                (v) => setState(() => _receipt = _receipt.copyWith(restaurantNameAlignment: v)), busy: busy),
+            _toggle('Show address', _receipt.showRestaurantAddress,
+                (v) => setState(() => _receipt = _receipt.copyWith(showRestaurantAddress: v)), busy: busy),
+            _toggle('Show phone', _receipt.showRestaurantPhone,
+                (v) => setState(() => _receipt = _receipt.copyWith(showRestaurantPhone: v)), busy: busy),
+            _toggle('Show GSTIN', _receipt.showRestaurantGstin,
+                (v) => setState(() => _receipt = _receipt.copyWith(showRestaurantGstin: v)), busy: busy),
+            _textRow('Custom header line 1', _receipt.customHeaderLine1,
+                (v) => _receipt = _receipt.copyWith(customHeaderLine1: v), busy: busy),
+            _textRow('Custom header line 2', _receipt.customHeaderLine2,
+                (v) => _receipt = _receipt.copyWith(customHeaderLine2: v), busy: busy),
+          ],
+        ),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('KOT', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          children: [
+            _toggle('Show department', _receipt.kotShowDepartmentName,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowDepartmentName: v)), busy: busy),
+            _toggle('Show table number', _receipt.kotShowTableNumber,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowTableNumber: v)), busy: busy),
+            _toggle('Show date', _receipt.kotShowDate,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowDate: v)), busy: busy),
+            _toggle('Show variant', _receipt.kotShowVariant,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowVariant: v)), busy: busy),
+            _toggle('Show add-ons', _receipt.kotShowAddons,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowAddons: v)), busy: busy),
+            _toggle('Show serial number', _receipt.kotShowSerialNumber,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowSerialNumber: v)), busy: busy),
+            _toggle('Show item note', _receipt.kotShowItemDescription,
+                (v) => setState(() => _receipt = _receipt.copyWith(kotShowItemDescription: v)), busy: busy),
+            _textRow('Custom KOT message', _receipt.kotCustomMessage,
+                (v) => _receipt = _receipt.copyWith(kotCustomMessage: v), busy: busy),
+          ],
+        ),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('Bill', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          children: [
+            _toggle('Show date', _receipt.billShowDate,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowDate: v)), busy: busy),
+            _toggle('Show table number', _receipt.billShowTableOrOrderNo,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowTableOrOrderNo: v)), busy: busy),
+            _toggle('Show payment mode', _receipt.billShowPaymentMode,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowPaymentMode: v)), busy: busy),
+            _toggle('Show customer name', _receipt.billShowCustomerName,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowCustomerName: v)), busy: busy),
+            _toggle('Show customer phone', _receipt.billShowCustomerPhone,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowCustomerPhone: v)), busy: busy),
+            _toggle('Show variant', _receipt.billShowVariant,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowVariant: v)), busy: busy),
+            _toggle('Show add-ons', _receipt.billShowAddons,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowAddons: v)), busy: busy),
+            _toggle('Show serial number', _receipt.billShowSerialNumber,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowSerialNumber: v)), busy: busy),
+            _toggle('Show item note', _receipt.billShowItemDescription,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowItemDescription: v)), busy: busy),
+            _toggle('Show subtotal', _receipt.billShowSubtotal,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowSubtotal: v)), busy: busy),
+            _toggle('Show discount', _receipt.billShowDiscount,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowDiscount: v)), busy: busy),
+            _toggle('Show container charge', _receipt.billShowContainerCharge,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowContainerCharge: v)), busy: busy),
+            _toggle('Show AC / area charge', _receipt.billShowAreaCharge,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowAreaCharge: v)), busy: busy),
+            _toggle('Show tax breakdown', _receipt.billShowTaxBreakdown,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowTaxBreakdown: v)), busy: busy),
+            _toggle('Show round off', _receipt.billShowRoundOff,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowRoundOff: v)), busy: busy),
+            _toggle('Show grand total', _receipt.billShowGrandTotal,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowGrandTotal: v)), busy: busy),
+            _toggle('Print a second customer copy', _receipt.billShowCustomerCopy,
+                (v) => setState(() => _receipt = _receipt.copyWith(billShowCustomerCopy: v)), busy: busy),
+          ],
+        ),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('Footer & General', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+          children: [
+            _textRow('Thank-you message', _receipt.footerThankYouMessage,
+                (v) => _receipt = _receipt.copyWith(footerThankYouMessage: v), busy: busy),
+            _textRow('Footer sub-message', _receipt.footerSubMessage,
+                (v) => _receipt = _receipt.copyWith(footerSubMessage: v), busy: busy),
+            _textRow('Custom footer line 1', _receipt.customFooterLine1,
+                (v) => _receipt = _receipt.copyWith(customFooterLine1: v), busy: busy),
+            _textRow('Custom footer line 2', _receipt.customFooterLine2,
+                (v) => _receipt = _receipt.copyWith(customFooterLine2: v), busy: busy),
+            _chips('Alignment', const ['left', 'center', 'right'], _receipt.footerAlignment,
+                (v) => setState(() => _receipt = _receipt.copyWith(footerAlignment: v)), busy: busy),
+            _chips('Font weight', const ['normal', 'bold'], _receipt.fontWeight,
+                (v) => setState(() => _receipt = _receipt.copyWith(fontWeight: v)), busy: busy),
+            _textRow('Currency symbol', _receipt.currencySymbol,
+                (v) => _receipt = _receipt.copyWith(currencySymbol: v), busy: busy),
+            _textRow('Date format (e.g. dd-MM-yyyy)', _receipt.dateFormat,
+                (v) => _receipt = _receipt.copyWith(dateFormat: v), busy: busy),
+            _chips('Time format', const ['12h', '24h'], _receipt.timeFormat,
+                (v) => setState(() => _receipt = _receipt.copyWith(timeFormat: v)), busy: busy),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        Row(
+          children: [
+            const Text('Preview:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            const SizedBox(width: 8),
+            ChoiceChip(
+              label: const Text('KOT', style: TextStyle(fontSize: 12)),
+              selected: _previewIsKot,
+              selectedColor: const Color(0xFFF97316),
+              labelStyle: TextStyle(color: _previewIsKot ? Colors.white : Colors.black87),
+              onSelected: (_) => setState(() => _previewIsKot = true),
+            ),
+            const SizedBox(width: 6),
+            ChoiceChip(
+              label: const Text('Bill', style: TextStyle(fontSize: 12)),
+              selected: !_previewIsKot,
+              selectedColor: const Color(0xFFF97316),
+              labelStyle: TextStyle(color: !_previewIsKot ? Colors.white : Colors.black87),
+              onSelected: (_) => setState(() => _previewIsKot = false),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ReceiptPreview(c: _receipt, isKot: _previewIsKot, charsPerLine: charsPerLine),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final busy = _isSaving || _isTesting || _isScanning;
+    final busy = _isSaving || _isTesting || _isScanning || _isSyncing;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -512,6 +786,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   ? null
                   : (v) => setState(() => _kotEnableReleaseTable = v),
             ),
+            const SizedBox(height: 24),
+
+            _buildReceiptCustomizationSection(busy),
             const SizedBox(height: 24),
 
             SizedBox(

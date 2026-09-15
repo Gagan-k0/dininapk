@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../providers/auth_provider.dart';
 import '../../providers/table_provider.dart';
+import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 
 class DineInTableScreen extends StatefulWidget {
@@ -17,7 +18,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<TableProvider>(context, listen: false).loadDashboardData();
+      Provider.of<TableProvider>(context, listen: false).ensureLoaded();
     });
   }
 
@@ -148,6 +149,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 style: TextStyle(color: Color(0xFFEF4444)),
               ),
               onTap: () async {
+                tableProv.reset();
+                Provider.of<PosProvider>(context, listen: false)
+                    .clearFloorDirty();
                 await auth.logout();
                 if (context.mounted) {
                   Navigator.pushReplacementNamed(context, '/login');
@@ -186,6 +190,9 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     ),
                     TextButton(
                       onPressed: () async {
+                        tableProv.reset();
+                        Provider.of<PosProvider>(context, listen: false)
+                            .clearFloorDirty();
                         await auth.logout();
                         if (context.mounted) {
                           Navigator.of(context).pushReplacementNamed('/login');
@@ -200,36 +207,62 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           // Top Sub-Tabs Navigation Bar (Dine In | Pre Booking Dine In | Live Orders)
           Container(
             color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _buildSubTabChip(
-                    0,
-                    'Dine In',
-                    Icons.table_bar,
-                    Colors.orange,
-                    tableProv,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth >= 700;
+                final tabs = <({int i, String label, IconData icon, Color color})>[
+                  (i: 0, label: 'Dine In', icon: Icons.table_bar, color: Colors.orange),
+                  (
+                    i: 1,
+                    label:
+                        'Pre Booking Dine In (${tableProv.reservations.length})',
+                    icon: Icons.calendar_today,
+                    color: Colors.blue,
                   ),
-                  const SizedBox(width: 8),
-                  _buildSubTabChip(
-                    1,
-                    'Pre Booking Dine In (${tableProv.reservations.length})',
-                    Icons.calendar_today,
-                    Colors.blue,
-                    tableProv,
+                  (
+                    i: 2,
+                    label: 'Live Orders (${tableProv.liveOrders.length})',
+                    icon: Icons.flash_on,
+                    color: Colors.purple,
                   ),
-                  const SizedBox(width: 8),
-                  _buildSubTabChip(
-                    2,
-                    'Live Orders (${tableProv.liveOrders.length})',
-                    Icons.flash_on,
-                    Colors.purple,
-                    tableProv,
+                ];
+                if (wide) {
+                  return Row(
+                    children: [
+                      for (var t = 0; t < tabs.length; t++) ...[
+                        if (t > 0) const SizedBox(width: 8),
+                        Expanded(
+                          child: _buildFullWidthSubTab(
+                            tabs[t].i,
+                            tabs[t].label,
+                            tabs[t].icon,
+                            tabs[t].color,
+                            tableProv,
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                }
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (var t = 0; t < tabs.length; t++) ...[
+                        if (t > 0) const SizedBox(width: 8),
+                        _buildSubTabChip(
+                          tabs[t].i,
+                          tabs[t].label,
+                          tabs[t].icon,
+                          tabs[t].color,
+                          tableProv,
+                        ),
+                      ],
+                    ],
                   ),
-                ],
-              ),
+                );
+              },
             ),
           ),
           const Divider(height: 1, color: Color(0xFFE2E8F0)),
@@ -262,9 +295,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     final isSelected = prov.selectedTab == index;
     return ChoiceChip(
       showCheckmark: false,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      labelPadding: const EdgeInsets.symmetric(horizontal: 6),
       avatar: Icon(
         icon,
-        size: 16,
+        size: 14,
         color: isSelected ? Colors.white : activeColor,
       ),
       label: Text(label),
@@ -272,11 +309,76 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       selectedColor: activeColor,
       backgroundColor: activeColor.withValues(alpha: 0.08),
       labelStyle: TextStyle(
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: FontWeight.bold,
         color: isSelected ? Colors.white : activeColor,
       ),
       onSelected: (_) => prov.setSelectedTab(index),
+    );
+  }
+
+  /// Wide-layout tab that fills its [Expanded] slot (ChoiceChip cannot stretch).
+  Widget _buildFullWidthSubTab(
+    int index,
+    String label,
+    IconData icon,
+    Color activeColor,
+    TableProvider prov,
+  ) {
+    final isSelected = prov.selectedTab == index;
+    return Material(
+      color: isSelected ? activeColor : activeColor.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => prov.setSelectedTab(index),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 14,
+                color: isSelected ? Colors.white : activeColor,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: isSelected ? Colors.white : activeColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _compactIconButton({
+    required IconData icon,
+    required Color color,
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      icon: Icon(icon, size: 16, color: color),
+      tooltip: tooltip,
+      onPressed: onPressed,
+      style: IconButton.styleFrom(
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        minimumSize: const Size(32, 32),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+      ),
     );
   }
 
@@ -341,6 +443,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   Future<void> _relogin() async {
     final auth = Provider.of<AuthProvider>(context, listen: false);
     Provider.of<TableProvider>(context, listen: false).reset();
+    Provider.of<PosProvider>(context, listen: false).clearFloorDirty();
     await auth.logout();
     if (!mounted) return;
     Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
@@ -443,12 +546,12 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       children: [
         // KPI Summary Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           color: Colors.white,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 700;
+              final cards = <Widget>[
                 _buildKpiCard(
                   'TOTAL TABLES',
                   '${prov.totalTablesCount}',
@@ -456,8 +559,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.table_restaurant,
                   selected: prov.selectedStatusFilter == 'ALL',
                   onTap: () => prov.setStatusFilter('ALL'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'AVAILABLE',
                   '${prov.availableTablesCount}',
@@ -465,8 +568,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.event_seat,
                   selected: prov.selectedStatusFilter == 'AVAILABLE',
                   onTap: () => prov.setStatusFilter('AVAILABLE'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'OCCUPIED',
                   '${prov.occupiedTablesCount}',
@@ -474,8 +577,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.people,
                   selected: prov.selectedStatusFilter == 'OCCUPIED',
                   onTap: () => prov.setStatusFilter('OCCUPIED'),
+                  expand: wide,
                 ),
-                const SizedBox(width: 10),
                 _buildKpiCard(
                   'KOT / RUNNING',
                   '${prov.kotTablesCount}',
@@ -483,19 +586,41 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   Icons.receipt_long,
                   selected: prov.selectedStatusFilter == 'KOT',
                   onTap: () => prov.setStatusFilter('KOT'),
+                  expand: wide,
                 ),
-              ],
-            ),
+              ];
+              if (wide) {
+                return Row(
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 10),
+                      Expanded(child: cards[i]),
+                    ],
+                  ],
+                );
+              }
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (var i = 0; i < cards.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 10),
+                      cards[i],
+                    ],
+                  ],
+                ),
+              );
+            },
           ),
         ),
         const Divider(height: 1, color: Color(0xFFE2E8F0)),
 
         // Area Selection Filter Bar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           color: Colors.white,
           child: SizedBox(
-            height: 38,
+            height: 32,
             child: ListView(
               scrollDirection: Axis.horizontal,
               children: [
@@ -525,7 +650,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     ],
                   )
                 : ListView(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
                     children: grouped.entries.map((entry) {
                       final areaName = entry.key;
                       final areaTables = entry.value;
@@ -534,14 +659,11 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 8,
-                              horizontal: 4,
-                            ),
+                            padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
                             child: Text(
                               areaName,
                               style: const TextStyle(
-                                fontSize: 16,
+                                fontSize: 14,
                                 fontWeight: FontWeight.w800,
                                 color: Color(
                                   0xFFE11D48,
@@ -549,26 +671,45 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                               ),
                             ),
                           ),
-                          GridView.builder(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            gridDelegate:
-                                const SliverGridDelegateWithMaxCrossAxisExtent(
-                                  maxCrossAxisExtent: 180,
-                                  childAspectRatio: 1.05,
-                                  crossAxisSpacing: 12,
-                                  mainAxisSpacing: 12,
+                          LayoutBuilder(
+                            builder: (context, gridConstraints) {
+                              final w = gridConstraints.maxWidth;
+                              // Higher aspect = shorter cards → more rows visible.
+                              // Keep maxExtent ≥200 so badge+actions never overflow.
+                              final double maxExtent;
+                              final double aspect;
+                              if (w < 600) {
+                                maxExtent = 200;
+                                aspect = 1.2;
+                              } else if (w < 900) {
+                                maxExtent = 220;
+                                aspect = 1.25;
+                              } else {
+                                maxExtent = 240;
+                                aspect = 1.3;
+                              }
+                              return GridView.builder(
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                gridDelegate:
+                                    SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: maxExtent,
+                                  childAspectRatio: aspect,
+                                  crossAxisSpacing: 8,
+                                  mainAxisSpacing: 8,
                                 ),
-                            itemCount: areaTables.length,
-                            itemBuilder: (context, index) {
-                              return _buildTableCard(
-                                context,
-                                prov,
-                                areaTables[index],
+                                itemCount: areaTables.length,
+                                itemBuilder: (context, index) {
+                                  return _buildTableCard(
+                                    context,
+                                    prov,
+                                    areaTables[index],
+                                  );
+                                },
                               );
                             },
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 8),
                         ],
                       );
                     }).toList(),
@@ -586,26 +727,27 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     IconData icon, {
     bool selected = false,
     VoidCallback? onTap,
+    bool expand = false,
   }) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: Container(
-        width: 135,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        width: expand ? null : 130,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
           color: color.withValues(alpha: selected ? 0.18 : 0.08),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: color.withValues(alpha: selected ? 0.9 : 0.2),
             width: selected ? 1.5 : 1,
           ),
         ),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 8),
+            Icon(icon, color: color, size: 16),
+            const SizedBox(width: 6),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -616,15 +758,17 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 9,
+                      fontSize: 8,
                       fontWeight: FontWeight.bold,
                       color: color,
                     ),
                   ),
                   Text(
                     value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 16,
+                      fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: color,
                     ),
@@ -641,12 +785,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   Widget _buildAreaChip(TableProvider prov, String? areaId, String name) {
     final isSelected = prov.selectedAreaId == areaId;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.only(right: 6),
       child: FilterChip(
         selected: isSelected,
         label: Text(name),
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+        padding: EdgeInsets.zero,
+        labelPadding: const EdgeInsets.symmetric(horizontal: 8),
         labelStyle: TextStyle(
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: FontWeight.bold,
           color: isSelected ? Colors.white : const Color(0xFF64748B),
         ),
@@ -659,6 +807,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
   }
 
   String? _cartIdForTable(DineInTable table) => table.cartId;
+
+  Future<void> _openPos(
+    BuildContext context,
+    TableProvider tableProv,
+    DineInTable table,
+  ) async {
+    await Navigator.pushNamed(
+      context,
+      '/food-categories',
+      arguments: {'tableId': table.id, 'areaId': table.areaId},
+    );
+    if (!context.mounted) return;
+    final pos = Provider.of<PosProvider>(context, listen: false);
+    if (pos.consumeFloorDirty()) {
+      await tableProv.refresh();
+    } else {
+      await tableProv.ensureLoaded();
+    }
+  }
 
   void _toast(String text, {bool error = false, Color? color}) {
     if (!mounted) return;
@@ -853,11 +1020,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     if (!ok) return;
 
-    Navigator.pushNamed(
-      context,
-      '/food-categories',
-      arguments: {'tableId': table.id, 'areaId': table.areaId},
-    );
+    if (!context.mounted) return;
+    await _openPos(context, tableProv, table);
   }
 
   Future<void> _rejectQrOrder(
@@ -962,148 +1126,171 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           );
           return;
         }
-        Navigator.pushNamed(
-          context,
-          '/food-categories',
-          arguments: {'tableId': table.id, 'areaId': table.areaId},
-        ).then((_) => tableProv.refresh());
+        _openPos(context, tableProv, table);
       },
       onLongPress: canShift
           ? () => _showShiftTableDialog(context, tableProv, table)
           : null,
       child: Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
         decoration: BoxDecoration(
           color: cardBg,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: borderCol, width: 1.5),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.02),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+              blurRadius: 6,
+              offset: const Offset(0, 1),
             ),
           ],
         ),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  table.tableNumber,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF0F172A),
+                Flexible(
+                  child: Text(
+                    table.tableNumber,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F172A),
+                    ),
                   ),
                 ),
-                Row(
-                  children: [
-                    if (table.isCombined)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(
-                          Icons.link,
-                          size: 12,
-                          color: Color(0xFF64748B),
+                Flexible(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      if (table.isCombined)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(
+                            Icons.link,
+                            size: 12,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      if (table.isPreBooking)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(
+                            Icons.event_seat,
+                            size: 12,
+                            color: Color(0xFF2563EB),
+                          ),
+                        ),
+                      Flexible(
+                        child: Text(
+                          '[${table.noOfPeople} Seats]',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(
+                            fontSize: 9,
+                            color: Color(0xFF64748B),
+                          ),
                         ),
                       ),
-                    if (table.isPreBooking)
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(
-                          Icons.event_seat,
-                          size: 12,
-                          color: Color(0xFF2563EB),
-                        ),
-                      ),
-                    Text(
-                      '[${table.noOfPeople} Seats]',
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Color(0xFF64748B),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
-            if (table.isOccupied) ...[
-              Text(
-                [
-                  if (seated != null) seated,
-                  if (customer != null)
-                    customer
-                  else if (table.itemCount > 0)
-                    '${table.itemCount} items',
-                ].join(' • '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 9, color: Color(0xFF475569)),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: table.isOccupied
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            [
+                              ?seated,
+                              if (customer != null)
+                                customer
+                              else if (table.itemCount > 0)
+                                '${table.itemCount} items',
+                            ].join(' • '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 9,
+                              color: Color(0xFF475569),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '₹${table.totalPrice.toStringAsFixed(2)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF0F172A),
+                            ),
+                          ),
+                        ],
+                      )
+                    : const Text(
+                        'Tap to Order',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Color(0xFF94A3B8),
+                        ),
+                      ),
               ),
-              Text(
-                '₹${table.totalPrice.toStringAsFixed(2)}',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF0F172A),
-                ),
-              ),
-            ] else
-              const Text(
-                'Tap to Order',
-                style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)),
-              ),
-
-            // Quick actions: Accept/Reject (QR), Shift, Print bill, Release
+            ),
+            // Quick actions: Accept/Reject (QR), Shift, Open
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    color: badgeColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    statusText,
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      color: badgeColor,
+                Flexible(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: badgeColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        statusText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 8,
+                          fontWeight: FontWeight.bold,
+                          color: badgeColor,
+                        ),
+                      ),
                     ),
                   ),
                 ),
                 if (table.isPending && cartId != null)
                   Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      IconButton(
-                        icon: const Icon(
-                          Icons.check,
-                          size: 16,
-                          color: Color(0xFF16A34A),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      _compactIconButton(
+                        icon: Icons.check,
+                        color: const Color(0xFF16A34A),
                         tooltip: 'Accept QR order',
                         onPressed: () =>
                             _acceptQrOrder(context, tableProv, table),
                       ),
-                      const SizedBox(width: 6),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.close,
-                          size: 16,
-                          color: Color(0xFFDC2626),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      const SizedBox(width: 4),
+                      _compactIconButton(
+                        icon: Icons.close,
+                        color: const Color(0xFFDC2626),
                         tooltip: 'Reject QR order',
                         onPressed: () =>
                             _rejectQrOrder(context, tableProv, table),
@@ -1112,41 +1299,23 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                   )
                 else if (table.isOccupied)
                   Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       if (canShift) ...[
-                        IconButton(
-                          icon: const Icon(
-                            Icons.swap_horiz,
-                            size: 16,
-                            color: Color(0xFFF97316),
-                          ),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
+                        _compactIconButton(
+                          icon: Icons.swap_horiz,
+                          color: const Color(0xFFF97316),
                           tooltip: 'Shift Table',
                           onPressed: () =>
                               _showShiftTableDialog(context, tableProv, table),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 4),
                       ],
-                      IconButton(
-                        icon: const Icon(
-                          Icons.open_in_new,
-                          size: 16,
-                          color: Color(0xFF16A34A),
-                        ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                      _compactIconButton(
+                        icon: Icons.open_in_new,
+                        color: const Color(0xFF16A34A),
                         tooltip: 'Open table to print or release',
-                        onPressed: () {
-                          Navigator.pushNamed(
-                            context,
-                            '/food-categories',
-                            arguments: {
-                              'tableId': table.id,
-                              'areaId': table.areaId,
-                            },
-                          ).then((_) => tableProv.refresh());
-                        },
+                        onPressed: () => _openPos(context, tableProv, table),
                       ),
                     ],
                   ),

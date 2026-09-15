@@ -39,6 +39,7 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
     ApiClient.onSessionExpired = (reason) async {
       await _auth.sessionExpired(reason);
       _tables.reset();
+      _pos.clearFloorDirty();
       appNavigatorKey.currentState?.pushNamedAndRemoveUntil('/login', (_) => false);
     };
   }

@@ -7,6 +7,7 @@ import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bill_builder.dart';
 import '../services/menu_cache_service.dart';
+import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
 import '../utils/menu_filter.dart';
 
@@ -23,16 +24,20 @@ class PosProvider with ChangeNotifier {
   final ThermalPrinterService _printer;
   final MenuCacheService _menuCache;
   final AuthService _authService;
+  final ReceiptCustomizationService _receiptCustomization;
 
   PosProvider({
     ApiService? api,
     ThermalPrinterService? printer,
     MenuCacheService? menuCache,
     AuthService? auth,
+    ReceiptCustomizationService? receiptCustomization,
   })  : _apiService = api ?? ApiService(),
         _printer = printer ?? ThermalPrinterService(),
         _menuCache = menuCache ?? MenuCacheService(),
-        _authService = auth ?? AuthService();
+        _authService = auth ?? AuthService(),
+        _receiptCustomization =
+            receiptCustomization ?? ReceiptCustomizationService();
 
   // ── Table ──
   String? _activeTableId;
@@ -48,6 +53,7 @@ class PosProvider with ChangeNotifier {
 
   // ── Cart (live backend snapshot) ──
   List<Map<String, dynamic>> _cartData = [];
+  bool _floorDirty = false;
   String? _cartError;
 
   // ── Tax ──
@@ -84,6 +90,20 @@ class PosProvider with ChangeNotifier {
   Map<String, dynamic>? get consolidatedTax => _consolidatedTax;
   List<Map<String, dynamic>> get taxConfig => _taxConfig;
   ReceiptPrefs? get receiptPrefs => _receiptPrefs;
+
+  /// True when POS mutations should force a floor refresh on return.
+  bool get floorDirty => _floorDirty;
+
+  void markFloorDirty() => _floorDirty = true;
+
+  /// Returns whether the floor needs refresh, then clears the flag.
+  bool consumeFloorDirty() {
+    final dirty = _floorDirty;
+    _floorDirty = false;
+    return dirty;
+  }
+
+  void clearFloorDirty() => _floorDirty = false;
 
   String get tableNumber =>
       _tableDetails?['table_number']?.toString() ??
@@ -454,6 +474,7 @@ class PosProvider with ChangeNotifier {
     try {
       final env = await call();
       await _paintFromWrite(env);
+      markFloorDirty();
       _isBusy = false;
       notifyListeners();
       return true;
@@ -746,11 +767,13 @@ class PosProvider with ChangeNotifier {
       var printOk = false;
       try {
         final prefs = await ReceiptPrefs.load();
+        final customization = await _receiptCustomization.loadCached();
         final bytes = await _printer.generateKotBytes(
           table: _printTable,
           items: kotItems,
           restaurantName: prefs.header,
           paperSize: prefs.paperSize,
+          customization: customization,
         );
         await _printer.printBytes(bytes);
         printOk = true;
@@ -775,6 +798,7 @@ class PosProvider with ChangeNotifier {
 
       _isBusy = false;
       notifyListeners();
+      markFloorDirty();
       return true;
     } on ApiException catch (e) {
       _errorMessage = e.message;
@@ -864,9 +888,11 @@ class PosProvider with ChangeNotifier {
           failure = 'No active cart found for this table';
         } else {
           final prefs = await ReceiptPrefs.load();
+          final customization = await _receiptCustomization.loadCached();
           final bytes = await _printer.generateBillBytes(
             bill: data,
             paperSize: prefs.paperSize,
+            customization: customization,
           );
           await _printer.printBytes(bytes);
           await _markPrintedWithRetry(cid);
@@ -883,6 +909,7 @@ class PosProvider with ChangeNotifier {
 
     _isBusy = false;
     notifyListeners();
+    if (failure == null) markFloorDirty();
     return failure;
   }
 
@@ -919,6 +946,7 @@ class PosProvider with ChangeNotifier {
     try {
       await _apiService.deleteCart(cid);
       _cartData = [];
+      markFloorDirty();
       _isBusy = false;
       notifyListeners();
       return true;
@@ -956,6 +984,7 @@ class PosProvider with ChangeNotifier {
     try {
       await _apiService.settleBill(cartId: cid, paymentType: mode);
       _cartData = [];
+      markFloorDirty();
       _isBusy = false;
       notifyListeners();
       return true;

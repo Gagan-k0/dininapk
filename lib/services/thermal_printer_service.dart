@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/table_model.dart';
 import '../models/cart_model.dart';
+import '../models/receipt_customization.dart';
 
 /// Lowest/highest values `Socket.connect` accepts — anything outside this
 /// throws `ArgumentError: Invalid argument(s): Invalid port <n>` instead of
@@ -17,6 +18,18 @@ const int kMaxTcpPort = 65535;
 
 bool isValidTcpPort(int? port) =>
     port != null && port >= kMinTcpPort && port <= kMaxTcpPort;
+
+enum _ColAlign { left, center, right }
+
+/// One column of a `_tableRow` — [width] is in twelfths, matching
+/// `PosColumn.width`, so existing column proportions carry over unchanged.
+class _Col {
+  final String text;
+  final int width;
+  final _ColAlign align;
+
+  const _Col(this.text, this.width, {this.align = _ColAlign.left});
+}
 
 /// Device-local receipt preferences (admin keeps receipt customization in
 /// localStorage per till too — it is not server data a waiter can read).
@@ -139,14 +152,6 @@ class BillPrintData {
 }
 
 class ThermalPrinterService {
-  // Raw ESC/POS printers render Latin-1 (ISO-8859-1) only — ₹ (U+20B9) isn't
-  // in that range and the generator throws ArgumentError on it, unlike the
-  // admin panel's receipts, which are printed as HTML/CSS and can show any
-  // Unicode glyph. "Rs." is the standard ASCII-safe stand-in on thermal bills.
-  final NumberFormat _currencyFormat = NumberFormat.currency(
-    symbol: 'Rs. ',
-    decimalDigits: 2,
-  );
   final DateFormat _dateFormat = DateFormat('dd MMM yyyy - h:mm a');
 
   /// Routes free text (menu items, customer names, the user-typed header)
@@ -164,6 +169,85 @@ class ThermalPrinterService {
     return String.fromCharCodes(
       normalized.codeUnits.map((c) => c <= 0xFF ? c : 0x3F), // '?'
     );
+  }
+
+  /// Characters per printed line for the printer's default font — mirrors
+  /// esc_pos_utils' own `_getMaxCharsPerLine` for `PosFontType.fontA` (the
+  /// only font this app uses), since table rows must agree with it exactly.
+  int _charsPerLine(PaperSize paperSize) =>
+      paperSize == PaperSize.mm58 ? 32 : 48;
+
+  /// Lays out [cols] as ONE line of plain space-padded text instead of using
+  /// `Generator.row()`. `row()` positions each column with an ESC/POS
+  /// "move to absolute dot position" command, which many generic/Bluetooth
+  /// thermal printers don't honor — the cursor never actually moves, so
+  /// every column prints back-to-back with no visible gap. Literal space
+  /// bytes work on any ESC/POS printer. [widthMultiplier] halves (or more)
+  /// the usable characters per line for double-width text (e.g. size2).
+  String _tableRow(
+    PaperSize paperSize,
+    List<_Col> cols, {
+    int widthMultiplier = 1,
+  }) {
+    assert(cols.fold<int>(0, (sum, c) => sum + c.width) == 12);
+    final totalChars = _charsPerLine(paperSize) ~/ widthMultiplier;
+    var allocated = 0;
+    final parts = <String>[];
+    for (var i = 0; i < cols.length; i++) {
+      final isLast = i == cols.length - 1;
+      final chars = isLast
+          ? totalChars - allocated
+          : (cols[i].width * totalChars / 12).round();
+      allocated += chars;
+      final text = _safe(cols[i].text);
+      final clipped = text.length > chars ? text.substring(0, chars) : text;
+      final gap = chars - clipped.length;
+      switch (cols[i].align) {
+        case _ColAlign.right:
+          parts.add('${' ' * gap}$clipped');
+        case _ColAlign.center:
+          final left = gap ~/ 2;
+          parts.add('${' ' * left}$clipped${' ' * (gap - left)}');
+        case _ColAlign.left:
+          parts.add('$clipped${' ' * gap}');
+      }
+    }
+    return parts.join();
+  }
+
+  /// `restaurantNameAlignment`/`footerAlignment` from [ReceiptCustomization]
+  /// are free-text strings synced from the admin exe/website — never trust
+  /// them as an enum value straight off the wire.
+  PosAlign _alignFrom(String value) {
+    switch (value.toLowerCase()) {
+      case 'left':
+        return PosAlign.left;
+      case 'right':
+        return PosAlign.right;
+      default:
+        return PosAlign.center;
+    }
+  }
+
+  bool _isBold(ReceiptCustomization c) => c.fontWeight.toLowerCase() == 'bold';
+
+  /// Builds a currency formatter from [ReceiptCustomization.currencySymbol],
+  /// routed through [_safe] — admin's default is '₹', which is outside
+  /// Latin-1 and would otherwise crash every raw ESC/POS print (see [_safe]).
+  NumberFormat _buildCurrencyFormat(ReceiptCustomization c) =>
+      NumberFormat.currency(symbol: '${_safe(c.currencySymbol)} ', decimalDigits: 2);
+
+  /// Combines [ReceiptCustomization.dateFormat] + `timeFormat` into one
+  /// `intl` pattern. Falls back to the fixed default pattern if the synced
+  /// value is malformed — a bad string from the server must never crash
+  /// every print for a tenant.
+  String _formatDateTime(DateTime dt, ReceiptCustomization c) {
+    final timePattern = c.timeFormat == '24h' ? 'HH:mm' : 'hh:mm a';
+    try {
+      return DateFormat('${c.dateFormat} $timePattern').format(dt);
+    } catch (_) {
+      return _dateFormat.format(dt);
+    }
   }
 
   Future<void> sendRaw(
@@ -264,6 +348,7 @@ class ThermalPrinterService {
     required String restaurantName,
     PaperSize paperSize = PaperSize.mm80,
     String? department,
+    ReceiptCustomization customization = ReceiptCustomization.defaults,
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
@@ -279,11 +364,27 @@ class ThermalPrinterService {
       ),
     );
 
-    bytes += generator.text(
-      _safe(restaurantName),
-      styles: const PosStyles(align: PosAlign.center, bold: true),
-    );
-    if (department != null && department.isNotEmpty) {
+    if (customization.showRestaurantName) {
+      bytes += generator.text(
+        _safe(restaurantName),
+        styles: PosStyles(align: _alignFrom(customization.restaurantNameAlignment), bold: true),
+      );
+    }
+    if (customization.customHeaderLine1.isNotEmpty) {
+      bytes += generator.text(
+        _safe(customization.customHeaderLine1),
+        styles: const PosStyles(align: PosAlign.center),
+      );
+    }
+    if (customization.customHeaderLine2.isNotEmpty) {
+      bytes += generator.text(
+        _safe(customization.customHeaderLine2),
+        styles: const PosStyles(align: PosAlign.center),
+      );
+    }
+    if (department != null &&
+        department.isNotEmpty &&
+        customization.kotShowDepartmentName) {
       bytes += generator.text(
         _safe('DEPARTMENT : $department'),
         styles: const PosStyles(align: PosAlign.center, bold: true),
@@ -291,48 +392,63 @@ class ThermalPrinterService {
     }
 
     bytes += generator.feed(1);
+    if (customization.kotShowTableNumber) {
+      bytes += generator.text(
+        _safe('Table #: ${table.tableNumber}'),
+        styles: const PosStyles(bold: true, height: PosTextSize.size2),
+      );
+    }
+    if (customization.kotShowDate) {
+      bytes += generator.text(
+        'Date: ${_formatDateTime(DateTime.now(), customization)}',
+      );
+    }
+    bytes += generator.hr();
+
     bytes += generator.text(
-      _safe('Table #: ${table.tableNumber}'),
-      styles: const PosStyles(bold: true, height: PosTextSize.size2),
+      _tableRow(paperSize, const [
+        _Col('Item Name', 8),
+        _Col('Qty', 4, align: _ColAlign.right),
+      ]),
+      styles: const PosStyles(bold: true),
     );
-    bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
     bytes += generator.hr();
 
-    bytes += generator.row([
-      PosColumn(
-        text: 'Item Name',
-        width: 8,
-        styles: const PosStyles(bold: true),
-      ),
-      PosColumn(
-        text: 'Qty',
-        width: 4,
-        styles: const PosStyles(bold: true, align: PosAlign.right),
-      ),
-    ]);
-    bytes += generator.hr();
-
+    var serial = 0;
     for (var line in items) {
+      serial++;
       String name = line.item.name;
-      if (line.selectedVariant != null) {
+      if (customization.kotShowVariant && line.selectedVariant != null) {
         name += ' (${line.selectedVariant!.name})';
       }
       if (line.cancelStatus == 1) name += ' (cancelled)';
-      bytes += generator.row([
-        PosColumn(text: _safe(name), width: 9),
-        PosColumn(
-          text: 'x${line.quantity}',
-          width: 3,
-          styles: const PosStyles(align: PosAlign.right, bold: true),
-        ),
-      ]);
-      for (final addon in line.selectedAddons) {
-        bytes += generator.text(_safe(
-            '   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}'));
+      if (customization.kotShowSerialNumber) name = '$serial. $name';
+      bytes += generator.text(
+        _tableRow(paperSize, [
+          _Col(name, 9),
+          _Col('x${line.quantity}', 3, align: _ColAlign.right),
+        ]),
+        styles: PosStyles(bold: _isBold(customization)),
+      );
+      if (customization.kotShowAddons) {
+        for (final addon in line.selectedAddons) {
+          bytes += generator.text(_safe(
+              '   + ${addon.valueName.isNotEmpty ? addon.valueName : addon.name}'));
+        }
       }
-      if (line.instruction != null && line.instruction!.isNotEmpty) {
+      if (customization.kotShowItemDescription &&
+          line.instruction != null &&
+          line.instruction!.isNotEmpty) {
         bytes += generator.text(_safe('   Note: ${line.instruction}'));
       }
+    }
+
+    if (customization.kotCustomMessage.isNotEmpty) {
+      bytes += generator.hr();
+      bytes += generator.text(
+        _safe(customization.kotCustomMessage),
+        styles: const PosStyles(align: PosAlign.center),
+      );
     }
 
     bytes += generator.hr();
@@ -348,154 +464,226 @@ class ThermalPrinterService {
   Future<List<int>> generateBillBytes({
     required BillPrintData bill,
     PaperSize paperSize = PaperSize.mm80,
+    ReceiptCustomization customization = ReceiptCustomization.defaults,
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(paperSize, profile);
-    List<int> bytes = [];
+    final currencyFormat = _buildCurrencyFormat(customization);
 
-    bytes += generator.text(
-      _safe(bill.restaurantName),
-      styles: const PosStyles(
-        align: PosAlign.center,
-        height: PosTextSize.size2,
-        width: PosTextSize.size2,
-        bold: true,
-      ),
-    );
-    if (bill.address != null && bill.address!.isNotEmpty) {
-      bytes += generator.text(_safe(bill.address!), styles: const PosStyles(align: PosAlign.center));
-    }
-    if (bill.phone != null && bill.phone!.isNotEmpty) {
-      bytes += generator.text(_safe('Ph: ${bill.phone}'), styles: const PosStyles(align: PosAlign.center));
-    }
-    if (bill.gstin != null && bill.gstin!.isNotEmpty) {
-      bytes += generator.text(_safe('GSTIN: ${bill.gstin}'), styles: const PosStyles(align: PosAlign.center));
-    }
-    bytes += generator.hr();
-    bytes += generator.text('Date: ${_dateFormat.format(DateTime.now())}');
-    bytes += generator.text(
-      _safe('Table No : ${bill.tableNumber}'),
-      styles: const PosStyles(bold: true),
-    );
-    if (bill.paymentMode != null && bill.paymentMode!.isNotEmpty) {
-      bytes += generator.text(_safe('Payment : ${bill.paymentMode}'));
-    }
-    if (bill.customerName != null && bill.customerName!.isNotEmpty) {
-      bytes += generator.text(_safe('Name : ${bill.customerName}'));
-    }
-    if (bill.customerMobile != null && bill.customerMobile!.isNotEmpty) {
-      bytes += generator.text(_safe('Mobile : ${bill.customerMobile}'));
-    }
-    bytes += generator.hr();
+    List<int> buildCopy() {
+      List<int> bytes = [];
 
-    bytes += generator.row([
-      PosColumn(text: 'Item', width: 6, styles: const PosStyles(bold: true)),
-      PosColumn(
-        text: 'Qty',
-        width: 2,
-        styles: const PosStyles(bold: true, align: PosAlign.center),
-      ),
-      PosColumn(
-        text: 'Amount',
-        width: 4,
-        styles: const PosStyles(bold: true, align: PosAlign.right),
-      ),
-    ]);
-    bytes += generator.hr();
-
-    for (final line in bill.lines) {
-      var name = line.name;
-      if (line.variant != null && line.variant!.isNotEmpty) name += ' (${line.variant})';
-      if (line.cancelled) name += ' (cancelled)';
-      bytes += generator.row([
-        PosColumn(text: _safe(name), width: 6),
-        PosColumn(
-          text: '${line.quantity}',
-          width: 2,
+      if (customization.showRestaurantName) {
+        bytes += generator.text(
+          _safe(bill.restaurantName),
+          styles: PosStyles(
+            align: _alignFrom(customization.restaurantNameAlignment),
+            height: PosTextSize.size2,
+            width: PosTextSize.size2,
+            bold: true,
+          ),
+        );
+      }
+      if (customization.customHeaderLine1.isNotEmpty) {
+        bytes += generator.text(
+          _safe(customization.customHeaderLine1),
           styles: const PosStyles(align: PosAlign.center),
-        ),
-        PosColumn(
-          text: _currencyFormat.format(line.lineTotal),
-          width: 4,
-          styles: const PosStyles(align: PosAlign.right),
-        ),
-      ]);
-      for (final a in line.addons) {
-        bytes += generator.text(_safe('   + $a'));
+        );
       }
-      if (line.note != null && line.note!.isNotEmpty) {
-        bytes += generator.text(_safe('   (${line.note})'));
+      if (customization.customHeaderLine2.isNotEmpty) {
+        bytes += generator.text(
+          _safe(customization.customHeaderLine2),
+          styles: const PosStyles(align: PosAlign.center),
+        );
       }
-    }
+      if (customization.showRestaurantAddress &&
+          bill.address != null &&
+          bill.address!.isNotEmpty) {
+        bytes += generator.text(_safe(bill.address!), styles: const PosStyles(align: PosAlign.center));
+      }
+      if (customization.showRestaurantPhone &&
+          bill.phone != null &&
+          bill.phone!.isNotEmpty) {
+        bytes += generator.text(_safe('Ph: ${bill.phone}'), styles: const PosStyles(align: PosAlign.center));
+      }
+      if (customization.showRestaurantGstin &&
+          bill.gstin != null &&
+          bill.gstin!.isNotEmpty) {
+        bytes += generator.text(_safe('GSTIN: ${bill.gstin}'), styles: const PosStyles(align: PosAlign.center));
+      }
+      bytes += generator.hr();
+      if (customization.billShowDate) {
+        bytes += generator.text('Date: ${_formatDateTime(DateTime.now(), customization)}');
+      }
+      if (customization.billShowTableOrOrderNo) {
+        bytes += generator.text(
+          _safe('Table No : ${bill.tableNumber}'),
+          styles: const PosStyles(bold: true),
+        );
+      }
+      if (customization.billShowPaymentMode &&
+          bill.paymentMode != null &&
+          bill.paymentMode!.isNotEmpty) {
+        bytes += generator.text(_safe('Payment : ${bill.paymentMode}'));
+      }
+      if (customization.billShowCustomerName &&
+          bill.customerName != null &&
+          bill.customerName!.isNotEmpty) {
+        bytes += generator.text(_safe('Name : ${bill.customerName}'));
+      }
+      if (customization.billShowCustomerPhone &&
+          bill.customerMobile != null &&
+          bill.customerMobile!.isNotEmpty) {
+        bytes += generator.text(_safe('Mobile : ${bill.customerMobile}'));
+      }
+      bytes += generator.hr();
 
-    bytes += generator.hr();
-    bytes += _amountRow(generator, 'Subtotal', bill.subTotal, bold: true);
-    if (bill.discount > 0) {
-      final label = bill.discountName == null || bill.discountName!.isEmpty
-          ? 'Discount'
-          : 'Discount (${bill.discountName})';
-      bytes += _amountRow(generator, label, -bill.discount);
-    }
-    if (bill.containerCharge > 0) {
-      bytes += _amountRow(generator, 'Container Charge', bill.containerCharge);
-    }
-    if (bill.areaCharge > 0) {
-      bytes += _amountRow(
-        generator,
-        bill.areaChargeLabel == null || bill.areaChargeLabel!.isEmpty
-            ? 'AC / Area Charge'
-            : 'AC / Area Charge (${bill.areaChargeLabel})',
-        bill.areaCharge,
+      bytes += generator.text(
+        _tableRow(paperSize, const [
+          _Col('Item', 6),
+          _Col('Qty', 2, align: _ColAlign.center),
+          _Col('Amount', 4, align: _ColAlign.right),
+        ]),
+        styles: const PosStyles(bold: true),
       );
-    }
-    if (bill.taxBreakdown.isNotEmpty) {
-      for (final t in bill.taxBreakdown) {
-        bytes += _amountRow(generator, t.key, t.value);
+      bytes += generator.hr();
+
+      var serial = 0;
+      for (final line in bill.lines) {
+        serial++;
+        var name = line.name;
+        if (customization.billShowVariant &&
+            line.variant != null &&
+            line.variant!.isNotEmpty) {
+          name += ' (${line.variant})';
+        }
+        if (line.cancelled) name += ' (cancelled)';
+        if (customization.billShowSerialNumber) name = '$serial. $name';
+        bytes += generator.text(
+          _tableRow(paperSize, [
+            _Col(name, 6),
+            _Col('${line.quantity}', 2, align: _ColAlign.center),
+            _Col(currencyFormat.format(line.lineTotal), 4, align: _ColAlign.right),
+          ]),
+          styles: PosStyles(bold: _isBold(customization)),
+        );
+        if (customization.billShowAddons) {
+          for (final a in line.addons) {
+            bytes += generator.text(_safe('   + $a'));
+          }
+        }
+        if (customization.billShowItemDescription &&
+            line.note != null &&
+            line.note!.isNotEmpty) {
+          bytes += generator.text(_safe('   (${line.note})'));
+        }
       }
-    } else if (bill.taxTotal > 0) {
-      bytes += _amountRow(generator, 'Tax', bill.taxTotal);
-    }
-    if (bill.roundOff != 0) {
-      bytes += _amountRow(generator, 'Round Off', bill.roundOff);
-    }
-    bytes += generator.hr();
 
-    bytes += generator.row([
-      PosColumn(
-        text: 'GRAND TOTAL',
-        width: 7,
-        styles: const PosStyles(bold: true, height: PosTextSize.size2),
-      ),
-      PosColumn(
-        text: _currencyFormat.format(bill.grandTotal),
-        width: 5,
-        styles: const PosStyles(
-          bold: true,
-          align: PosAlign.right,
-          height: PosTextSize.size2,
-        ),
-      ),
-    ]);
+      bytes += generator.hr();
+      if (customization.billShowSubtotal) {
+        bytes += _amountRow(generator, paperSize, currencyFormat, 'Subtotal', bill.subTotal, bold: true);
+      }
+      if (customization.billShowDiscount && bill.discount > 0) {
+        final label = bill.discountName == null || bill.discountName!.isEmpty
+            ? 'Discount'
+            : 'Discount (${bill.discountName})';
+        bytes += _amountRow(generator, paperSize, currencyFormat, label, -bill.discount);
+      }
+      if (customization.billShowContainerCharge && bill.containerCharge > 0) {
+        bytes += _amountRow(generator, paperSize, currencyFormat, 'Container Charge', bill.containerCharge);
+      }
+      if (customization.billShowAreaCharge && bill.areaCharge > 0) {
+        bytes += _amountRow(
+          generator,
+          paperSize,
+          currencyFormat,
+          bill.areaChargeLabel == null || bill.areaChargeLabel!.isEmpty
+              ? 'AC / Area Charge'
+              : 'AC / Area Charge (${bill.areaChargeLabel})',
+          bill.areaCharge,
+        );
+      }
+      if (customization.billShowTaxBreakdown) {
+        if (bill.taxBreakdown.isNotEmpty) {
+          for (final t in bill.taxBreakdown) {
+            bytes += _amountRow(generator, paperSize, currencyFormat, t.key, t.value);
+          }
+        } else if (bill.taxTotal > 0) {
+          bytes += _amountRow(generator, paperSize, currencyFormat, 'Tax', bill.taxTotal);
+        }
+      }
+      if (customization.billShowRoundOff && bill.roundOff != 0) {
+        bytes += _amountRow(generator, paperSize, currencyFormat, 'Round Off', bill.roundOff);
+      }
+      bytes += generator.hr();
 
-    bytes += generator.hr();
-    bytes += generator.text(
-      _safe(bill.footer ?? 'THANKS FOR VISITING US'),
-      styles: const PosStyles(align: PosAlign.center, bold: true),
-    );
+      if (customization.billShowGrandTotal) {
+        bytes += generator.text(
+          // Only height is doubled here (as before) — PosTextSize.height alone
+          // doesn't change how many characters fit per line, only .width does,
+          // so the normal (undivided) character budget still applies.
+          _tableRow(paperSize, [
+            const _Col('GRAND TOTAL', 7),
+            _Col(currencyFormat.format(bill.grandTotal), 5, align: _ColAlign.right),
+          ]),
+          styles: const PosStyles(bold: true, height: PosTextSize.size2),
+        );
+        bytes += generator.hr();
+      }
+
+      final footerAlign = _alignFrom(customization.footerAlignment);
+      bytes += generator.text(
+        _safe(bill.footer ?? customization.footerThankYouMessage),
+        styles: PosStyles(align: footerAlign, bold: true),
+      );
+      if (customization.footerSubMessage.isNotEmpty) {
+        bytes += generator.text(
+          _safe(customization.footerSubMessage),
+          styles: PosStyles(align: footerAlign),
+        );
+      }
+      if (customization.customFooterLine1.isNotEmpty) {
+        bytes += generator.text(
+          _safe(customization.customFooterLine1),
+          styles: PosStyles(align: footerAlign),
+        );
+      }
+      if (customization.customFooterLine2.isNotEmpty) {
+        bytes += generator.text(
+          _safe(customization.customFooterLine2),
+          styles: PosStyles(align: footerAlign),
+        );
+      }
+      return bytes;
+    }
+
+    List<int> bytes = [];
+    bytes += buildCopy();
     bytes += generator.feed(2);
     bytes += generator.cut();
+    if (customization.billShowCustomerCopy) {
+      bytes += buildCopy();
+      bytes += generator.feed(2);
+      bytes += generator.cut();
+    }
 
     return bytes;
   }
 
-  List<int> _amountRow(Generator g, String label, double amount, {bool bold = false}) {
-    return g.row([
-      PosColumn(text: _safe(label), width: 8, styles: PosStyles(bold: bold)),
-      PosColumn(
-        text: _currencyFormat.format(amount),
-        width: 4,
-        styles: PosStyles(align: PosAlign.right, bold: bold),
-      ),
-    ]);
+  List<int> _amountRow(
+    Generator g,
+    PaperSize paperSize,
+    NumberFormat currencyFormat,
+    String label,
+    double amount, {
+    bool bold = false,
+  }) {
+    return g.text(
+      _tableRow(paperSize, [
+        _Col(label, 8),
+        _Col(currencyFormat.format(amount), 4, align: _ColAlign.right),
+      ]),
+      styles: PosStyles(bold: bold),
+    );
   }
 }
