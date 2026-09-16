@@ -42,6 +42,21 @@ List<String> flattenCategoryIds(dynamic categoryField) {
   return ids;
 }
 
+List<String> parseDepartments(dynamic raw) {
+  if (raw is! List) return const [];
+  final out = <String>[];
+  for (final d in raw) {
+    if (d is Map) {
+      final id = d['_id']?.toString() ?? d['id']?.toString() ?? '';
+      if (id.isNotEmpty && !out.contains(id)) out.add(id);
+    } else if (d != null) {
+      final id = d.toString().trim();
+      if (id.isNotEmpty && id != 'null' && !out.contains(id)) out.add(id);
+    }
+  }
+  return out;
+}
+
 class MenuCategory {
   final String id;
   final String categoryName;
@@ -49,6 +64,7 @@ class MenuCategory {
   final String? displayName;
   final String? image;
   final int count;
+  final List<String> departments;
 
   MenuCategory({
     required this.id,
@@ -57,6 +73,7 @@ class MenuCategory {
     this.displayName,
     this.image,
     this.count = 0,
+    this.departments = const [],
   });
 
   /// Names used by admin `filterCachedDineinMenu` ([valuename, displayname, name]).
@@ -91,6 +108,7 @@ class MenuCategory {
       displayName: displayName,
       image: json['image']?.toString(),
       count: int.tryParse(json['count']?.toString() ?? '0') ?? 0,
+      departments: parseDepartments(json['departments']),
     );
   }
 }
@@ -203,6 +221,8 @@ class MenuItem {
   final bool isExtraAddon;
   /// Leading "+ Custom" card on the Extra Add-ons rail.
   final bool isCustomAddonTrigger;
+  /// Kitchen departments (KOT stations) inherited from category / denormalized.
+  final List<String> departments;
 
   bool get hasVariants => variants.isNotEmpty;
   bool get hasAddons => addons.isNotEmpty;
@@ -237,6 +257,7 @@ class MenuItem {
     this.isFavorite = false,
     this.isExtraAddon = false,
     this.isCustomAddonTrigger = false,
+    this.departments = const [],
   });
 
   factory MenuItem.fromJson(Map<String, dynamic> json) {
@@ -351,6 +372,7 @@ class MenuItem {
       isCustomAddonTrigger: json['is_custom_addon_trigger'] == true ||
           json['is_custom_addon_trigger'] == 1 ||
           json['_id']?.toString() == 'CUSTOM_ADDON_TRIGGER',
+      departments: parseDepartments(json['departments'] ?? json['department_ids']),
     );
   }
 }

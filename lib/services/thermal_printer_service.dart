@@ -121,10 +121,13 @@ class ReceiptPrefs {
   PrinterTarget targetFor(PrinterRole role) =>
       role == PrinterRole.kot && !kotSameAsBill ? kot : bill;
 
-  static Future<ReceiptPrefs> load() async {
+  static ReceiptPrefs? _cachedPrefs;
+
+  static Future<ReceiptPrefs> load({bool forceRefresh = false}) async {
+    if (_cachedPrefs != null && !forceRefresh) return _cachedPrefs!;
     final prefs = await SharedPreferences.getInstance();
     final paper = prefs.getString('printer_paper') ?? '80mm';
-    return ReceiptPrefs(
+    _cachedPrefs = ReceiptPrefs(
       header: prefs.getString('printer_header') ?? 'THE FAT FOX',
       paperSize: paper.contains('58') ? PaperSize.mm58 : PaperSize.mm80,
       bill: PrinterTarget.read(prefs, PrinterRole.bill),
@@ -132,6 +135,11 @@ class ReceiptPrefs {
       kotSameAsBill: prefs.getBool(kotSameAsBillKey) ?? true,
       kotEnableReleaseTable: prefs.getBool('kot_enable_release_table') ?? false,
     );
+    return _cachedPrefs!;
+  }
+
+  static void invalidateCache() {
+    _cachedPrefs = null;
   }
 }
 
@@ -313,21 +321,61 @@ class ThermalPrinterService {
     }
   }
 
+  static CapabilityProfile? _cachedProfile;
+
+  static Future<CapabilityProfile> get _capabilityProfile async {
+    _cachedProfile ??= await CapabilityProfile.load();
+    return _cachedProfile!;
+  }
+
+  /// Pre-warms capability profile, receipt preferences, and Bluetooth link
+  /// in the background so the very first print action (e.g. KOT) doesn't lag.
+  static Future<void> warmup() async {
+    try {
+      await _capabilityProfile;
+      final prefs = await ReceiptPrefs.load();
+      final kotTarget = prefs.targetFor(PrinterRole.kot);
+      final billTarget = prefs.targetFor(PrinterRole.bill);
+
+      if (kotTarget.isBluetooth && kotTarget.btMac.isNotEmpty) {
+        _connectBluetoothInBackground(kotTarget.btMac);
+      } else if (billTarget.isBluetooth && billTarget.btMac.isNotEmpty) {
+        _connectBluetoothInBackground(billTarget.btMac);
+      }
+    } catch (_) {}
+  }
+
+  static void _connectBluetoothInBackground(String mac) async {
+    try {
+      if (_connectedMac != mac) {
+        final connected = await PrintBluetoothThermal.connectionStatus;
+        if (!connected) {
+          final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+          if (ok) _connectedMac = mac;
+        } else {
+          _connectedMac = mac;
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> sendRaw(
     List<int> bytes, {
     required String host,
     required int port,
   }) async {
+    final address = InternetAddress.tryParse(host) ?? host;
     final socket = await Socket.connect(
-      host,
+      address,
       port,
-      timeout: const Duration(seconds: 5),
+      timeout: const Duration(seconds: 3),
     );
     try {
       socket.add(bytes);
       await socket.flush();
+      await Future.delayed(const Duration(milliseconds: 50));
     } finally {
-      await socket.close();
+      socket.destroy();
     }
   }
 
@@ -363,13 +411,13 @@ class ThermalPrinterService {
   static String? _connectedMac;
 
   Future<void> _sendBluetooth(List<int> bytes, {required String mac}) async {
-    // `connectionStatus` is true for ANY connected printer and `connect` does
-    // nothing while a link is open, so with separate KOT and Bill printers
-    // the job would print on whichever one was used last — drop that first.
-    var connected = await PrintBluetoothThermal.connectionStatus;
-    if (connected && _connectedMac != mac) {
-      await PrintBluetoothThermal.disconnect;
-      connected = false;
+    var connected = _connectedMac == mac;
+    if (!connected) {
+      connected = await PrintBluetoothThermal.connectionStatus;
+      if (connected && _connectedMac != mac) {
+        await PrintBluetoothThermal.disconnect;
+        connected = false;
+      }
     }
     if (!connected) {
       _connectedMac = null;
@@ -392,7 +440,7 @@ class ThermalPrinterService {
     PaperSize paperSize = PaperSize.mm80,
     String title = 'TEST PRINT',
   }) async {
-    final profile = await CapabilityProfile.load();
+    final profile = await _capabilityProfile;
     final generator = Generator(paperSize, profile);
     List<int> bytes = [];
 
@@ -437,7 +485,7 @@ class ThermalPrinterService {
     String? department,
     ReceiptCustomization customization = ReceiptCustomization.defaults,
   }) async {
-    final profile = await CapabilityProfile.load();
+    final profile = await _capabilityProfile;
     final generator = Generator(paperSize, profile);
     _font = _fontFor(customization.kotFontSize);
     List<int> bytes = generator.setGlobalFont(_font);
@@ -542,7 +590,7 @@ class ThermalPrinterService {
     PaperSize paperSize = PaperSize.mm80,
     ReceiptCustomization customization = ReceiptCustomization.defaults,
   }) async {
-    final profile = await CapabilityProfile.load();
+    final profile = await _capabilityProfile;
     final generator = Generator(paperSize, profile);
     final currencyFormat = _buildCurrencyFormat(customization);
     _font = _fontFor(customization.billFontSize);

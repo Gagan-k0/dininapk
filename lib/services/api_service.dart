@@ -288,6 +288,20 @@ class ApiService {
     return env.mapList;
   }
 
+  /// GET /restaurant/kitchen-department?all=true — kitchen stations for KOT routing.
+  Future<List<Map<String, dynamic>>> getKitchenDepartments({
+    bool activeOnly = false,
+  }) async {
+    final env = await _client.get(
+      ApiConfig.kitchenDepartments,
+      query: {
+        'all': 'true',
+        if (activeOnly) 'activeOnly': 'true',
+      },
+    );
+    return env.mapList;
+  }
+
   /// GET /restaurant/menu/getmenu/{menuId} — variant/addon details.
   Future<Map<String, dynamic>?> getMenuById(String menuId) async {
     try {

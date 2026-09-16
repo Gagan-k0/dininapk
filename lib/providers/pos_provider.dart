@@ -12,6 +12,14 @@ import '../services/thermal_printer_service.dart';
 import '../utils/extra_addons.dart';
 import '../utils/menu_filter.dart';
 
+/// Group of KOT items for one kitchen department ticket.
+class KotGroup {
+  final String name;
+  final List<CartLineItem> items;
+
+  KotGroup({required this.name, required this.items});
+}
+
 /// Ordering screen state for ONE open table. Mirrors the admin
 /// `dinein-food-categories` contract:
 /// * every cart write goes to the live backend and repaints from the response;
@@ -38,7 +46,9 @@ class PosProvider with ChangeNotifier {
         _menuCache = menuCache ?? MenuCacheService(),
         _authService = auth ?? AuthService(),
         _receiptCustomization =
-            receiptCustomization ?? ReceiptCustomizationService();
+            receiptCustomization ?? ReceiptCustomizationService() {
+    ThermalPrinterService.warmup();
+  }
 
   // ── Table ──
   String? _activeTableId;
@@ -55,6 +65,11 @@ class PosProvider with ChangeNotifier {
   /// variant_id → display name from GET /restaurant/variant/all (admin join).
   Map<String, String> _variantNameById = {};
   String _searchQuery = '';
+
+  // ── Kitchen Departments (KOT stations) ──
+  List<Map<String, dynamic>> _kitchenDepartments = [];
+  Map<String, String> _deptNameMap = {};
+  List<String> _deptOrder = [];
 
   // ── Cart (live backend snapshot) ──
   List<Map<String, dynamic>> _cartData = [];
@@ -95,7 +110,9 @@ class PosProvider with ChangeNotifier {
   Map<String, dynamic>? get cart => _cartData.isEmpty ? null : _cartData.first;
   Map<String, dynamic>? get consolidatedTax => _consolidatedTax;
   List<Map<String, dynamic>> get taxConfig => _taxConfig;
-  ReceiptPrefs? get receiptPrefs => _receiptPrefs;
+  Map<String, String> get deptNameMap => _deptNameMap;
+  List<String> get deptOrder => _deptOrder;
+  List<Map<String, dynamic>> get kitchenDepartments => _kitchenDepartments;
 
   /// True when POS mutations should force a floor refresh on return.
   bool get floorDirty => _floorDirty;
@@ -444,6 +461,7 @@ class PosProvider with ChangeNotifier {
         _apiService.getDineinMenuMaps(),
         _bestEffortTax(),
         _bestEffortVariantCatalog(),
+        _bestEffortKitchenDepartments(),
       ]);
       _tableDetails = results[0] as Map<String, dynamic>?;
       final catMaps = results[1] as List<Map<String, dynamic>>;
@@ -467,6 +485,10 @@ class PosProvider with ChangeNotifier {
         }
         if (map.isNotEmpty) _variantNameById = map;
       }
+      final deptMaps = results[5] as List<Map<String, dynamic>>;
+      if (deptMaps.isNotEmpty) {
+        populateKitchenDepartments(deptMaps);
+      }
 
       await _menuCache.save(
         restaurantId: restaurantId,
@@ -481,7 +503,7 @@ class PosProvider with ChangeNotifier {
         debugPrint(
           '[Fatfox POS] Loaded table ${_tableDetails?['table_number']}: '
           '${_categories.length} categories, ${_allItems.length} items, '
-          '${_taxConfig.length} tax rows',
+          '${_taxConfig.length} tax rows, ${_kitchenDepartments.length} kitchen departments',
         );
         await _reloadCartData();
       }
@@ -515,6 +537,39 @@ class PosProvider with ChangeNotifier {
       return const [];
     } catch (_) {
       return const [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _bestEffortKitchenDepartments() async {
+    try {
+      return await _apiService.getKitchenDepartments();
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      return const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  void populateKitchenDepartments(List<Map<String, dynamic>> rawList) {
+    _kitchenDepartments = rawList;
+    final sorted = List<Map<String, dynamic>>.from(rawList);
+    sorted.sort((a, b) {
+      final ordA = num.tryParse(a['sort_order']?.toString() ?? '0') ?? 0;
+      final ordB = num.tryParse(b['sort_order']?.toString() ?? '0') ?? 0;
+      return ordA.compareTo(ordB);
+    });
+    _deptOrder = sorted
+        .map((d) => (d['name'] ?? d['valuename'])?.toString() ?? '')
+        .where((n) => n.isNotEmpty)
+        .toList();
+    _deptNameMap = {};
+    for (final d in rawList) {
+      final id = (d['_id'] ?? d['id'])?.toString() ?? '';
+      final name = (d['name'] ?? d['valuename'])?.toString() ?? '';
+      if (id.isNotEmpty && name.isNotEmpty) {
+        _deptNameMap[id] = name;
+      }
     }
   }
 
@@ -815,10 +870,15 @@ class PosProvider with ChangeNotifier {
         id: m['_id']?.toString() ?? '',
         item: MenuItem(
           id: m['menu_id']?.toString() ?? menuMap?['_id']?.toString() ?? '',
-          categoryId: m['category_id']?.toString() ?? '',
+          categoryId: m['category_id']?.toString() ?? menuMap?['category_id']?.toString() ?? '',
           name: name,
           attribute: menuMap?['attribute']?.toString() ?? 'VEG',
           price: unit,
+          departments: parseDepartments(
+            m['departments'] ??
+                menuMap?['departments'] ??
+                (m['category'] is Map ? m['category']['departments'] : null),
+          ),
         ),
         quantity: int.tryParse(m['quantity']?.toString() ?? '1') ?? 1,
         selectedVariant: (variantName != null && variantName.isNotEmpty)
@@ -844,6 +904,94 @@ class PosProvider with ChangeNotifier {
   // KOT
   // ============================================================
 
+  /// Resolves kitchen department names for a line item.
+  List<String> getDeptNamesForLine(CartLineItem line) {
+    final ids = <String>[];
+
+    // 1. From line.item.departments (carried from menuMap or raw cart row)
+    for (final d in line.item.departments) {
+      if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
+    }
+
+    // 2. Fall back to category lookup in _categories
+    if (ids.isEmpty && line.item.categoryId.isNotEmpty) {
+      for (final cat in _categories) {
+        if (cat.id == line.item.categoryId) {
+          for (final d in cat.departments) {
+            if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
+          }
+          break;
+        }
+      }
+    }
+
+    // 3. Fall back to looking up line.item.id in _allItems
+    if (ids.isEmpty && line.item.id.isNotEmpty) {
+      for (final it in _allItems) {
+        if (it.id == line.item.id) {
+          for (final d in it.departments) {
+            if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
+          }
+          if (ids.isEmpty && it.categoryId.isNotEmpty) {
+            for (final cat in _categories) {
+              if (cat.id == it.categoryId) {
+                for (final d in cat.departments) {
+                  if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
+                }
+                break;
+              }
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // Convert IDs -> Names using _deptNameMap
+    final names = <String>[];
+    for (final id in ids) {
+      final name = _deptNameMap[id] ?? id;
+      if (name.isNotEmpty && !names.contains(name)) {
+        names.add(name);
+      }
+    }
+
+    return names;
+  }
+
+  /// Group KOT lines by department for individual department tickets (autocut between stations).
+  /// Multi-department lines repeat on each linked department ticket; unassigned lines fall into "General".
+  List<KotGroup> buildKotGroups(List<CartLineItem> items) {
+    final groups = <String, List<CartLineItem>>{};
+
+    for (final item in items) {
+      final names = getDeptNamesForLine(item);
+      if (names.isEmpty) {
+        groups.putIfAbsent('General', () => []).add(item);
+      } else {
+        for (final name in names) {
+          groups.putIfAbsent(name, () => []).add(item);
+        }
+      }
+    }
+
+    int sortKey(String name) {
+      if (name == 'General') return 1000000000;
+      final idx = _deptOrder.indexOf(name);
+      return idx == -1 ? 100000000 : idx;
+    }
+
+    final keys = groups.keys.toList()
+      ..sort((a, b) {
+        final keyA = sortKey(a);
+        final keyB = sortKey(b);
+        if (keyA != keyB) return keyA.compareTo(keyB);
+        return a.compareTo(b);
+      });
+
+    return keys.map((k) => KotGroup(name: k, items: groups[k]!)).toList();
+  }
+
   /// Send KOT via setcartstatus, then silent-print the un-printed lines
   /// (`viewmenu?status=kot`), then KOT_PRINT only after a successful print.
   /// Returns true when the KOT reached the kitchen; [printError] set if the
@@ -863,63 +1011,57 @@ class PosProvider with ChangeNotifier {
     notifyListeners();
 
     try {
-      // Un-printed lines BEFORE the status flip (KOT sets kot_status on all rows;
-      // kotprint_status stays 0 until KOT_PRINT, so this is safe either way).
-      List<CartLineItem> kotItems = [];
-      try {
-        final rows = await _apiService.getViewMenu(tableId: tid, status: 'kot');
-        kotItems = _kotLinesFromMaps(rows);
-      } on ApiException catch (e) {
-        if (e.isAuth) rethrow;
-        debugPrint(
-          '[Fatfox POS] viewmenu kot failed, falling back to cart lines: $e',
-        );
-      }
-      if (kotItems.isEmpty) {
-        kotItems = _kotLinesFromMaps(
-          cartMenuItems.where((i) => i['kotprint_status'] != 1).toList(),
-        );
-      }
+      // 1) Gather items from local state first to avoid network latency before print
+      List<CartLineItem> kotItems = _kotLinesFromMaps(
+        cartMenuItems
+            .where((i) =>
+                i['kotprint_status'] != 1 && i['kotprint_status'] != '1')
+            .toList(),
+      );
       if (kotItems.isEmpty) kotItems = printCartLines;
 
-      // 1) Fire only new lines. A printer retry must not create another KOT.
+      // 2) Send unsent lines to kitchen backend if any
       if (hasUnsentKotItems) {
         await _apiService.sendKotToKitchen(cartId: cid);
-        await _reloadCartData();
       }
 
-      // 2) LAN print
-      var printOk = false;
+      // 3) Silent print KOT tickets (one per kitchen department, with ESC/POS autocut)
       try {
         final prefs = await ReceiptPrefs.load();
         final customization = await _receiptCustomization.loadCached();
-        final bytes = await _printer.generateKotBytes(
-          table: _printTable,
-          items: kotItems,
-          restaurantName: prefs.header,
-          paperSize: prefs.paperSize,
-          customization: customization,
-        );
-        await _printer.printBytes(bytes, role: PrinterRole.kot);
-        printOk = true;
+        final groups = buildKotGroups(kotItems);
+        for (var i = 0; i < groups.length; i++) {
+          final group = groups[i];
+          final bytes = await _printer.generateKotBytes(
+            table: _printTable,
+            items: group.items,
+            restaurantName: prefs.header,
+            paperSize: prefs.paperSize,
+            department: group.name,
+            customization: customization,
+          );
+          await _printer.printBytes(bytes, role: PrinterRole.kot);
+          if (i < groups.length - 1) {
+            await Future.delayed(const Duration(milliseconds: 150));
+          }
+        }
       } catch (e) {
         printError = friendlyError(e);
-        debugPrint('[Fatfox POS] KOT print error: $e');
+        debugPrint('[Fatfox POS] KOT thermal print error: $e');
       }
 
-      // 3) KOT_PRINT only after a successful print
-      if (printOk) {
-        try {
-          await _apiService.setCartStatus(
-            cartId: cid,
-            tableStatus: 'KOT_PRINT',
-          );
-          await _reloadCartData();
-        } on ApiException catch (e) {
-          if (e.isAuth) rethrow;
-          debugPrint('[Fatfox POS] KOT_PRINT status failed: $e');
-        }
+      // 4) Update status on backend to KOT_PRINT so order advances on server & table status updates
+      try {
+        await _apiService.setCartStatus(
+          cartId: cid,
+          tableStatus: 'KOT_PRINT',
+        );
+      } on ApiException catch (e) {
+        if (e.isAuth) rethrow;
+        debugPrint('[Fatfox POS] KOT_PRINT status failed: $e');
       }
+
+      await _reloadCartData();
 
       _isBusy = false;
       notifyListeners();
@@ -1052,10 +1194,8 @@ class PosProvider with ChangeNotifier {
 
     String? failure;
     try {
-      if (hasUnprintedItems) {
-        failure = hasUnsentKotItems
-            ? 'Send and print KOT before printing the bill'
-            : 'Print KOT before printing the bill';
+      if (hasUnsentKotItems) {
+        failure = 'Send KOT to kitchen before printing the bill';
       }
       if (failure == null) {
         final data = await BillBuilder(_apiService).build(
@@ -1070,12 +1210,18 @@ class PosProvider with ChangeNotifier {
         } else {
           final prefs = await ReceiptPrefs.load();
           final customization = await _receiptCustomization.loadCached();
-          final bytes = await _printer.generateBillBytes(
-            bill: data,
-            paperSize: prefs.paperSize,
-            customization: customization,
-          );
-          await _printer.printBytes(bytes);
+          try {
+            final bytes = await _printer.generateBillBytes(
+              bill: data,
+              paperSize: prefs.paperSize,
+              customization: customization,
+            );
+            await _printer.printBytes(bytes, role: PrinterRole.bill);
+          } catch (e) {
+            printError = friendlyError(e);
+            debugPrint('[Fatfox POS] Bill thermal print error: $e');
+            failure = 'Printer error: ${friendlyError(e)}';
+          }
           await _markPrintedWithRetry(cid);
           await _reloadCartData();
         }
@@ -1090,7 +1236,7 @@ class PosProvider with ChangeNotifier {
 
     _isBusy = false;
     notifyListeners();
-    if (failure == null) markFloorDirty();
+    if (failure == null || printError != null) markFloorDirty();
     return failure;
   }
 
