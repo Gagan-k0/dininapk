@@ -124,7 +124,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         slot.usbName = prefs.getString('${p}printer_usb_name') ?? '';
       }
       _kotSameAsBill = prefs.getBool(ReceiptPrefs.kotSameAsBillKey) ?? true;
-      if (_kotSameAsBill || !_slots[PrinterRole.kot]!.isConfigured) {
+      if (!_slots[PrinterRole.kot]!.isConfigured && _slots[PrinterRole.bill]!.isConfigured) {
         _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
       }
       _paperSizeExplicit = savedPaper != null;
@@ -153,6 +153,13 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     // A save makes the current Paper Size (default or not) the user's real
     // choice — a later Connection Type switch must not silently override it.
     _paperSizeExplicit = true;
+    if (_kotSameAsBill) {
+      if (_editing == PrinterRole.bill) {
+        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
+      } else {
+        _copySlot(_slots[PrinterRole.kot]!, _slots[PrinterRole.bill]!);
+      }
+    }
     final prefs = await SharedPreferences.getInstance();
     for (final role in PrinterRole.values) {
       final p = PrinterTarget.prefixFor(role);
@@ -321,7 +328,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     }
   }
 
-  void _selectDiscovered(DiscoveredPrinter printer) {
+  Future<void> _selectDiscovered(DiscoveredPrinter printer) async {
     final slot = _slot;
     setState(() {
       if (printer.transport == PrinterTransport.lan) {
@@ -339,15 +346,20 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         slot.btMac = printer.macAddress ?? '';
         slot.btName = printer.displayName;
       }
-      if (_editing == PrinterRole.bill && _kotSameAsBill) {
-        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
+      if (_kotSameAsBill) {
+        if (_editing == PrinterRole.bill) {
+          _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
+        } else {
+          _copySlot(_slots[PrinterRole.kot]!, _slots[PrinterRole.bill]!);
+        }
       }
       if (_editing == PrinterRole.bill && !_paperSizeExplicit) {
         _paperSize = _defaultPaperSizeFor(slot.type);
       }
     });
+    await _persistSettings();
     _showSnackBar(
-      'Selected ${printer.displayName} as ${_roleLabel(_editing)} printer',
+      'Selected & saved ${printer.displayName} as ${_roleLabel(_editing)} printer',
       backgroundColor: Colors.green,
     );
   }
@@ -589,22 +601,122 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
             activeThumbColor: const Color(0xFFF97316),
             onChanged: busy
                 ? null
-                : (v) => setState(() {
-                      _kotSameAsBill = v;
-                      _discovered = [];
-                      if (v) {
-                        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
-                      }
-                    }),
+                : (v) async {
+                      setState(() {
+                        _kotSameAsBill = v;
+                        _discovered = [];
+                      });
+                      await _persistSettings();
+                    },
           ),
         const SizedBox(height: 12),
       ],
     );
   }
 
+  Widget _buildActiveStatusCard(_PrinterSlot slot) {
+    final role = _editing;
+    final isKotFollowingBill = _kotFollowsBill;
+    final activeSlot = isKotFollowingBill ? _slots[PrinterRole.bill]! : slot;
+    final isConfigured = activeSlot.isConfigured;
+    final targetDesc = _describe(isKotFollowingBill ? PrinterRole.bill : role);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isConfigured ? const Color(0xFFF0FDF4) : const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isConfigured ? const Color(0xFF86EFAC) : const Color(0xFFFCA5A5),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isConfigured ? Icons.check_circle : Icons.error_outline,
+                color: isConfigured ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
+                size: 24,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${_roleLabel(role)} Printer: ${isConfigured ? "CONNECTED / READY" : "NOT CONFIGURED"}',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                        color: isConfigured ? const Color(0xFF15803D) : const Color(0xFFB91C1C),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      isKotFollowingBill
+                          ? 'KOT follows Bill Printer → $targetDesc'
+                          : '${activeSlot.type} · $targetDesc',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF334155)),
+                    ),
+                  ],
+                ),
+              ),
+              if (isConfigured)
+                ElevatedButton.icon(
+                  onPressed: _isTesting ? null : _testPrint,
+                  icon: _isTesting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.print, size: 16),
+                  label: const Text('Test Print', style: TextStyle(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF97316),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+            ],
+          ),
+          if (isKotFollowingBill) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFFEDD5)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: Color(0xFFEA580C)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'KOT is using the Bill printer setup. Turn off "Print KOT on bill printer" above to assign a separate printer for KOTs.',
+                      style: TextStyle(fontSize: 11, color: Color(0xFFC2410C)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   List<Widget> _buildConnectionFields(bool busy) {
     final slot = _slot;
     return [
+      _buildActiveStatusCard(slot),
       const Text(
         'Connection Type',
         style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
@@ -679,11 +791,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         ),
         const SizedBox(height: 6),
         ..._discovered.map((p) {
-          final selected = switch (p.transport) {
-            PrinterTransport.lan => p.host == slot.ip.text.trim(),
-            PrinterTransport.bluetooth => p.macAddress == slot.btMac,
-            PrinterTransport.usb => p.usbId == slot.usbId,
-          };
+          final selected = (p.transport == PrinterTransport.lan && slot.type == 'LAN' && p.host == slot.ip.text.trim()) ||
+              (p.transport == PrinterTransport.bluetooth && slot.type == 'Bluetooth' && p.macAddress == slot.btMac) ||
+              (p.transport == PrinterTransport.usb && slot.type == 'USB' && p.usbId == slot.usbId);
           return Card(
             margin: const EdgeInsets.only(bottom: 6),
             child: ListTile(

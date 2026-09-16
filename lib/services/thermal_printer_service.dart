@@ -388,10 +388,10 @@ class ThermalPrinterService {
     if (!target.configured) {
       throw Exception(
         target.isUsb
-            ? '$label USB printer not selected. Open Printer Settings → $label printer → Scan.'
+            ? '$label printer is set to USB, but no USB printer is selected. Open Printer Settings → $label printer → Scan.'
             : target.isBluetooth
-                ? '$label Bluetooth printer not selected. Open Printer Settings → $label printer → Scan.'
-                : '$label printer IP not configured. Open Printer Settings → $label printer.',
+                ? '$label printer is set to Bluetooth, but no Bluetooth printer was selected. Open Printer Settings → $label printer → Scan.'
+                : '$label printer is set to LAN, but no IP address is entered. Open Printer Settings → $label printer.',
       );
     }
     if (target.isUsb) {
@@ -411,44 +411,56 @@ class ThermalPrinterService {
   static String? _connectedMac;
 
   Future<void> _sendBluetooth(List<int> bytes, {required String mac}) async {
-    bool isConnected = _connectedMac == mac;
-    if (isConnected) {
-      try {
-        final status = await PrintBluetoothThermal.connectionStatus;
-        if (!status) {
-          isConnected = false;
-          _connectedMac = null;
-        }
-      } catch (_) {
-        isConnected = false;
-        _connectedMac = null;
-      }
-    } else {
-      try {
-        final status = await PrintBluetoothThermal.connectionStatus;
-        if (status) {
+    // 1. Check if plugin already has an active connection to target MAC
+    bool isConnected = false;
+    try {
+      final status = await PrintBluetoothThermal.connectionStatus;
+      if (status) {
+        if (_connectedMac == mac) {
+          isConnected = true;
+        } else {
+          // Connected to a different MAC — disconnect cleanly and wait for RFCOMM channel to release
           await PrintBluetoothThermal.disconnect;
+          await Future.delayed(const Duration(milliseconds: 300));
         }
-      } catch (_) {}
+      }
+    } catch (_) {
+      isConnected = false;
     }
 
+    // 2. If not connected, attempt connection with retry
     if (!isConnected) {
       _connectedMac = null;
+      bool ok = false;
       try {
-        final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
-        if (!ok) {
-          throw Exception(
-            'Could not connect to Bluetooth printer $mac. Pair it in Android Settings first.',
-          );
-        }
-        _connectedMac = mac;
-      } catch (e) {
-        _connectedMac = null;
-        if (e is Exception) rethrow;
-        throw Exception('Could not connect to Bluetooth printer $mac: $e');
+        ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+      } catch (_) {
+        ok = false;
       }
+
+      // Retry once if first connection attempt failed (transient Bluetooth socket busy)
+      if (!ok) {
+        try {
+          await PrintBluetoothThermal.disconnect;
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 500));
+        try {
+          ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+        } catch (_) {
+          ok = false;
+        }
+      }
+
+      if (!ok) {
+        _connectedMac = null;
+        throw Exception(
+          'Could not connect to Bluetooth printer $mac. Make sure printer is turned ON, in range, and paired in Android Settings.',
+        );
+      }
+      _connectedMac = mac;
     }
 
+    // 3. Write print bytes
     bool written = false;
     try {
       written = await PrintBluetoothThermal.writeBytes(bytes);
@@ -456,13 +468,13 @@ class ThermalPrinterService {
       written = false;
     }
 
-    // If first attempt failed (e.g. stale socket), reconnect once & retry
+    // 4. If first write failed (stale socket), reconnect cleanly & retry once
     if (!written) {
       _connectedMac = null;
       try {
         await PrintBluetoothThermal.disconnect;
       } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 200));
+      await Future.delayed(const Duration(milliseconds: 400));
       try {
         final reconnected = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
         if (reconnected) {
@@ -476,7 +488,9 @@ class ThermalPrinterService {
 
     if (!written) {
       _connectedMac = null;
-      throw Exception('Bluetooth printer failed to accept the print job. Make sure printer is turned ON and paired.');
+      throw Exception(
+        'Bluetooth printer failed to print. Check paper, cover, power & Bluetooth connection.',
+      );
     }
   }
 
