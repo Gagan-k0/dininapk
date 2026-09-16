@@ -499,9 +499,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     )
               : GridView.builder(
                   controller: _menuScrollController,
-                  physics: const BouncingScrollPhysics(
-                    parent: AlwaysScrollableScrollPhysics(),
-                  ),
+                  physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(10, 6, 10, 88),
                   gridDelegate:
                       const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -540,6 +538,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     final inCart = cartIds.contains(item.id);
 
     return PosMenuTile(
+      key: ValueKey(item.id),
       label: item.label,
       shortCode: item.shortCode,
       attribute: item.attribute,

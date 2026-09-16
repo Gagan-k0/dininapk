@@ -560,13 +560,13 @@ class PosProvider with ChangeNotifier {
       return ordA.compareTo(ordB);
     });
     _deptOrder = sorted
-        .map((d) => (d['name'] ?? d['valuename'])?.toString() ?? '')
+        .map((d) => (d['name'] ?? d['valuename'] ?? d['department_name'] ?? d['displayname'])?.toString() ?? '')
         .where((n) => n.isNotEmpty)
         .toList();
     _deptNameMap = {};
     for (final d in rawList) {
       final id = (d['_id'] ?? d['id'])?.toString() ?? '';
-      final name = (d['name'] ?? d['valuename'])?.toString() ?? '';
+      final name = (d['name'] ?? d['valuename'] ?? d['department_name'] ?? d['displayname'])?.toString() ?? '';
       if (id.isNotEmpty && name.isNotEmpty) {
         _deptNameMap[id] = name;
       }
@@ -925,10 +925,14 @@ class PosProvider with ChangeNotifier {
       }
     }
 
-    // 3. Fall back to looking up line.item.id in _allItems
-    if (ids.isEmpty && line.item.id.isNotEmpty) {
+    // 3. Fall back to looking up line.item.id or line.item.name in _allItems
+    if (ids.isEmpty) {
+      final targetId = line.item.id.trim();
+      final targetName = line.item.name.trim().toLowerCase();
       for (final it in _allItems) {
-        if (it.id == line.item.id) {
+        final matchId = targetId.isNotEmpty && it.id.trim() == targetId;
+        final matchName = targetName.isNotEmpty && it.name.trim().toLowerCase() == targetName;
+        if (matchId || matchName) {
           for (final d in it.departments) {
             if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
           }
@@ -942,7 +946,18 @@ class PosProvider with ChangeNotifier {
               }
             }
           }
-          break;
+          if (ids.isEmpty) {
+            for (final catId in it.categoryIds) {
+              for (final cat in _categories) {
+                if (cat.id == catId) {
+                  for (final d in cat.departments) {
+                    if (d.isNotEmpty && !ids.contains(d)) ids.add(d);
+                  }
+                }
+              }
+            }
+          }
+          if (ids.isNotEmpty) break;
         }
       }
     }
@@ -1030,6 +1045,10 @@ class PosProvider with ChangeNotifier {
         final prefs = await ReceiptPrefs.load();
         final customization = await _receiptCustomization.loadCached();
         final groups = buildKotGroups(kotItems);
+        debugPrint('[Fatfox POS] KOT Print: ${kotItems.length} items divided into ${groups.length} department ticket(s):');
+        for (final g in groups) {
+          debugPrint('  - Station/Dept: "${g.name}", Items: ${g.items.map((i) => i.item.name).join(', ')}');
+        }
         for (var i = 0; i < groups.length; i++) {
           final group = groups[i];
           final bytes = await _printer.generateKotBytes(

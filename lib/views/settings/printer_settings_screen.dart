@@ -22,6 +22,12 @@ class _PrinterSlot {
   String usbId = '';
   String usbName = '';
 
+  bool get isConfigured {
+    if (type == 'Bluetooth') return btMac.isNotEmpty;
+    if (type == 'USB') return usbId.isNotEmpty;
+    return ip.text.trim().isNotEmpty;
+  }
+
   void dispose() {
     ip.dispose();
     port.dispose();
@@ -118,6 +124,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         slot.usbName = prefs.getString('${p}printer_usb_name') ?? '';
       }
       _kotSameAsBill = prefs.getBool(ReceiptPrefs.kotSameAsBillKey) ?? true;
+      if (_kotSameAsBill || !_slots[PrinterRole.kot]!.isConfigured) {
+        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
+      }
       _paperSizeExplicit = savedPaper != null;
       _paperSize = savedPaper ?? _defaultPaperSizeFor(_slots[PrinterRole.bill]!.type);
       _headerController.text =
@@ -128,6 +137,16 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _receiptBaseline = jsonEncode(receipt.toJson());
       _lastSynced = syncedAt;
     });
+  }
+
+  void _copySlot(_PrinterSlot src, _PrinterSlot dest) {
+    dest.type = src.type;
+    dest.ip.text = src.ip.text;
+    dest.port.text = src.port.text;
+    dest.btMac = src.btMac;
+    dest.btName = src.btName;
+    dest.usbId = src.usbId;
+    dest.usbName = src.usbName;
   }
 
   Future<void> _persistSettings() async {
@@ -150,6 +169,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     await prefs.setString('printer_paper', _paperSize);
     await prefs.setString('printer_header', _headerController.text.trim());
     await prefs.setBool('kot_enable_release_table', _kotEnableReleaseTable);
+
+    // Invalidate in-memory cache so all app services instantly pick up changes
+    ReceiptPrefs.invalidateCache();
   }
 
   /// Pulls the SAME `receipt_settings` the admin exe/website edit. Only
@@ -316,6 +338,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         slot.type = 'Bluetooth';
         slot.btMac = printer.macAddress ?? '';
         slot.btName = printer.displayName;
+      }
+      if (_editing == PrinterRole.bill && _kotSameAsBill) {
+        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
       }
       if (_editing == PrinterRole.bill && !_paperSizeExplicit) {
         _paperSize = _defaultPaperSizeFor(slot.type);
@@ -567,6 +592,9 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 : (v) => setState(() {
                       _kotSameAsBill = v;
                       _discovered = [];
+                      if (v) {
+                        _copySlot(_slots[PrinterRole.bill]!, _slots[PrinterRole.kot]!);
+                      }
                     }),
           ),
         const SizedBox(height: 12),
@@ -983,22 +1011,65 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
             _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _buildPrinterAssignment(busy),
             if (_kotFollowsBill)
-              // The switch alone read as "KOT printer can't be chosen" — offer the way out.
               Padding(
                 padding: const EdgeInsets.only(bottom: 20),
-                child: OutlinedButton.icon(
-                  onPressed: busy
-                      ? null
-                      : () => setState(() {
-                            _kotSameAsBill = false;
-                            _discovered = [];
-                          }),
-                  icon: const Icon(Icons.add),
-                  label: const Text('Set up a separate KOT printer'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFF97316),
-                    side: const BorderSide(color: Color(0xFFF97316)),
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFEFF6FF),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFBFDBFE)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.info_outline, color: Color(0xFF2563EB), size: 20),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'KOTs will print on the Bill Printer',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                    color: Color(0xFF1E40AF),
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Active target: ${_describe(PrinterRole.bill)}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF1E3A8A),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: busy
+                          ? null
+                          : () => setState(() {
+                                _kotSameAsBill = false;
+                                _discovered = [];
+                              }),
+                      icon: const Icon(Icons.add),
+                      label: const Text('Set up a separate KOT printer'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFF97316),
+                        side: const BorderSide(color: Color(0xFFF97316)),
+                      ),
+                    ),
+                  ],
                 ),
               )
             else

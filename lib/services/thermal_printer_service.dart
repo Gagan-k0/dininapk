@@ -411,27 +411,72 @@ class ThermalPrinterService {
   static String? _connectedMac;
 
   Future<void> _sendBluetooth(List<int> bytes, {required String mac}) async {
-    var connected = _connectedMac == mac;
-    if (!connected) {
-      connected = await PrintBluetoothThermal.connectionStatus;
-      if (connected && _connectedMac != mac) {
-        await PrintBluetoothThermal.disconnect;
-        connected = false;
+    bool isConnected = _connectedMac == mac;
+    if (isConnected) {
+      try {
+        final status = await PrintBluetoothThermal.connectionStatus;
+        if (!status) {
+          isConnected = false;
+          _connectedMac = null;
+        }
+      } catch (_) {
+        isConnected = false;
+        _connectedMac = null;
       }
+    } else {
+      try {
+        final status = await PrintBluetoothThermal.connectionStatus;
+        if (status) {
+          await PrintBluetoothThermal.disconnect;
+        }
+      } catch (_) {}
     }
-    if (!connected) {
+
+    if (!isConnected) {
       _connectedMac = null;
-      final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
-      if (!ok) {
-        throw Exception(
-          'Could not connect to Bluetooth printer $mac. Pair it in Android Settings first.',
-        );
+      try {
+        final ok = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+        if (!ok) {
+          throw Exception(
+            'Could not connect to Bluetooth printer $mac. Pair it in Android Settings first.',
+          );
+        }
+        _connectedMac = mac;
+      } catch (e) {
+        _connectedMac = null;
+        if (e is Exception) rethrow;
+        throw Exception('Could not connect to Bluetooth printer $mac: $e');
       }
-      _connectedMac = mac;
     }
-    final written = await PrintBluetoothThermal.writeBytes(bytes);
+
+    bool written = false;
+    try {
+      written = await PrintBluetoothThermal.writeBytes(bytes);
+    } catch (_) {
+      written = false;
+    }
+
+    // If first attempt failed (e.g. stale socket), reconnect once & retry
     if (!written) {
-      throw Exception('Bluetooth printer failed to accept the print job.');
+      _connectedMac = null;
+      try {
+        await PrintBluetoothThermal.disconnect;
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 200));
+      try {
+        final reconnected = await PrintBluetoothThermal.connect(macPrinterAddress: mac);
+        if (reconnected) {
+          _connectedMac = mac;
+          written = await PrintBluetoothThermal.writeBytes(bytes);
+        }
+      } catch (_) {
+        written = false;
+      }
+    }
+
+    if (!written) {
+      _connectedMac = null;
+      throw Exception('Bluetooth printer failed to accept the print job. Make sure printer is turned ON and paired.');
     }
   }
 

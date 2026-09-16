@@ -43,17 +43,41 @@ List<String> flattenCategoryIds(dynamic categoryField) {
 }
 
 List<String> parseDepartments(dynamic raw) {
-  if (raw is! List) return const [];
+  if (raw == null) return const [];
   final out = <String>[];
-  for (final d in raw) {
+
+  void addSingle(dynamic d) {
+    if (d == null) return;
     if (d is Map) {
-      final id = d['_id']?.toString() ?? d['id']?.toString() ?? '';
+      final id = d['_id']?.toString() ??
+          d['id']?.toString() ??
+          d['name']?.toString() ??
+          d['valuename']?.toString() ??
+          d['department_name']?.toString() ??
+          '';
       if (id.isNotEmpty && !out.contains(id)) out.add(id);
-    } else if (d != null) {
-      final id = d.toString().trim();
-      if (id.isNotEmpty && id != 'null' && !out.contains(id)) out.add(id);
+    } else if (d is List) {
+      for (final item in d) {
+        addSingle(item);
+      }
+    } else {
+      final s = d.toString().trim();
+      if (s.isNotEmpty && s != 'null') {
+        if (s.contains(',')) {
+          for (final part in s.split(',')) {
+            final trimmed = part.trim();
+            if (trimmed.isNotEmpty && trimmed != 'null' && !out.contains(trimmed)) {
+              out.add(trimmed);
+            }
+          }
+        } else if (!out.contains(s)) {
+          out.add(s);
+        }
+      }
     }
   }
+
+  addSingle(raw);
   return out;
 }
 

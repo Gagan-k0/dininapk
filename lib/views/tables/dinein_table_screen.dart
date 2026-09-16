@@ -634,47 +634,42 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                       ),
                     ],
                   )
-                : ListView(
-                    padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-                    children: grouped.entries.map((entry) {
-                      final areaName = entry.key;
-                      final areaTables = entry.value;
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final w = constraints.maxWidth;
+                      final double maxExtent;
+                      final double aspect;
+                      if (w < 600) {
+                        maxExtent = 200;
+                        aspect = 1.05;
+                      } else if (w < 900) {
+                        maxExtent = 220;
+                        aspect = 1.1;
+                      } else {
+                        maxExtent = 240;
+                        aspect = 1.15;
+                      }
 
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(4, 4, 4, 6),
-                            child: Text(
-                              areaName,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w800,
-                                color: Color(
-                                  0xFFE11D48,
-                                ), // Dark Pink / Red Area Heading matching web
+                      return CustomScrollView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        slivers: [
+                          for (final entry in grouped.entries) ...[
+                            SliverToBoxAdapter(
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+                                child: Text(
+                                  entry.key,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFFE11D48),
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                          LayoutBuilder(
-                            builder: (context, gridConstraints) {
-                              final w = gridConstraints.maxWidth;
-                              // Higher aspect = shorter cards → more rows visible.
-                              final double maxExtent;
-                              final double aspect;
-                              if (w < 600) {
-                                maxExtent = 200;
-                                aspect = 1.05;
-                              } else if (w < 900) {
-                                maxExtent = 220;
-                                aspect = 1.1;
-                              } else {
-                                maxExtent = 240;
-                                aspect = 1.15;
-                              }
-                              return GridView.builder(
-                                shrinkWrap: true,
-                                physics: const NeverScrollableScrollPhysics(),
+                            SliverPadding(
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                              sliver: SliverGrid(
                                 gridDelegate:
                                     SliverGridDelegateWithMaxCrossAxisExtent(
                                   maxCrossAxisExtent: maxExtent,
@@ -682,21 +677,29 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                                   crossAxisSpacing: 8,
                                   mainAxisSpacing: 8,
                                 ),
-                                itemCount: areaTables.length,
-                                itemBuilder: (context, index) {
-                                  return _buildTableCard(
-                                    context,
-                                    prov,
-                                    areaTables[index],
-                                  );
-                                },
-                              );
-                            },
+                                delegate: SliverChildBuilderDelegate(
+                                  (context, index) {
+                                    final table = entry.value[index];
+                                    return _buildTableCard(
+                                      context,
+                                      prov,
+                                      table,
+                                    );
+                                  },
+                                  childCount: entry.value.length,
+                                ),
+                              ),
+                            ),
+                            const SliverToBoxAdapter(
+                              child: SizedBox(height: 8),
+                            ),
+                          ],
+                          const SliverToBoxAdapter(
+                            child: SizedBox(height: 16),
                           ),
-                          const SizedBox(height: 8),
                         ],
                       );
-                    }).toList(),
+                    },
                   ),
           ),
         ),
