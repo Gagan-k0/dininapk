@@ -621,8 +621,9 @@ class ThermalPrinterService {
     }
 
     bytes += generator.hr();
-    bytes += generator.feed(2);
+    bytes += generator.feed(4);
     bytes += generator.cut();
+    bytes += const [0x1d, 0x56, 0x00, 0x1d, 0x56, 0x01, 0x1b, 0x69];
 
     return bytes;
   }
@@ -839,7 +840,15 @@ class ThermalPrinterService {
       return bytes;
     }
 
-    return [...fontBytes, ...buildCopy(), ...generator.feed(2), ...generator.cut()];
+    return [
+      ...fontBytes,
+      ...buildCopy(),
+      ...generator.feed(4),
+      ...generator.cut(),
+      0x1d, 0x56, 0x00,
+      0x1d, 0x56, 0x01,
+      0x1b, 0x69,
+    ];
   }
 
   List<int> _amountRow(

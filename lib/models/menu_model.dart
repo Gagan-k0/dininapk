@@ -145,14 +145,39 @@ class MenuVariant {
   MenuVariant({required this.id, required this.name, required this.price});
 
   factory MenuVariant.fromJson(Map<String, dynamic> json) {
+    String extractName() {
+      final v = json['valuename'] ??
+          json['name'] ??
+          json['title'] ??
+          json['variant_name'] ??
+          json['value_name'] ??
+          json['displayname'] ??
+          json['label'] ??
+          json['value_title'] ??
+          json['value_label'] ??
+          json['value'];
+      if (v is Map) {
+        return (v['name'] ??
+                v['valuename'] ??
+                v['displayname'] ??
+                v['title'] ??
+                v['value_name'])
+            ?.toString() ??
+            '';
+      }
+      return v?.toString().trim() ?? '';
+    }
+
     return MenuVariant(
-      id:
-          json['_id']?.toString() ??
+      id: json['_id']?.toString() ??
           json['variant_id']?.toString() ??
           json['value_id']?.toString() ??
+          json['id']?.toString() ??
           '',
-      name: json['valuename']?.toString() ?? json['name']?.toString() ?? '',
-      price: double.tryParse(json['price']?.toString() ?? '0') ?? 0.0,
+      name: extractName(),
+      price: double.tryParse(
+              json['price']?.toString() ?? json['variant_price']?.toString() ?? '0') ??
+          0.0,
     );
   }
 }

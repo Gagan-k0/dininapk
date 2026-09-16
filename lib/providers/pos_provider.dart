@@ -98,6 +98,7 @@ class PosProvider with ChangeNotifier {
   DineInTable? get activeTable => _activeTable;
 
   List<MenuCategory> get categories => _categories;
+  Map<String, String> get variantNameById => _variantNameById;
   String? get selectedCategoryId => _selectedCategoryId;
   bool get isExtraAddonsLoading => _extraAddonsLoading;
   String get searchQuery => _searchQuery;
@@ -388,29 +389,32 @@ class PosProvider with ChangeNotifier {
       final rows = await _apiService.getAllVariants();
       final map = <String, String>{};
       for (final row in rows) {
-        final id = row['_id']?.toString() ?? '';
+        final id = (row['_id'] ?? row['id'] ?? row['variant_id'] ?? row['value_id'])?.toString() ?? '';
         if (id.isEmpty) continue;
-        final name = (row['name'] ?? row['valuename'] ?? row['displayname'])
+        final name = (row['name'] ?? row['valuename'] ?? row['displayname'] ?? row['title'] ?? row['variant_name'] ?? row['value_name'])
                 ?.toString()
                 .trim() ??
             '';
         if (name.isNotEmpty) map[id] = name;
       }
       _variantNameById = map;
+      if (_allItems.isNotEmpty && map.isNotEmpty) {
+        _setSortedMenuItems(_allItems);
+      }
     } catch (e) {
       debugPrint('[Fatfox POS] variant catalog load failed: $e');
     }
   }
 
   List<MenuVariant> _joinVariantNames(List<MenuVariant> variants) {
-    if (variants.isEmpty || _variantNameById.isEmpty) return variants;
+    if (variants.isEmpty) return variants;
     return [
       for (final v in variants)
         MenuVariant(
           id: v.id,
-          name: v.name.isNotEmpty
+          name: (v.name.isNotEmpty && v.name.trim().toLowerCase() != 'variant')
               ? v.name
-              : (_variantNameById[v.id] ?? ''),
+              : (_variantNameById[v.id] ?? (v.name.isNotEmpty ? v.name : '')),
           price: v.price,
         ),
     ];
@@ -421,7 +425,31 @@ class PosProvider with ChangeNotifier {
     sorted.sort(
       (a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()),
     );
-    _allItems = sorted;
+    _allItems = [
+      for (final item in sorted)
+        if (item.variants.isNotEmpty)
+          MenuItem(
+            id: item.id,
+            categoryId: item.categoryId,
+            categoryNames: item.categoryNames,
+            categoryIds: item.categoryIds,
+            name: item.name,
+            displayName: item.displayName,
+            shortCode: item.shortCode,
+            attribute: item.attribute,
+            price: item.price,
+            image: item.image,
+            variants: _joinVariantNames(item.variants),
+            addons: item.addons,
+            customisable: item.customisable,
+            isFavorite: item.isFavorite,
+            isExtraAddon: item.isExtraAddon,
+            isCustomAddonTrigger: item.isCustomAddonTrigger,
+            departments: item.departments,
+          )
+        else
+          item,
+    ];
   }
 
   // ============================================================
@@ -676,6 +704,7 @@ class PosProvider with ChangeNotifier {
     String? description,
   }) async {
     final tid = resolvedTableId;
+    final cid = cartId;
     if (tid.isEmpty) {
       _errorMessage = 'Table not loaded';
       notifyListeners();
@@ -695,6 +724,7 @@ class PosProvider with ChangeNotifier {
     return _write(
       () => _apiService.createCartItem(
         tableId: tid,
+        cartId: cid,
         menuId: item.id,
         menuPrice: menuPrice,
         variantId: variantId,
@@ -713,6 +743,7 @@ class PosProvider with ChangeNotifier {
   /// Open-price / extra add-on line (admin "+ Custom"): no menu_id, typed price.
   Future<bool> addExtraItem({required String name, required double price}) {
     final tid = resolvedTableId;
+    final cid = cartId;
     if (tid.isEmpty || name.trim().isEmpty || price <= 0) {
       _errorMessage = tid.isEmpty
           ? 'Table not loaded'
@@ -723,6 +754,7 @@ class PosProvider with ChangeNotifier {
     return _write(
       () => _apiService.createCartItem(
         tableId: tid,
+        cartId: cid,
         menuId: null,
         menuPrice: price,
         isExtraAddon: true,

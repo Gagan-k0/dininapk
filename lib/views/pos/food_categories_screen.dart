@@ -903,9 +903,15 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                       const SizedBox(width: 12),
                                       Expanded(
                                         child: Text(
-                                          variant.name.isNotEmpty
-                                              ? variant.name
-                                              : 'Variant',
+                                          () {
+                                            final name = variant.name.trim();
+                                            if (name.isNotEmpty && name.toLowerCase() != 'variant') {
+                                              return name;
+                                            }
+                                            final catalogName = pos.variantNameById[variant.id] ?? '';
+                                            if (catalogName.isNotEmpty) return catalogName;
+                                            return name.isNotEmpty ? name : 'Option';
+                                          }(),
                                           style: const TextStyle(
                                             fontSize: 14,
                                             fontWeight: FontWeight.w600,

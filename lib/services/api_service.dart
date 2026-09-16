@@ -412,6 +412,7 @@ class ApiService {
   /// cart's current value or the server resets it to 0.
   Future<ApiEnvelope> createCartItem({
     required String tableId,
+    String? cartId,
     required String? menuId,
     required double menuPrice,
     String? variantId,
@@ -428,6 +429,8 @@ class ApiService {
   }) {
     return _client.post(ApiConfig.addToCart, body: {
       'table_id': tableId,
+      if (cartId != null && cartId.isNotEmpty) 'cart_id': cartId,
+      if (cartId != null && cartId.isNotEmpty) 'cartId': cartId,
       'table_status': 'BLANK',
       'menu_id': menuId,
       'menu_price': menuPrice,
