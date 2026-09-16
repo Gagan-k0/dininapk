@@ -72,9 +72,7 @@ class PosCategoryRail extends StatelessWidget {
               ),
             Expanded(
               child: ListView.builder(
-                physics: const BouncingScrollPhysics(
-                  parent: AlwaysScrollableScrollPhysics(),
-                ),
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: EdgeInsets.fromLTRB(
                   collapsed ? 6 : 8,
                   0,

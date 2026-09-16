@@ -288,6 +288,20 @@ class ApiService {
     return env.mapList;
   }
 
+  /// GET /restaurant/kitchen-department?all=true — kitchen stations for KOT routing.
+  Future<List<Map<String, dynamic>>> getKitchenDepartments({
+    bool activeOnly = false,
+  }) async {
+    final env = await _client.get(
+      ApiConfig.kitchenDepartments,
+      query: {
+        'all': 'true',
+        if (activeOnly) 'activeOnly': 'true',
+      },
+    );
+    return env.mapList;
+  }
+
   /// GET /restaurant/menu/getmenu/{menuId} — variant/addon details.
   Future<Map<String, dynamic>?> getMenuById(String menuId) async {
     try {
@@ -398,6 +412,7 @@ class ApiService {
   /// cart's current value or the server resets it to 0.
   Future<ApiEnvelope> createCartItem({
     required String tableId,
+    String? cartId,
     required String? menuId,
     required double menuPrice,
     String? variantId,
@@ -414,6 +429,8 @@ class ApiService {
   }) {
     return _client.post(ApiConfig.addToCart, body: {
       'table_id': tableId,
+      if (cartId != null && cartId.isNotEmpty) 'cart_id': cartId,
+      if (cartId != null && cartId.isNotEmpty) 'cartId': cartId,
       'table_status': 'BLANK',
       'menu_id': menuId,
       'menu_price': menuPrice,

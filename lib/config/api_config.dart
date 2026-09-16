@@ -45,6 +45,8 @@ class ApiConfig {
       '/restaurant/add-on/all-avaliable'; // ?searchName=
   /// Admin AllVariants — join names onto getmenu variant_id rows.
   static String allVariants = '/restaurant/variant/all'; // ?searchName=
+  /// Admin & Waiter Kitchen Departments (KOT stations)
+  static String kitchenDepartments = '/restaurant/kitchen-department';
 
   // Restaurant & Printer Settings
   static String getRestaurantView = '/restaurant/view';

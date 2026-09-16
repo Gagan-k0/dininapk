@@ -16,25 +16,29 @@ final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const FatfoxDineInApp());
+  final auth = AuthProvider();
+  await auth.checkSession();
+  runApp(FatfoxDineInApp(authProvider: auth));
 }
 
 class FatfoxDineInApp extends StatefulWidget {
-  const FatfoxDineInApp({super.key});
+  final AuthProvider? authProvider;
+  const FatfoxDineInApp({super.key, this.authProvider});
 
   @override
   State<FatfoxDineInApp> createState() => _FatfoxDineInAppState();
 }
 
 class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
-  late final AuthProvider _auth = AuthProvider();
+  late final AuthProvider _auth = widget.authProvider ?? AuthProvider();
   late final TableProvider _tables = TableProvider();
   late final PosProvider _pos = PosProvider();
+  late bool _initialized = widget.authProvider != null;
 
   @override
   void initState() {
     super.initState();
-    _auth.checkSession();
+    _initSession();
     // A 401 anywhere → drop the session, clear floor state, back to login.
     ApiClient.onSessionExpired = (reason) async {
       await _auth.sessionExpired(reason);
@@ -42,6 +46,17 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
       _pos.clearFloorDirty();
       appNavigatorKey.currentState?.pushNamedAndRemoveUntil('/login', (_) => false);
     };
+  }
+
+  Future<void> _initSession() async {
+    if (widget.authProvider == null) {
+      await _auth.checkSession();
+    }
+    if (mounted) {
+      setState(() {
+        _initialized = true;
+      });
+    }
   }
 
   @override
@@ -52,6 +67,20 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_initialized) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: Color(0xFFF8FAFC),
+          body: Center(
+            child: CircularProgressIndicator(
+              color: Color(0xFFF97316),
+            ),
+          ),
+        ),
+      );
+    }
+
     return MultiProvider(
       providers: [
         ChangeNotifierProvider.value(value: _auth),

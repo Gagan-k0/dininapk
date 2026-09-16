@@ -499,9 +499,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     )
               : GridView.builder(
                   controller: _menuScrollController,
-                  physics: const BouncingScrollPhysics(
-                    parent: AlwaysScrollableScrollPhysics(),
-                  ),
+                  physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(10, 6, 10, 88),
                   gridDelegate:
                       const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -540,6 +538,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     final inCart = cartIds.contains(item.id);
 
     return PosMenuTile(
+      key: ValueKey(item.id),
       label: item.label,
       shortCode: item.shortCode,
       attribute: item.attribute,
@@ -563,10 +562,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     var working = item;
     // Admin opens customisable items via viewMenubyId — list payload often
     // lacks fully populated variant/addon value arrays.
-    if (item.needsCustomisation) {
+    if (item.needsCustomisation || item.hasVariants || item.hasAddons || item.customisable) {
       final enriched = await pos.enrichMenuItem(item);
       if (enriched != null) working = enriched;
-      if (working.hasVariants || working.hasAddons) {
+      if (working.hasVariants || working.hasAddons || working.customisable || item.needsCustomisation) {
         await _showItemCustomisationSheet(pos, working);
         return;
       }
@@ -904,71 +903,96 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                                       const SizedBox(width: 12),
                                       Expanded(
                                         child: Text(
-                                          variant.name.isNotEmpty
-                                              ? variant.name
-                                              : 'Variant',
-                                          style: const TextStyle(
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ),
-                                      Text(
-                                        '₹${variant.price.toStringAsFixed(2)}',
-                                        style: const TextStyle(
-                                          color: Color(0xFFF97316),
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }),
+                                           () {
+                                             final name = variant.name.trim();
+                                             if (name.isNotEmpty &&
+                                                 name.toLowerCase() != 'variant' &&
+                                                 name.toLowerCase() != 'option') {
+                                               return name;
+                                             }
+                                             final catalogName = pos.variantNameById[variant.id] ?? '';
+                                             if (catalogName.isNotEmpty) return catalogName;
+                                             return name.isNotEmpty ? name : 'Option';
+                                           }(),
+                                           style: const TextStyle(
+                                             fontSize: 14,
+                                             fontWeight: FontWeight.w600,
+                                           ),
+                                         ),
+                                       ),
+                                       Text(
+                                         '₹${variant.price.toStringAsFixed(2)}',
+                                         style: const TextStyle(
+                                           color: Color(0xFFF97316),
+                                           fontWeight: FontWeight.bold,
+                                         ),
+                                       ),
+                                     ],
+                                   ),
+                                 ),
+                               );
+                             }),
                             const SizedBox(height: 8),
                           ],
                           if (item.hasAddons) ...[
-                            _sectionTitle('Add-ons'),
-                            ...item.addons.map((addon) {
-                              final addonKey = '${addon.addonId}:${addon.id}';
-                              return CheckboxListTile(
-                                value: selectedAddons.containsKey(addonKey),
-                                activeColor: const Color(0xFFF97316),
-                                contentPadding: EdgeInsets.zero,
-                                dense: true,
-                                title: Text(
-                                  addon.valueName.isNotEmpty
-                                      ? addon.valueName
-                                      : addon.name,
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                secondary: addon.price > 0
-                                    ? Text(
-                                        '+₹${addon.price.toStringAsFixed(2)}',
-                                        style: const TextStyle(
-                                          color: Color(0xFFF97316),
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      )
-                                    : null,
-                                onChanged: (checked) {
-                                  setSheetState(() {
-                                    if (checked == true) {
-                                      selectedAddons[addonKey] = addon;
-                                    } else {
-                                      selectedAddons.remove(addonKey);
-                                    }
-                                  });
-                                },
-                              );
-                            }),
+                             ...() {
+                               final groups = <String, List<MenuAddon>>{};
+                               for (final addon in item.addons) {
+                                 final gName = addon.name.isNotEmpty ? addon.name : 'Add-ons';
+                                 (groups[gName] ??= []).add(addon);
+                               }
+                               return groups.entries.map((entry) {
+                                 return Column(
+                                   crossAxisAlignment: CrossAxisAlignment.start,
+                                   mainAxisSize: MainAxisSize.min,
+                                   children: [
+                                     _sectionTitle(entry.key),
+                                     ...entry.value.map((addon) {
+                                       final addonKey = '${addon.addonId}:${addon.id}';
+                                       final titleText = addon.valueName.isNotEmpty
+                                           ? addon.valueName
+                                           : (addon.name.isNotEmpty ? addon.name : 'Addon');
+                                       return CheckboxListTile(
+                                         value: selectedAddons.containsKey(addonKey),
+                                         activeColor: const Color(0xFFF97316),
+                                         contentPadding: EdgeInsets.zero,
+                                         dense: true,
+                                         title: Text(
+                                           titleText,
+                                           style: const TextStyle(
+                                             fontSize: 14,
+                                             fontWeight: FontWeight.w600,
+                                           ),
+                                         ),
+                                         secondary: addon.price > 0
+                                             ? Text(
+                                                 '+₹${addon.price.toStringAsFixed(2)}',
+                                                 style: const TextStyle(
+                                                   color: Color(0xFFF97316),
+                                                   fontWeight: FontWeight.bold,
+                                                 ),
+                                               )
+                                             : null,
+                                         onChanged: (checked) {
+                                           setSheetState(() {
+                                             if (checked == true) {
+                                               selectedAddons[addonKey] = addon;
+                                             } else {
+                                               selectedAddons.remove(addonKey);
+                                             }
+                                           });
+                                         },
+                                       );
+                                     }),
+                                     const SizedBox(height: 8),
+                                   ],
+                                 );
+                                });
+                              }(),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
-                    ),
                     Container(
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                       decoration: const BoxDecoration(
