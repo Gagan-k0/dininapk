@@ -146,38 +146,82 @@ class MenuVariant {
 
   factory MenuVariant.fromJson(Map<String, dynamic> json) {
     String extractName() {
-      final v = json['valuename'] ??
-          json['name'] ??
-          json['title'] ??
-          json['variant_name'] ??
-          json['value_name'] ??
-          json['displayname'] ??
-          json['label'] ??
-          json['value_title'] ??
-          json['value_label'] ??
-          json['value'];
-      if (v is Map) {
-        return (v['name'] ??
-                v['valuename'] ??
-                v['displayname'] ??
-                v['title'] ??
-                v['value_name'])
-            ?.toString() ??
-            '';
+      // 1. Direct string keys
+      for (final key in [
+        'valuename',
+        'value_name',
+        'name',
+        'displayname',
+        'displayName',
+        'title',
+        'variant_name',
+        'variantName',
+        'label',
+        'value_title',
+        'value_label',
+        'value',
+      ]) {
+        final val = json[key];
+        if (val is String &&
+            val.trim().isNotEmpty &&
+            val.trim().toLowerCase() != 'variant' &&
+            val.trim().toLowerCase() != 'option') {
+          return val.trim();
+        }
       }
-      return v?.toString().trim() ?? '';
+
+      // 2. Nested populated map keys (e.g. variant_id map, variant map, value map)
+      for (final key in [
+        'variant_id',
+        'variant',
+        'value',
+        'variant_data',
+        'variantData',
+      ]) {
+        final map = json[key];
+        if (map is Map) {
+          for (final subKey in [
+            'valuename',
+            'value_name',
+            'name',
+            'displayname',
+            'displayName',
+            'title',
+            'variant_name',
+            'label',
+          ]) {
+            final val = map[subKey];
+            if (val is String &&
+                val.trim().isNotEmpty &&
+                val.trim().toLowerCase() != 'variant' &&
+                val.trim().toLowerCase() != 'option') {
+              return val.trim();
+            }
+          }
+        }
+      }
+
+      return '';
     }
 
+    final id = json['_id']?.toString() ??
+        json['variant_id']?.toString() ??
+        json['value_id']?.toString() ??
+        json['id']?.toString() ??
+        '';
+
+    final price = double.tryParse(
+          json['price']?.toString() ??
+              json['variant_price']?.toString() ??
+              json['addon_price']?.toString() ??
+              '0',
+        ) ??
+        0.0;
+
     return MenuVariant(
-      id: json['_id']?.toString() ??
-          json['variant_id']?.toString() ??
-          json['value_id']?.toString() ??
-          json['id']?.toString() ??
-          '',
+      id: id,
       name: extractName(),
-      price: double.tryParse(
-              json['price']?.toString() ?? json['variant_price']?.toString() ?? '0') ??
-          0.0,
+      price: price,
     );
   }
 }
@@ -198,32 +242,78 @@ class MenuAddon {
   });
 
   factory MenuAddon.fromJson(Map<String, dynamic> json) {
-    final value = json['value'] is Map<String, dynamic>
+    final valueMap = json['value'] is Map<String, dynamic>
         ? json['value'] as Map<String, dynamic>
         : null;
+
+    String extractOptionName() {
+      for (final key in [
+        'valuename',
+        'value_name',
+        'option_name',
+        'optionName',
+        'displayname',
+        'displayName',
+        'name',
+        'title',
+        'label',
+      ]) {
+        final val = json[key] ?? valueMap?[key];
+        if (val is String && val.trim().isNotEmpty) {
+          return val.trim();
+        }
+      }
+      return '';
+    }
+
+    String extractGroupName() {
+      for (final key in [
+        'group_name',
+        'groupName',
+        'addon_group_name',
+        'addon_name',
+        'addonName',
+        'name',
+        'displayname',
+        'title',
+      ]) {
+        final val = json[key];
+        if (val is String && val.trim().isNotEmpty) {
+          return val.trim();
+        }
+      }
+      return '';
+    }
+
+    final price = double.tryParse(
+          json['addon_price']?.toString() ??
+              json['price']?.toString() ??
+              json['amount']?.toString() ??
+              json['addon_amount']?.toString() ??
+              valueMap?['addon_price']?.toString() ??
+              valueMap?['price']?.toString() ??
+              '0',
+        ) ??
+        0.0;
+
+    final optionName = extractOptionName();
+    final groupName = extractGroupName();
+
     return MenuAddon(
-      addonId: json['addon_id']?.toString() ?? '',
-      id:
-          json['addonvalue_id']?.toString() ??
-          json['value_id']?.toString() ??
-          value?['_id']?.toString() ??
+      addonId: json['addon_id']?.toString() ??
+          json['group_id']?.toString() ??
           json['_id']?.toString() ??
           '',
-      name: json['name']?.toString() ?? '',
-      valueName:
-          json['valuename']?.toString() ??
-          json['value_name']?.toString() ??
-          value?['valuename']?.toString() ??
-          value?['name']?.toString() ??
+      id: json['addonvalue_id']?.toString() ??
+          json['value_id']?.toString() ??
+          json['option_id']?.toString() ??
+          valueMap?['_id']?.toString() ??
+          json['_id']?.toString() ??
+          json['id']?.toString() ??
           '',
-      price:
-          double.tryParse(
-            json['addon_price']?.toString() ??
-                json['price']?.toString() ??
-                value?['price']?.toString() ??
-                '0',
-          ) ??
-          0.0,
+      name: groupName.isNotEmpty ? groupName : optionName,
+      valueName: optionName.isNotEmpty ? optionName : groupName,
+      price: price,
     );
   }
 
@@ -323,52 +413,114 @@ class MenuItem {
     }
 
     final addList = <MenuAddon>[];
-    if (json['addons'] is List) {
-      for (var a in (json['addons'] as List)) {
-        if (a is Map<String, dynamic>) {
-          addList.add(MenuAddon.fromJson(a));
-        }
-      }
-    }
-    if (json['addOns'] is List) {
-      for (var group in (json['addOns'] as List)) {
-        if (group is! Map) continue;
-        final groupMap = Map<String, dynamic>.from(group);
-        // Skip empty $push slots from by-category-itemin aggregation.
-        if (groupMap.isEmpty ||
-            (groupMap['addon_id'] == null &&
-                groupMap['_id'] == null &&
-                groupMap['value'] == null)) {
-          continue;
-        }
-        final addonId =
-            groupMap['addon_id']?.toString() ??
+    void parseAddonEntries(dynamic list) {
+      if (list is! List) return;
+      for (var entry in list) {
+        if (entry is! Map) continue;
+        final groupMap = Map<String, dynamic>.from(entry);
+        if (groupMap.isEmpty) continue;
+
+        final values = groupMap['value'] ??
+            groupMap['values'] ??
+            groupMap['addon_values'] ??
+            groupMap['addonValues'];
+        final addonId = groupMap['addon_id']?.toString() ??
             groupMap['_id']?.toString() ??
+            groupMap['id']?.toString() ??
             '';
-        final values = groupMap['value'];
+
         if (values is List) {
           for (var value in values) {
-            if (value is Map && isActive(value['status'])) {
+            if (value is Map && isActive(value['status'] ?? value['active'])) {
+              final valMap = Map<String, dynamic>.from(value);
+              final groupName = groupMap['displayname'] ??
+                  groupMap['name'] ??
+                  groupMap['title'] ??
+                  groupMap['addon_name'] ??
+                  groupMap['group_name'];
+              final optionName = valMap['valuename'] ??
+                  valMap['value_name'] ??
+                  valMap['option_name'] ??
+                  valMap['name'] ??
+                  valMap['title'] ??
+                  valMap['displayname'];
               addList.add(
                 MenuAddon.fromJson({
-                  ...Map<String, dynamic>.from(value),
+                  ...valMap,
                   'addon_id': addonId,
-                  'name': groupMap['displayname'] ?? groupMap['name'],
+                  'group_name': groupName,
+                  'valuename': optionName,
                 }),
               );
             }
           }
         } else if (groupMap['addonvalue_id'] != null ||
-            groupMap['value_id'] != null) {
-          addList.add(MenuAddon.fromJson(groupMap));
+            groupMap['value_id'] != null ||
+            groupMap['valuename'] != null ||
+            groupMap['value_name'] != null ||
+            groupMap['_id'] != null) {
+          if (isActive(groupMap['status'] ?? groupMap['active'])) {
+            addList.add(MenuAddon.fromJson(groupMap));
+          }
         }
       }
+    }
+
+    for (final key in [
+      'addons',
+      'addOns',
+      'addon',
+      'addonData',
+      'addon_data',
+      'addon_ids',
+      'addon_groups',
+      'addonGroups',
+      'customisation',
+      'customisations',
+      'customization',
+      'customizations',
+      'item_addons',
+    ]) {
+      parseAddonEntries(json[key]);
     }
 
     final customisable =
         json['customisable'] == 1 ||
         json['customisable'] == '1' ||
-        json['customisable'] == true;
+        json['customisable'] == true ||
+        json['customizable'] == 1 ||
+        json['customizable'] == '1' ||
+        json['customizable'] == true ||
+        json['is_customisable'] == 1 ||
+        json['is_customisable'] == '1' ||
+        json['is_customisable'] == true ||
+        json['is_customizable'] == 1 ||
+        json['is_customizable'] == '1' ||
+        json['is_customizable'] == true ||
+        json['is_customisation'] == 1 ||
+        json['is_customisation'] == '1' ||
+        json['is_customisation'] == true ||
+        json['is_customization'] == 1 ||
+        json['is_customization'] == '1' ||
+        json['is_customization'] == true ||
+        json['isCustomisation'] == 1 ||
+        json['isCustomisation'] == '1' ||
+        json['isCustomisation'] == true ||
+        json['isCustomization'] == 1 ||
+        json['isCustomization'] == '1' ||
+        json['isCustomization'] == true ||
+        json['is_custom'] == 1 ||
+        json['is_custom'] == '1' ||
+        json['is_custom'] == true ||
+        json['has_addons'] == 1 ||
+        json['has_addons'] == '1' ||
+        json['has_addons'] == true ||
+        json['has_addon'] == 1 ||
+        json['has_addon'] == '1' ||
+        json['has_addon'] == true ||
+        json['has_variants'] == 1 ||
+        json['has_variants'] == '1' ||
+        json['has_variants'] == true;
 
     final categoryNames = flattenCategoryNames(json['category']);
     final categoryIds = <String>{

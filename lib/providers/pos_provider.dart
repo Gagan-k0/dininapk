@@ -412,7 +412,9 @@ class PosProvider with ChangeNotifier {
       for (final v in variants)
         MenuVariant(
           id: v.id,
-          name: (v.name.isNotEmpty && v.name.trim().toLowerCase() != 'variant')
+          name: (v.name.isNotEmpty &&
+                  v.name.trim().toLowerCase() != 'variant' &&
+                  v.name.trim().toLowerCase() != 'option')
               ? v.name
               : (_variantNameById[v.id] ?? (v.name.isNotEmpty ? v.name : '')),
           price: v.price,

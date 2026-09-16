@@ -635,7 +635,7 @@ class ThermalPrinterService {
     }
 
     bytes += generator.hr();
-    bytes += generator.feed(4);
+    bytes += generator.feed(1);
     bytes += generator.cut();
 
     return bytes;
@@ -856,7 +856,7 @@ class ThermalPrinterService {
     return [
       ...fontBytes,
       ...buildCopy(),
-      ...generator.feed(4),
+      ...generator.feed(1),
       ...generator.cut(),
     ];
   }
