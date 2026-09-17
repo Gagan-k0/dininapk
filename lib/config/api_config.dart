@@ -72,6 +72,8 @@ class ApiConfig {
   static String updateCartQty = '/restaurant/cart/updatecartmenuquantity';
   /// Batch of unsent draft lines, keyed by `Idempotency-Key`.
   static String offlineSync = '/restaurant/cart/offline-sync';
+  /// Frees this table's device claim so this tablet can send (waiter-confirmed).
+  static String releaseTableClaim = '/restaurant/cart/table-claim/release';
   static String deleteCartMenu =
       '/restaurant/cart/deletemenu'; // ?cartId=&cartmenuId=&...
   /// Offline sync only — live KOT must use [setCartStatus], not createorder.

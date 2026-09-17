@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:intl/intl.dart' show DateFormat;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:dineinapk/models/menu_model.dart';
@@ -54,6 +55,7 @@ class FakeServer {
     if (fail is Future) await fail;
     if (fail is Exception) throw fail;
     if (fail is Map) return http.Response(jsonEncode(fail), 200);
+    if (fail is http.Response) return fail;
     final p = req.url.path;
     Object? data = const [];
     if (p.contains('/table/view')) data = {'table_id': req.url.pathSegments.last, 'table_number': '5'};
@@ -470,6 +472,111 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(pos.draft, isNotNull);
+    });
+
+    Map<String, dynamic> claimed(Map<String, dynamic> data) => {
+      'status': {'code': 'table_claimed_by_another_device', 'message': 'claimed'},
+      'data': {'held_by': 'dev-2', ...data},
+    };
+
+    testWidgets('a table claim says who holds it and the bar offers unlock', (tester) async {
+      final until = DateTime.now().add(const Duration(minutes: 20));
+      await tester.runAsync(() async {
+        await open();
+        server.failOn = (r) => r.url.path.endsWith('/createcart')
+            ? claimed({'held_by_kind': 'guest'})
+            : null;
+        expect(await pos.addItemToCart(item), isFalse);
+        expect(pos.errorMessage, 'A guest is ordering by QR on this table.');
+
+        server.failOn = null;
+        await pos.addItemToCart(item); // opens the cart
+        await pos.addItemToCart(item);
+        server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+            ? claimed({'held_by_kind': 'admin_panel', 'expires_at': until.toUtc().toIso8601String()})
+            : null;
+        expect(await pos.flushDraft(), isFalse);
+      });
+      final msg = 'Held by the admin panel until ${DateFormat('h:mm a').format(until)}.';
+      expect(pos.draft!.claimed, isTrue);
+      expect(pos.draft!.lastError, msg);
+      expect(pos.errorMessage, msg);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(body: Column(children: [HeldItemsBar(pos: pos)])),
+      ));
+      expect(find.text('Unlock & send'), findsOneWidget);
+      expect(find.text('Send to current order'), findsNothing);
+      expect(find.text('Discard'), findsOneWidget);
+    });
+
+    test('Unlock & send releases the claim, then sends the held items', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync') ? claimed({}) : null;
+      expect(await pos.flushDraft(), isFalse);
+      expect(pos.draft!.lastError, 'Another tablet is serving this table.');
+
+      server.failOn = null;
+      final before = server.requests.length;
+      expect(await pos.unlockTableAndResend(), isTrue);
+      final paths = server.requests.skip(before).map((r) => r.url.path).toList();
+      final release = paths.indexWhere((p) => p.endsWith('/table-claim/release'));
+      expect(release, isNonNegative);
+      expect(paths.indexWhere((p) => p.endsWith('/offline-sync')), greaterThan(release));
+      expect(jsonDecode(server.last('/table-claim/release').body)['table_id'], tableId);
+      expect(pos.draft, isNull);
+      expect(await DraftCartStore().load('r1', tableId), isNull);
+    });
+
+    test('an old server that cannot release keeps the items held', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync') ? claimed({}) : null;
+      await pos.flushDraft();
+      server.failOn = (r) => r.url.path.endsWith('/table-claim/release')
+          ? http.Response('Cannot POST', 404)
+          : null;
+      expect(await pos.unlockTableAndResend(), isFalse);
+      expect(pos.errorMessage, contains('Update the server'));
+      expect(pos.draft!.conflict, isTrue);
+    });
+
+    test('leaving the table during unlock sends nothing and keeps the items held', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync') ? claimed({}) : null;
+      await pos.flushDraft();
+      server.failOn = null;
+      final release = Completer<void>();
+      server.failOn = (r) => r.url.path.endsWith('/table-claim/release') ? release.future : null;
+      final unlocking = pos.unlockTableAndResend();
+      await Future<void>.delayed(Duration.zero);
+      expect(await pos.addItemToCart(item), isFalse, reason: 'table is held while unlocking');
+      final other = pos.loadTableAndMenu('64b000000000000000000009', 'area1');
+      release.complete();
+      await other;
+      expect(await unlocking, isFalse);
+      expect(server.count('/offline-sync'), 1, reason: 'only the refused send');
+      final held = await DraftCartStore().load('r1', tableId);
+      expect(held!.conflict, isTrue);
+      expect(held.claimed, isTrue);
+    });
+
+    test('BILL on a table with held items names the hold', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      await pos.addItemToCart(item);
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? claimed({'held_by_kind': 'tablet'})
+          : null;
+      await pos.flushDraft();
+      final bill = await pos.printBill();
+      expect(bill.error, '2 items on this table are held: Held by another tablet. Unlock or discard them first.');
     });
 
     test('Send now re-reads each table: items discarded meanwhile are not sent', () async {

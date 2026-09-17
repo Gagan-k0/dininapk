@@ -874,7 +874,7 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
       return true;
     } on ApiException catch (e) {
-      _errorMessage = e.message;
+      _errorMessage = e.isTableClaimed ? e.claimMessage : e.message;
       _sessionExpired = e.isAuth;
       _lastWriteOffline = e.isNetwork;
     } catch (e) {
@@ -1250,6 +1250,44 @@ class PosProvider with ChangeNotifier {
     return flushDraft();
   }
 
+  /// "Unlock & send" on a draft held by another device's table claim: frees
+  /// the claim (waiter confirmed that device is not in use), then sends as
+  /// [resendDraft] does.
+  Future<bool> unlockTableAndResend() async {
+    final d = _openDraft;
+    if (d == null || !d.claimed || _isBusy) return false;
+    final tid = d.tableId;
+    if (_refuseWhileSending(tid)) return false;
+    if (!ConnectivityService.instance.isOnline) {
+      _errorMessage = 'No connection. Unlock the table when back online.';
+      notifyListeners();
+      return false;
+    }
+    // Held as sending while the release runs: no taps, edits or background
+    // send on this table until the resend below takes over.
+    _sending.add(tid);
+    notifyListeners();
+    try {
+      await _apiService.releaseTableClaim(tid);
+    } on ApiException catch (e) {
+      _sessionExpired = e.isAuth;
+      _errorMessage = e.httpStatus == 404 || e.code == 404
+          ? 'This server cannot unlock tables yet. Update the server, or discard these items.'
+          : e.message;
+      notifyListeners();
+      return false;
+    } finally {
+      _sending.remove(tid);
+    }
+    if (_openDraft?.tableId != tid) {
+      // The waiter left the table meanwhile; its items stay held on the tablet.
+      _errorMessage = 'Table unlocked, but it was closed before sending. Open it and tap Unlock & send again.';
+      notifyListeners();
+      return false;
+    }
+    return resendDraft();
+  }
+
   /// Whether [tableId] has unsent items stored on this tablet.
   Future<bool> hasUnsentItems(String tableId) async {
     final rid = await _authService.getRestaurantId() ?? '';
@@ -1371,13 +1409,14 @@ class PosProvider with ChangeNotifier {
         say(_staleMessage);
         return false;
       }
-      if (e.code == 409 || e.isTableClaimed) {
+      if (e.isTableClaimed) {
+        return await _markConflict(background, d, e.claimMessage, claimed: true);
+      }
+      if (e.code == 409) {
         return await _markConflict(
             background,
           d,
-          e.isTableClaimed
-              ? 'Another tablet is serving this table.'
-              : 'These items were edited after a send that may have reached the server. Check the order before sending again.',
+          'These items were edited after a send that may have reached the server. Check the order before sending again.',
         );
       }
       final refusal = _refusalText(e);
@@ -1417,9 +1456,14 @@ class PosProvider with ChangeNotifier {
   static String _cartIdOf(List<Map<String, dynamic>> carts) =>
       carts.isEmpty ? '' : (carts.first['_id']?.toString() ?? '');
 
-  Future<bool> _markConflict(bool background, TableDraft d, String why) async {
+  Future<bool> _markConflict(
+    bool background,
+    TableDraft d,
+    String why, {
+    bool claimed = false,
+  }) async {
     if (!background) _errorMessage = why;
-    await _saveDraft(d.copyWith(conflict: true, lastError: why));
+    await _saveDraft(d.copyWith(conflict: true, claimed: claimed, lastError: why));
     return false;
   }
 
@@ -2000,6 +2044,12 @@ class PosProvider with ChangeNotifier {
     // Returned, not set on _errorMessage: the floor path restores the open
     // table afterwards and must not leave this text on its screen.
     if (_sending.contains(tid)) return _sendingMessage;
+    final held = _openDraft;
+    if (held != null && held.conflict) {
+      final n = held.itemCount;
+      return '$n item${n == 1 ? '' : 's'} on this table ${n == 1 ? 'is' : 'are'} held: '
+          '${held.lastError ?? 'check the order.'} ${held.claimed ? 'Unlock' : 'Send'} or discard ${n == 1 ? 'it' : 'them'} first.';
+    }
     if (tid.isEmpty || !await _refreshCart(tid) || cartId.isEmpty) {
       // Paper must match the server: never print from a cart the tablet only
       // remembers (opened offline, or read before other devices' changes).

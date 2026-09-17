@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart' show DateFormat;
 
 import '../config/api_config.dart';
 import 'auth_service.dart';
@@ -50,6 +51,22 @@ class ApiException implements Exception {
   /// Device id holding the claim, when the server named it.
   String? get claimHeldBy =>
       data is Map ? (data as Map)['held_by']?.toString() : null;
+
+  /// Who holds the claim and why, for the waiter. `held_by_kind` and
+  /// `expires_at` are newer server fields; older servers send neither.
+  String get claimMessage {
+    final m = data is Map ? data as Map : const {};
+    final at = DateTime.tryParse(m['expires_at']?.toString() ?? '');
+    final until = at == null || at.isBefore(DateTime.now())
+        ? ''
+        : ' until ${DateFormat('h:mm a').format(at.toLocal())}';
+    return switch (m['held_by_kind']?.toString()) {
+      'admin_panel' => 'Held by the admin panel$until.',
+      'tablet' => 'Held by another tablet$until.',
+      'guest' => 'A guest is ordering by QR on this table.',
+      _ => 'Another tablet is serving this table.',
+    };
+  }
 
   @override
   String toString() => message;
