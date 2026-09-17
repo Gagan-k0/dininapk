@@ -7,6 +7,7 @@ import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/api_service.dart';
 import '../../widgets/payment_mode_sheet.dart';
+import '../../utils/async_guard.dart';
 
 class DineInTableScreen extends StatefulWidget {
   const DineInTableScreen({super.key});
@@ -16,6 +17,12 @@ class DineInTableScreen extends StatefulWidget {
 }
 
 class _DineInTableScreenState extends State<DineInTableScreen> {
+  final _printBillGuard = AsyncGuard();
+  final _settleGuard = AsyncGuard();
+  final _qrGuard = AsyncGuard();
+  final _shiftGuard = AsyncGuard();
+  bool _openingPos = false;
+
   @override
   void initState() {
     super.initState();
@@ -800,11 +807,21 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) async {
-    await Navigator.pushNamed(
-      context,
-      '/food-categories',
-      arguments: {'tableId': table.id, 'areaId': table.areaId},
-    );
+    // Block only concurrent same-frame opens; unlock as soon as the route
+    // is pushed (pushNamed's Future completes on pop — do not hold that long).
+    if (_openingPos) return;
+    _openingPos = true;
+    late final Future<Object?> opened;
+    try {
+      opened = Navigator.pushNamed(
+        context,
+        '/food-categories',
+        arguments: {'tableId': table.id, 'areaId': table.areaId},
+      );
+    } finally {
+      _openingPos = false;
+    }
+    await opened;
     if (!context.mounted) return;
     final pos = Provider.of<PosProvider>(context, listen: false);
     if (pos.consumeFloorDirty()) {
@@ -957,22 +974,25 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
     if (confirmed != true || selectedId == null || !context.mounted) return;
 
-    final ok = await tableProv.shiftTable(
-      cartId: cartId,
-      newTableId: selectedId!,
-    );
-    if (!context.mounted) return;
+    await _shiftGuard.run(() async {
+      final ok = await tableProv.shiftTable(
+        cartId: cartId,
+        newTableId: selectedId!,
+      );
+      if (!context.mounted || ok == null) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
-              ? 'Table shifted successfully'
-              : (tableProv.errorMessage ?? 'Failed to shift table'),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Table shifted successfully'
+                : (tableProv.errorMessage ?? 'Failed to shift table'),
+          ),
+          backgroundColor:
+              ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
         ),
-        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
-      ),
-    );
+      );
+    });
   }
 
   Future<void> _acceptQrOrder(
@@ -980,35 +1000,37 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) async {
-    final cartId = _cartIdForTable(table);
-    if (cartId == null) {
+    final opened = await _qrGuard.run(() async {
+      final cartId = _cartIdForTable(table);
+      if (cartId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No active cart on this table'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+        return false;
+      }
+
+      final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'ACCEPT');
+      if (!context.mounted || ok == null) return false;
+
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No active cart on this table'),
-          backgroundColor: Color(0xFFEF4444),
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Order accepted — sent to kitchen'
+                : (tableProv.errorMessage ?? 'Failed to accept QR order'),
+          ),
+          backgroundColor:
+              ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
         ),
       );
-      return;
+      return ok;
+    });
+    if (opened == true && context.mounted) {
+      await _openPos(context, tableProv, table);
     }
-
-    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'ACCEPT');
-    if (!context.mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
-              ? 'Order accepted — sent to kitchen'
-              : (tableProv.errorMessage ?? 'Failed to accept QR order'),
-        ),
-        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
-      ),
-    );
-
-    if (!ok) return;
-
-    if (!context.mounted) return;
-    await _openPos(context, tableProv, table);
   }
 
   Future<void> _rejectQrOrder(
@@ -1052,19 +1074,22 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
     if (confirm != true || !context.mounted) return;
 
-    final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'REJECT');
-    if (!context.mounted) return;
+    await _qrGuard.run(() async {
+      final ok = await tableProv.decideQrOrder(cartId: cartId, action: 'REJECT');
+      if (!context.mounted || ok == null) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
-              ? 'Order rejected — table freed'
-              : (tableProv.errorMessage ?? 'Failed to reject QR order'),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok
+                ? 'Order rejected — table freed'
+                : (tableProv.errorMessage ?? 'Failed to reject QR order'),
+          ),
+          backgroundColor:
+              ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
         ),
-        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFEF4444),
-      ),
-    );
+      );
+    });
   }
 
   Widget _buildTableCard(
@@ -1436,19 +1461,22 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) async {
-    final pos = Provider.of<PosProvider>(context, listen: false);
-    _toast('Preparing bill…', color: const Color(0xFF64748B));
-    final err = await pos.printBillForFloorTable(
-      tableId: table.id,
-      areaId: table.areaId,
-    );
-    if (!mounted) return;
-    _toast(
-      err ?? 'Bill printed ✓',
-      error: err != null,
-      color: err == null ? const Color(0xFF16A34A) : null,
-    );
-    await tableProv.refresh();
+    await _printBillGuard.run(() async {
+      final pos = Provider.of<PosProvider>(context, listen: false);
+      _toast('Preparing bill…', color: const Color(0xFF64748B));
+      final result = await pos.printBillForFloorTable(
+        tableId: table.id,
+        areaId: table.areaId,
+      );
+      if (!mounted || result.skipped) return;
+      final err = result.error;
+      _toast(
+        err ?? 'Bill printed ✓',
+        error: err != null,
+        color: err == null ? const Color(0xFF16A34A) : null,
+      );
+      await tableProv.refresh();
+    });
   }
 
   Future<void> _settleFromFloor(
@@ -1456,31 +1484,33 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) async {
-    final cartId = table.cartId;
-    if (cartId == null || cartId.isEmpty) {
-      _toast('No cart on this table', error: true);
-      return;
-    }
-    if (!table.canRelease) {
-      _toast('Print the bill before settling', color: const Color(0xFFD97706));
-      return;
-    }
-    final mode = await showPaymentModeSheet(
-      context,
-      title: 'Settle Table ${table.tableNumber}',
-      amount: table.totalPrice,
-    );
-    if (mode == null || !context.mounted) return;
-    final ok = await tableProv.settleTable(
-      cartId: cartId,
-      paymentType: mode,
-    );
-    if (!context.mounted) return;
-    _toast(
-      ok ? 'Table settled ✓' : (tableProv.errorMessage ?? 'Settle failed'),
-      error: !ok,
-      color: ok ? const Color(0xFF16A34A) : null,
-    );
+    await _settleGuard.run(() async {
+      final cartId = table.cartId;
+      if (cartId == null || cartId.isEmpty) {
+        _toast('No cart on this table', error: true);
+        return;
+      }
+      if (!table.canRelease) {
+        _toast('Print the bill before settling', color: const Color(0xFFD97706));
+        return;
+      }
+      final mode = await showPaymentModeSheet(
+        context,
+        title: 'Settle Table ${table.tableNumber}',
+        amount: table.totalPrice,
+      );
+      if (mode == null || !context.mounted) return;
+      final ok = await tableProv.settleTable(
+        cartId: cartId,
+        paymentType: mode,
+      );
+      if (!context.mounted || ok == null) return;
+      _toast(
+        ok ? 'Table settled ✓' : (tableProv.errorMessage ?? 'Settle failed'),
+        error: !ok,
+        color: ok ? const Color(0xFF16A34A) : null,
+      );
+    });
   }
 
   // --- TAB 1: PRE-BOOKING DINE IN ---

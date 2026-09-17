@@ -673,7 +673,10 @@ class PosProvider with ChangeNotifier {
   String get _containerPriceArg =>
       containerCharge > 0 ? containerCharge.toString() : '0';
 
-  Future<bool> _write(Future<ApiEnvelope> Function() call) async {
+  /// Leading-edge mutex for cart writes. Returns `null` if a write is already
+  /// in flight (silent skip — callers must not toast that as failure).
+  Future<bool?> _write(Future<ApiEnvelope> Function() call) async {
+    if (_isBusy) return null;
     _isBusy = true;
     _errorMessage = null;
     notifyListeners();
@@ -698,7 +701,7 @@ class PosProvider with ChangeNotifier {
   /// Add a menu item (admin `addItem` → createcart). The server merges into a
   /// matching un-KOT'd line, so re-adding a KOT'd item creates a NEW line for
   /// the next KOT — exactly as admin does.
-  Future<bool> addItemToCart(
+  Future<bool?> addItemToCart(
     MenuItem item, {
     String? variantId,
     List<Map<String, dynamic>>? addons,
@@ -743,7 +746,7 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Open-price / extra add-on line (admin "+ Custom"): no menu_id, typed price.
-  Future<bool> addExtraItem({required String name, required double price}) {
+  Future<bool?> addExtraItem({required String name, required double price}) {
     final tid = resolvedTableId;
     final cid = cartId;
     if (tid.isEmpty || name.trim().isEmpty || price <= 0) {
@@ -784,7 +787,7 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Quantity change — refused on KOT'd lines (admin hard-locks them).
-  Future<bool> updateItemQuantity(String cartmenuId, int newQty) async {
+  Future<bool?> updateItemQuantity(String cartmenuId, int newQty) async {
     final line = _line(cartmenuId);
     if (line != null && isKotLine(line)) {
       _errorMessage =
@@ -809,7 +812,7 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Remove an un-KOT'd line (hard delete). For a KOT'd line use [cancelKotLine].
-  Future<bool> removeCartItem(String cartmenuId) async {
+  Future<bool?> removeCartItem(String cartmenuId) async {
     final line = _line(cartmenuId);
     if (line != null && isKotLine(line)) {
       return cancelKotLine(cartmenuId, reason: 'Removed from order');
@@ -829,7 +832,7 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Cancel a KOT'd line with a reason (row kept, excluded from pricing).
-  Future<bool> cancelKotLine(String cartmenuId, {required String reason}) {
+  Future<bool?> cancelKotLine(String cartmenuId, {required String reason}) {
     final cid = cartId;
     if (cid.isEmpty) return Future.value(false);
     return _write(
@@ -1044,8 +1047,9 @@ class PosProvider with ChangeNotifier {
   /// Send KOT via setcartstatus, then silent-print the un-printed lines
   /// (`viewmenu?status=kot`), then KOT_PRINT only after a successful print.
   /// Returns true when the KOT reached the kitchen; [printError] set if the
-  /// print failed afterwards.
-  Future<bool> sendKotOrder() async {
+  /// print failed afterwards. Returns `null` if another action is in flight.
+  Future<bool?> sendKotOrder() async {
+    if (_isBusy) return null;
     final tid = resolvedTableId;
     final cid = cartId;
     if (tid.isEmpty || cid.isEmpty) {
@@ -1158,7 +1162,7 @@ class PosProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> applyDiscount(String discountId) {
+  Future<bool?> applyDiscount(String discountId) {
     final cid = cartId;
     if (cid.isEmpty || discountId.isEmpty) return Future.value(false);
     return _write(
@@ -1166,7 +1170,7 @@ class PosProvider with ChangeNotifier {
     );
   }
 
-  Future<bool> clearDiscount() {
+  Future<bool?> clearDiscount() {
     final cid = cartId;
     if (cid.isEmpty) return Future.value(false);
     return _write(() => _apiService.removeCartDiscount(cartId: cid));
@@ -1178,10 +1182,19 @@ class PosProvider with ChangeNotifier {
 
   /// Floor print: bind table cart temporarily, print, then restore prior POS bind
   /// so an open food-categories screen is not left on the wrong table.
-  Future<String?> printBillForFloorTable({
+  ///
+  /// Owns `_isBusy` for the whole prepare+print+restore window. Returns
+  /// `(skipped: true, …)` if another action is already in flight.
+  Future<({bool skipped, String? error})> printBillForFloorTable({
     required String tableId,
     required String areaId,
   }) async {
+    if (_isBusy) return (skipped: true, error: null);
+    _isBusy = true;
+    _errorMessage = null;
+    printError = null;
+    notifyListeners();
+
     final prevTableId = _activeTableId;
     final prevAreaId = _activeAreaId;
     final prevCart = List<Map<String, dynamic>>.from(_cartData);
@@ -1190,8 +1203,8 @@ class PosProvider with ChangeNotifier {
     final prevConsolidated = _consolidatedTax;
     try {
       final prep = await prepareTableForBill(tableId: tableId, areaId: areaId);
-      if (prep != null) return prep;
-      return await printBill();
+      if (prep != null) return (skipped: false, error: prep);
+      return await printBill(holdLock: true);
     } finally {
       _activeTableId = prevTableId;
       _activeAreaId = prevAreaId;
@@ -1199,6 +1212,7 @@ class PosProvider with ChangeNotifier {
       _tableDetails = prevDetails;
       _taxConfig = prevTax;
       _consolidatedTax = prevConsolidated;
+      _isBusy = false;
       notifyListeners();
     }
   }
@@ -1233,17 +1247,33 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
-  /// Returns null on success, else the error text. Un-printed items are sent
-  /// to the kitchen first so the bill never disagrees with the kitchen.
-  Future<String?> printBill({String? paymentMode}) async {
+  ///
+  /// Returns `(skipped: true)` if busy; `(skipped: false, error: null)` on
+  /// success; `(skipped: false, error: …)` on failure.
+  ///
+  /// When [holdLock] is true the caller already owns `_isBusy` and must clear
+  /// it (used by [printBillForFloorTable]).
+  Future<({bool skipped, String? error})> printBill({
+    String? paymentMode,
+    bool holdLock = false,
+  }) async {
+    if (!holdLock) {
+      if (_isBusy) return (skipped: true, error: null);
+      _isBusy = true;
+      _errorMessage = null;
+      printError = null;
+      notifyListeners();
+    }
+
     final tid = resolvedTableId;
     final cid = cartId;
-    if (tid.isEmpty || cid.isEmpty) return 'No items on this table yet';
-
-    _isBusy = true;
-    _errorMessage = null;
-    printError = null;
-    notifyListeners();
+    if (tid.isEmpty || cid.isEmpty) {
+      if (!holdLock) {
+        _isBusy = false;
+        notifyListeners();
+      }
+      return (skipped: false, error: 'No items on this table yet');
+    }
 
     String? failure;
     try {
@@ -1287,10 +1317,12 @@ class PosProvider with ChangeNotifier {
       printError = failure;
     }
 
-    _isBusy = false;
-    notifyListeners();
+    if (!holdLock) {
+      _isBusy = false;
+      notifyListeners();
+    }
     if (failure == null || printError != null) markFloorDirty();
-    return failure;
+    return (skipped: false, error: failure);
   }
 
   /// PRINTED is what unlocks Release — retry transport failures like admin.
@@ -1311,7 +1343,9 @@ class PosProvider with ChangeNotifier {
 
   /// Admin Discard: delete the whole cart without creating an Order/ledger.
   /// Confirmed in the UI before calling. Does not settle payment.
-  Future<bool> discardCart() async {
+  /// Returns `null` if another action is in flight.
+  Future<bool?> discardCart() async {
+    if (_isBusy) return null;
     final cid = cartId;
     if (cid.isEmpty) {
       _cartData = [];
@@ -1343,7 +1377,9 @@ class PosProvider with ChangeNotifier {
 
   /// SETTLE: `setcarttobill { cartId, paymentType }` — creates the Order and
   /// deletes the cart. The caller must print the bill first.
-  Future<bool> settleAndPrintBill({String paymentType = 'CASH'}) async {
+  /// Returns `null` if another action is in flight.
+  Future<bool?> settleAndPrintBill({String paymentType = 'CASH'}) async {
+    if (_isBusy) return null;
     final cid = cartId;
     if (cid.isEmpty) {
       _errorMessage = 'No active cart for this table';
