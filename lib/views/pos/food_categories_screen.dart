@@ -29,6 +29,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       MenuPageWindow<MenuItem>(pageSize: 80);
   Timer? _searchDebounce;
   bool _railCollapsed = false;
+  bool _cartCollapsed = false;
 
   @override
   void initState() {
@@ -39,6 +40,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     });
     PosUiPrefs.loadRailCollapsed().then((v) {
       if (mounted) setState(() => _railCollapsed = v);
+    });
+    PosUiPrefs.loadCartCollapsed().then((v) {
+      if (mounted) setState(() => _cartCollapsed = v);
     });
   }
 
@@ -215,9 +219,29 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           thickness: 1,
                           color: Color(0xFFE2E8F0),
                         ),
-                        SizedBox(
-                          width: 340,
-                          child: _CartBottomSheet(pos: pos, embedded: true),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutCubic,
+                          width: _cartCollapsed ? 56 : 340,
+                          // ClipRect — not clipBehavior on Container (Flutter
+                          // requires a decoration when clipBehavior != none).
+                          child: ClipRect(
+                            child: _cartCollapsed
+                                ? _buildCollapsedCartStrip(pos)
+                                : _CartBottomSheet(
+                                    pos: pos,
+                                    embedded: true,
+                                    onToggleCollapsed: () {
+                                      setState(
+                                        () =>
+                                            _cartCollapsed = !_cartCollapsed,
+                                      );
+                                      PosUiPrefs.saveCartCollapsed(
+                                        _cartCollapsed,
+                                      );
+                                    },
+                                  ),
+                          ),
                         ),
                       ],
                     ],
@@ -595,58 +619,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _showExtraAmountDialog(PosProvider pos, MenuItem item) async {
-    final controller = TextEditingController(
-      text: item.price > 0 ? item.price.toStringAsFixed(2) : '',
-    );
     final amount = await showDialog<double>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(item.label),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(
-            labelText: 'Amount (₹)',
-            border: OutlineInputBorder(),
-          ),
-          onSubmitted: (_) {
-            final v = double.tryParse(controller.text.trim());
-            if (v != null && v > 0) Navigator.pop(ctx, v);
-          },
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final v = double.tryParse(controller.text.trim());
-              if (v == null || v <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Enter an amount greater than 0'),
-                    backgroundColor: Color(0xFFDC2626),
-                    behavior: SnackBarBehavior.floating,
-                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                );
-                return;
-              }
-              Navigator.pop(ctx, v);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF97316),
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Add'),
-          ),
-        ],
+      builder: (ctx) => _ExtraAmountDialog(
+        title: item.label,
+        initialText: item.price > 0 ? item.price.toStringAsFixed(2) : '',
       ),
     );
-    controller.dispose();
     if (amount == null || !mounted) return;
     final success = await pos.addExtraItem(name: item.label, price: amount);
     if (!mounted) return;
@@ -669,85 +648,21 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   Future<void> _showCustomExtraDialog(PosProvider pos) async {
-    final nameCtrl = TextEditingController();
-    final priceCtrl = TextEditingController();
-    final ok = await showDialog<bool>(
+    final result = await showDialog<({String name, double price})>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        // Do NOT use AlertDialog.scrollable:true — it binds SingleChildScrollView
-        // to the modal PrimaryScrollController and can assert _dependents.isEmpty
-        // on keyboard/dialog teardown. Content-only scroll with primary:false.
-        title: const Text('+ Custom add-on'),
-        content: SingleChildScrollView(
-          primary: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: priceCtrl,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(
-                  labelText: 'Amount (₹)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final name = nameCtrl.text.trim();
-              final price = double.tryParse(priceCtrl.text.trim());
-              if (name.isEmpty || price == null || price <= 0) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Enter a name and amount greater than 0'),
-                    backgroundColor: Color(0xFFDC2626),
-                    behavior: SnackBarBehavior.floating,
-                    margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                );
-                return;
-              }
-              Navigator.pop(ctx, true);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF97316),
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+      builder: (ctx) => const _CustomExtraDialog(),
     );
-    final name = nameCtrl.text.trim();
-    final price = double.tryParse(priceCtrl.text.trim()) ?? 0;
-    nameCtrl.dispose();
-    priceCtrl.dispose();
-    if (ok != true || !mounted) return;
-    final success = await pos.addExtraItem(name: name, price: price);
+    if (result == null || !mounted) return;
+    final success = await pos.addExtraItem(
+      name: result.name,
+      price: result.price,
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           success
-              ? 'Added $name ₹${price.toStringAsFixed(2)}'
+              ? 'Added ${result.name} ₹${result.price.toStringAsFixed(2)}'
               : (pos.errorMessage ?? 'Failed to add'),
         ),
         duration: const Duration(milliseconds: 800),
@@ -879,6 +794,10 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     const Divider(height: 1, color: Color(0xFFE2E8F0)),
                     Flexible(
                       child: ListView(
+                        // Modal sheet owns a PrimaryScrollController; default
+                        // primary:true asserts _dependents.isEmpty on ADD/pop
+                        // (same class of bug as Custom add-on / decbf4d).
+                        primary: false,
                         shrinkWrap: true,
                         padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                         children: [
@@ -1116,12 +1035,234 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
   }
 
+  Widget _buildCollapsedCartStrip(PosProvider pos) {
+    final count = pos.totalItemCount;
+    return Material(
+      color: Colors.white,
+      child: Column(
+        children: [
+          const SizedBox(height: 8),
+          IconButton(
+            tooltip: 'Expand cart',
+            onPressed: () {
+              setState(() => _cartCollapsed = false);
+              PosUiPrefs.saveCartCollapsed(false);
+            },
+            icon: const Icon(Icons.menu, color: Color(0xFF475569)),
+          ),
+          const SizedBox(height: 4),
+          InkWell(
+            onTap: () {
+              setState(() => _cartCollapsed = false);
+              PosUiPrefs.saveCartCollapsed(false);
+            },
+            child: Column(
+              children: [
+                Badge(
+                  isLabelVisible: count > 0,
+                  label: Text('$count'),
+                  child: const Icon(
+                    Icons.shopping_cart_outlined,
+                    color: Color(0xFFF97316),
+                    size: 22,
+                  ),
+                ),
+                if (count > 0) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '₹${pos.grandTotal.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showCartBottomSheet(BuildContext context, PosProvider pos) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
+    );
+  }
+}
+
+// Controllers live on the dialog State so dispose runs after IME/route
+// teardown — disposing immediately after await showDialog races TextField
+// unmount and asserts _dependents.isEmpty (framework.dart).
+class _ExtraAmountDialog extends StatefulWidget {
+  final String title;
+  final String initialText;
+  const _ExtraAmountDialog({required this.title, required this.initialText});
+
+  @override
+  State<_ExtraAmountDialog> createState() => _ExtraAmountDialogState();
+}
+
+class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialText);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final v = double.tryParse(_controller.text.trim());
+    if (v == null || v <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter an amount greater than 0'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+      );
+      return;
+    }
+    Navigator.pop(context, v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SingleChildScrollView(
+        primary: false,
+        child: TextField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            labelText: 'Amount (₹)',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => _submit(),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFF97316),
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Add'),
+        ),
+      ],
+    );
+  }
+}
+
+class _CustomExtraDialog extends StatefulWidget {
+  const _CustomExtraDialog();
+
+  @override
+  State<_CustomExtraDialog> createState() => _CustomExtraDialogState();
+}
+
+class _CustomExtraDialogState extends State<_CustomExtraDialog> {
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _priceCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController();
+    _priceCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _priceCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _nameCtrl.text.trim();
+    final price = double.tryParse(_priceCtrl.text.trim());
+    if (name.isEmpty || price == null || price <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a name and amount greater than 0'),
+          backgroundColor: Color(0xFFDC2626),
+          behavior: SnackBarBehavior.floating,
+          margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+      );
+      return;
+    }
+    Navigator.pop(context, (name: name, price: price));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('+ Custom add-on'),
+      content: SingleChildScrollView(
+        primary: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _nameCtrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _priceCtrl,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Amount (₹)',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _submit,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFF97316),
+            foregroundColor: Colors.white,
+          ),
+          child: const Text('Add'),
+        ),
+      ],
     );
   }
 }
@@ -1133,7 +1274,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
 class _CartBottomSheet extends StatelessWidget {
   final PosProvider pos;
   final bool embedded;
-  const _CartBottomSheet({required this.pos, this.embedded = false});
+  final VoidCallback? onToggleCollapsed;
+  const _CartBottomSheet({
+    required this.pos,
+    this.embedded = false,
+    this.onToggleCollapsed,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1144,70 +1290,157 @@ class _CartBottomSheet extends StatelessWidget {
           final items = pos.cartMenuItems;
           final cartObj = pos.cartData.isNotEmpty ? pos.cartData[0] : null;
 
-          // Scrollable body: when keyboard shrinks height, totals/actions scroll
-          // instead of BOTTOM OVERFLOW. When tall enough, footer stays pinned down.
-          final body = items.isEmpty
-              ? const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text(
-                      'Cart is empty — tap menu items to add',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Color(0xFF94A3B8)),
+          final header = Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.shopping_cart,
+                  color: Color(0xFFF97316),
+                  size: 22,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Cart (${pos.totalItemCount})',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF1E293B),
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFECE5),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    'T-${pos.tableDetails?['table_number'] ?? ''}',
+                    style: const TextStyle(
+                      color: Color(0xFFF97316),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
                     ),
                   ),
-                )
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    return SingleChildScrollView(
-                      child: ConstrainedBox(
-                        constraints: BoxConstraints(
-                          minHeight: constraints.maxHeight,
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                ),
+                if (onToggleCollapsed != null)
+                  IconButton(
+                    tooltip: 'Collapse cart',
+                    onPressed: onToggleCollapsed,
+                    icon: const Icon(
+                      Icons.menu_open,
+                      color: Color(0xFF475569),
+                    ),
+                  ),
+              ],
+            ),
+          );
+
+          Widget itemList() {
+            if (items.isEmpty) {
+              return const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'Cart is empty — tap menu items to add',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Color(0xFF94A3B8)),
+                  ),
+                ),
+              );
+            }
+            return ListView.separated(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              itemCount: items.length,
+              separatorBuilder: (_, _) => const Divider(
+                height: 1,
+                color: Color(0xFFF1F5F9),
+              ),
+              itemBuilder: (context, i) => Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 4,
+                ),
+                child: _buildCartItem(context, pos, items[i], cartObj),
+              ),
+            );
+          }
+
+          // Phone sheet: scroll items+footer together (keyboard safety).
+          // Embedded tablet: pin totals/actions; only lines scroll.
+          final Widget body;
+          if (embedded) {
+            body = Column(
+              children: [
+                Expanded(child: itemList()),
+                if (items.isNotEmpty) ...[
+                  const Divider(height: 1, color: Color(0xFFE2E8F0)),
+                  _buildTotals(pos, cartObj),
+                  _buildActionButtons(context, pos),
+                ],
+              ],
+            );
+          } else if (items.isEmpty) {
+            body = itemList();
+          } else {
+            body = LayoutBuilder(
+              builder: (context, constraints) {
+                return SingleChildScrollView(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: constraints.maxHeight,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                for (var i = 0; i < items.length; i++) ...[
-                                  if (i > 0)
-                                    const Divider(
-                                      height: 1,
-                                      color: Color(0xFFF1F5F9),
-                                    ),
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 4,
-                                    ),
-                                    child: _buildCartItem(
-                                      context,
-                                      pos,
-                                      items[i],
-                                      cartObj,
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
+                            for (var i = 0; i < items.length; i++) ...[
+                              if (i > 0)
                                 const Divider(
                                   height: 1,
-                                  color: Color(0xFFE2E8F0),
+                                  color: Color(0xFFF1F5F9),
                                 ),
-                                _buildTotals(pos, cartObj),
-                                _buildActionButtons(context, pos),
-                              ],
-                            ),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 4,
+                                ),
+                                child: _buildCartItem(
+                                  context,
+                                  pos,
+                                  items[i],
+                                  cartObj,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
-                      ),
-                    );
-                  },
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Divider(
+                              height: 1,
+                              color: Color(0xFFE2E8F0),
+                            ),
+                            _buildTotals(pos, cartObj),
+                            _buildActionButtons(context, pos),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
                 );
+              },
+            );
+          }
 
           return Container(
             constraints: embedded
@@ -1234,50 +1467,7 @@ class _CartBottomSheet extends StatelessWidget {
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.shopping_cart,
-                            color: Color(0xFFF97316),
-                            size: 22,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'Cart (${pos.totalItemCount})',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF1E293B),
-                            ),
-                          ),
-                        ],
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFECE5),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          'T-${pos.tableDetails?['table_number'] ?? ''}',
-                          style: const TextStyle(
-                            color: Color(0xFFF97316),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                header,
                 const Divider(height: 1, color: Color(0xFFE2E8F0)),
                 if (embedded)
                   Expanded(child: body)
