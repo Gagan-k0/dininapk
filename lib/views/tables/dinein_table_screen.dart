@@ -7,6 +7,7 @@ import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/api_service.dart';
 import '../../widgets/payment_mode_sheet.dart';
+import '../../widgets/sync_status_chip.dart';
 import '../../utils/async_guard.dart';
 
 class DineInTableScreen extends StatefulWidget {
@@ -28,6 +29,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<TableProvider>(context, listen: false).ensureLoaded();
+      // Also recounts unsent items for the Sync chip after login.
+      Provider.of<PosProvider>(context, listen: false).flushAllDrafts();
     });
   }
 
@@ -63,6 +66,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ],
         ),
         actions: [
+          const SyncStatusChip(),
           IconButton(
             icon: const Icon(Icons.refresh, color: Color(0xFF64748B)),
             onPressed: () => tableProv.loadDashboardData(),
@@ -811,6 +815,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     // is pushed (pushNamed's Future completes on pop — do not hold that long).
     if (_openingPos) return;
     _openingPos = true;
+    // Keeps the table number known even if the table is opened offline.
+    Provider.of<PosProvider>(context, listen: false).setActiveTable(table);
     late final Future<Object?> opened;
     try {
       opened = Navigator.pushNamed(
@@ -824,6 +830,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     await opened;
     if (!context.mounted) return;
     final pos = Provider.of<PosProvider>(context, listen: false);
+    // Items left unsent on that table go now, without holding up the floor.
+    pos.flushAllDrafts().then((sent) {
+      if (sent > 0 && mounted) tableProv.refresh();
+    });
     if (pos.consumeFloorDirty()) {
       await tableProv.refresh();
     } else {
@@ -1494,6 +1504,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
         _toast('Print the bill before settling', color: const Color(0xFFD97706));
         return;
       }
+      // The floor card only knows the server; unsent items live on this tablet.
+      final pos = Provider.of<PosProvider>(context, listen: false);
+      if (await pos.hasUnsentItems(table.id)) {
+        _toast(PosProvider.unsentItemsMessage, error: true);
+        return;
+      }
+      if (!context.mounted) return;
       final mode = await showPaymentModeSheet(
         context,
         title: 'Settle Table ${table.tableNumber}',

@@ -6,6 +6,10 @@ import 'package:dineinapk/services/thermal_printer_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // ReceiptPrefs keeps the loaded printer config in a static field, so without
+  // this every test after the first reads the FIRST test's printers.
+  setUp(ReceiptPrefs.invalidateCache);
+
   group('KOT / Bill printer assignment', () {
     test('an existing single-printer setup keeps printing KOTs on that printer', () async {
       SharedPreferences.setMockInitialValues({

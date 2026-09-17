@@ -12,6 +12,8 @@ import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
+import '../../widgets/held_items_bar.dart';
+import '../../widgets/sync_status_chip.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
   const FoodCategoriesScreen({super.key});
@@ -158,6 +160,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 if (pos.isBusy)
                   const LinearProgressIndicator(minHeight: 2, color: Color(0xFFF97316)),
                 if (pos.cartError != null) _buildCartErrorBar(pos),
+                HeldItemsBar(pos: pos),
                 Expanded(
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -338,7 +341,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     ),
                     onPressed: () {
                       final tid = pos.activeTableId ?? '';
-                      if (tid.isNotEmpty) pos.loadTableAndMenu(tid, pos.activeAreaId ?? '');
+                      // forceMenuRefresh: RETRY must re-download the catalog,
+                      // not re-serve the cached copy that just failed the user.
+                      if (tid.isNotEmpty) {
+                        pos.loadTableAndMenu(tid, pos.activeAreaId ?? '',
+                            forceMenuRefresh: true);
+                      }
                     },
                   ),
                   const SizedBox(width: 12),
@@ -457,12 +465,26 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
         ],
       ),
       actions: [
+        SyncStatusChip(
+          menuUpdatedAt: pos.menuCachedAt,
+          onSyncMenu: (pos.activeTableId ?? '').isEmpty
+              ? null
+              : () => pos.loadTableAndMenu(
+                  pos.activeTableId!,
+                  pos.activeAreaId ?? '',
+                  forceMenuRefresh: true,
+                ),
+        ),
         IconButton(
           icon: const Icon(Icons.refresh, color: Color(0xFF64748B), size: 22),
           onPressed: () {
             final tid = pos.activeTableId ?? '';
             final aid = pos.activeAreaId ?? '';
-            if (tid.isNotEmpty) pos.loadTableAndMenu(tid, aid);
+            // The Refresh button is the waiter's "the menu changed" control, so
+            // it always re-downloads rather than serving the cached snapshot.
+            if (tid.isNotEmpty) {
+              pos.loadTableAndMenu(tid, aid, forceMenuRefresh: true);
+            }
           },
           tooltip: 'Refresh',
         ),
@@ -1643,6 +1665,23 @@ class _CartBottomSheet extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 10, color: Color(0xFF64748B), fontStyle: FontStyle.italic),
+                  ),
+                if (item['is_draft'] == true)
+                  Container(
+                    margin: const EdgeInsets.only(top: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE0F2FE),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'NOT SENT',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Color(0xFF0369A1),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
                 if (isKot)
                   Container(

@@ -6,6 +6,9 @@ import '../models/cart_model.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bill_builder.dart';
+import '../services/connectivity_service.dart';
+import '../services/device_id_service.dart';
+import '../services/draft_cart_store.dart';
 import '../services/menu_cache_service.dart';
 import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
@@ -34,6 +37,7 @@ class PosProvider with ChangeNotifier {
   final MenuCacheService _menuCache;
   final AuthService _authService;
   final ReceiptCustomizationService _receiptCustomization;
+  final DraftCartStore _drafts;
 
   PosProvider({
     ApiService? api,
@@ -41,7 +45,9 @@ class PosProvider with ChangeNotifier {
     MenuCacheService? menuCache,
     AuthService? auth,
     ReceiptCustomizationService? receiptCustomization,
-  })  : _apiService = api ?? ApiService(),
+    DraftCartStore? drafts,
+  })  : _drafts = drafts ?? DraftCartStore(),
+        _apiService = api ?? ApiService(),
         _printer = printer ?? ThermalPrinterService(),
         _menuCache = menuCache ?? MenuCacheService(),
         _authService = auth ?? AuthService(),
@@ -76,6 +82,19 @@ class PosProvider with ChangeNotifier {
   bool _floorDirty = false;
   String? _cartError;
 
+  // ── Draft (items added on this tablet, not sent yet) ──
+  TableDraft? _draft;
+  String _restaurantId = '';
+  /// Tables with a send in flight. Per table, so a background send for one
+  /// table never blocks the waiter on another.
+  final Set<String> _sending = {};
+  bool get _openTableSending => _sending.contains(resolvedTableId);
+  bool _sendingAll = false;
+  /// A send in this loop was refused as signed out (background calls never
+  /// log the waiter out, so the loop must stop by itself).
+  bool _sendAuthFailed = false;
+  bool _sendAllAgain = false;
+
   // ── Tax ──
   List<Map<String, dynamic>> _taxConfig = [];
   Map<String, dynamic>? _consolidatedTax;
@@ -107,6 +126,14 @@ class PosProvider with ChangeNotifier {
   bool get sessionExpired => _sessionExpired;
   String? get errorMessage => _errorMessage;
   String? get cartError => _cartError;
+
+  /// Unsent items for the open table, or null.
+  TableDraft? get draft => _openDraft;
+
+  /// The in-memory draft only while its own table is the one in view; a floor
+  /// bill for another table must never see it.
+  TableDraft? get _openDraft =>
+      _draft != null && _draft!.tableId == resolvedTableId ? _draft : null;
   List<Map<String, dynamic>> get cartData => _cartData;
   Map<String, dynamic>? get cart => _cartData.isEmpty ? null : _cartData.first;
   Map<String, dynamic>? get consolidatedTax => _consolidatedTax;
@@ -204,7 +231,13 @@ class PosProvider with ChangeNotifier {
   }
 
   // ── Cart computed values (cancelled rows excluded everywhere) ──
-  List<Map<String, dynamic>> get cartMenuItems {
+  /// Server lines, then this tablet's unsent draft lines (`is_draft: true`).
+  List<Map<String, dynamic>> get cartMenuItems => [
+    ..._serverLines,
+    ...?_openDraft?.allLines.map((l) => l.toCartLineMap()),
+  ];
+
+  List<Map<String, dynamic>> get _serverLines {
     final items = cart?['cartMenuData'];
     if (items is! List) return const [];
     return items
@@ -226,16 +259,36 @@ class PosProvider with ChangeNotifier {
   bool get hasKotItems =>
       cartMenuItems.any((i) => i['kot_status'] == 1 || i['kot_status'] == '1');
 
-  double get subTotal => _num(cart?['food_subtotal']) > 0
+  double get subTotal => _serverSubTotal + (_openDraft?.subtotal ?? 0);
+
+  double get _serverSubTotal => _num(cart?['food_subtotal']) > 0
       ? _num(cart?['food_subtotal'])
       : _num(cart?['menu_total']);
-  double get taxAmount => _num(cart?['tax_price']);
+  double get taxAmount => _num(cart?['tax_price']) + _draftTax;
+
+  /// Estimate for unsent lines until the server prices them at KOT: added
+  /// percentage taxes only. BACKWARD taxes are already inside the price;
+  /// compounding (CALC_ON_TAX) and area surcharges are left to the server.
+  double get _draftTax {
+    final sub = _openDraft?.subtotal ?? 0;
+    if (sub <= 0) return 0;
+    var pct = 0.0;
+    for (final t in _taxConfig) {
+      final taxType = t['tax_type']?.toString().toUpperCase() ?? '';
+      if (taxType == 'CALC_ON_TAX') return 0;
+      if (taxType == 'BACKWARD') continue;
+      if (t['value_type']?.toString().toUpperCase() != 'PERCENTAGE') continue;
+      pct += _num(t['value_amount']);
+    }
+    return sub * pct / 100;
+  }
   double get discountAmount => _num(cart?['discount_price']);
   String? get discountName => cart?['discount_name']?.toString();
   double get containerCharge => _num(cart?['container_price']);
   double get areaCharge => _num(cart?['area_charge']);
   double get roundOff => _num(cart?['round_off']);
-  double get grandTotal => _num(cart?['total_price']);
+  double get grandTotal =>
+      _num(cart?['total_price']) + (_openDraft?.subtotal ?? 0) + _draftTax;
 
   int get totalItemCount => cartMenuItems.fold(
     0,
@@ -248,6 +301,7 @@ class PosProvider with ChangeNotifier {
   /// Phase 1 safety rule: Release only after the bill status is durable,
   /// unless device pref `kot_enable_release_table` matches admin exception.
   bool get canRelease {
+    if (_cartStale) return false;
     if (cartId.isEmpty || cartMenuItems.isEmpty) return false;
     if (hasUnsentKotItems || hasUnprintedItems) return false;
     final s = tableStatus;
@@ -258,6 +312,7 @@ class PosProvider with ChangeNotifier {
   }
 
   String get releaseBlockedReason {
+    if (_cartStale) return _staleMessage;
     if (cartId.isEmpty || cartMenuItems.isEmpty) {
       return 'No items on this table';
     }
@@ -279,6 +334,7 @@ class PosProvider with ChangeNotifier {
     _activeTableId = table.id;
     _activeAreaId = table.areaId;
     _cartData = [];
+    _draft = null;
     notifyListeners();
   }
 
@@ -338,7 +394,8 @@ class PosProvider with ChangeNotifier {
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
   /// getmenu returns `{ variant_id, price }` without names — join `_variantNameById`.
   Future<MenuItem?> enrichMenuItem(MenuItem item) async {
-    if (item.id.isEmpty) return null;
+    // Offline the list copy is all there is; don't wait out a timeout.
+    if (item.id.isEmpty || !ConnectivityService.instance.isOnline) return null;
     try {
       await _ensureVariantCatalog();
       final raw = await _apiService.getMenuById(item.id);
@@ -387,16 +444,7 @@ class PosProvider with ChangeNotifier {
     if (_variantNameById.isNotEmpty) return;
     try {
       final rows = await _apiService.getAllVariants();
-      final map = <String, String>{};
-      for (final row in rows) {
-        final id = (row['_id'] ?? row['id'] ?? row['variant_id'] ?? row['value_id'])?.toString() ?? '';
-        if (id.isEmpty) continue;
-        final name = (row['name'] ?? row['valuename'] ?? row['displayname'] ?? row['title'] ?? row['variant_name'] ?? row['value_name'])
-                ?.toString()
-                .trim() ??
-            '';
-        if (name.isNotEmpty) map[id] = name;
-      }
+      final map = variantNamesFrom(rows);
       _variantNameById = map;
       if (_allItems.isNotEmpty && map.isNotEmpty) {
         _setSortedMenuItems(_allItems);
@@ -464,67 +512,93 @@ class PosProvider with ChangeNotifier {
   ///
   /// Categories/menu paint from disk cache first (if any), then refresh from
   /// the network like admin's warm menu cache.
-  Future<void> loadTableAndMenu(String tableId, String areaId) async {
+  Future<void> loadTableAndMenu(
+    String tableId,
+    String areaId, {
+    bool forceMenuRefresh = false,
+  }) async {
     _isLoading = true;
     _errorMessage = null;
     _cartError = null;
     _sessionExpired = false;
     _activeTableId = tableId;
     _activeAreaId = areaId;
+    // Nothing from the previously open table may survive into this one.
+    if (_activeTable?.id != tableId) _activeTable = null;
+    _tableDetails = null;
+    _cartData = [];
+    _draft = null;
+    _cartStale = false;
     notifyListeners();
 
+    CachedMenuSnapshot? cached;
     try {
       _receiptPrefs = await ReceiptPrefs.load();
       final restaurantId = await _authService.getRestaurantId() ?? '';
-      final cached = await _menuCache.load(restaurantId);
-      if (cached != null &&
-          (cached.categories.isNotEmpty || cached.items.isNotEmpty)) {
+      _restaurantId = restaurantId;
+      _draft = await _drafts.load(restaurantId, tableId);
+      cached = await _menuCache.load(restaurantId);
+      if (!ConnectivityService.instance.isOnline &&
+          await _openOffline(tableId, cached)) {
+        _isLoading = false;
+        notifyListeners();
+        return;
+      }
+      if (cached != null && cached.hasCatalog) {
         _categories = cached.categories;
         _setSortedMenuItems(cached.items);
+        _menuCachedAt = cached.savedAt;
         // Let the grid paint while table + network refresh continue.
         notifyListeners();
       }
 
-      final results = await Future.wait<Object?>([
-        _apiService.viewTableById(tableId),
-        _apiService.getActiveCategoryMaps(),
-        _apiService.getDineinMenuMaps(),
-        _bestEffortTax(),
-        _bestEffortVariantCatalog(),
-        _bestEffortKitchenDepartments(),
-      ]);
-      _tableDetails = results[0] as Map<String, dynamic>?;
-      final catMaps = results[1] as List<Map<String, dynamic>>;
-      final itemMaps = results[2] as List<Map<String, dynamic>>;
-      _categories = catMaps.map(MenuCategory.fromJson).toList();
-      _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
-      _taxConfig = results[3] as List<Map<String, dynamic>>;
-      _buildConsolidatedTax();
-      final variantMaps = results[4] as List<Map<String, dynamic>>;
-      if (variantMaps.isNotEmpty) {
-        final map = <String, String>{};
-        for (final row in variantMaps) {
-          final id = row['_id']?.toString() ?? '';
-          if (id.isEmpty) continue;
-          final name =
-              (row['name'] ?? row['valuename'] ?? row['displayname'])
-                      ?.toString()
-                      .trim() ??
-                  '';
-          if (name.isNotEmpty) map[id] = name;
-        }
-        if (map.isNotEmpty) _variantNameById = map;
-      }
-      final deptMaps = results[5] as List<Map<String, dynamic>>;
-      if (deptMaps.isNotEmpty) {
-        populateKitchenDepartments(deptMaps);
-      }
+      // A fresh snapshot makes 5 of the 7 opening requests pointless — the
+      // catalog barely changes during a shift, and re-downloading the whole
+      // dine-in menu per table open is what made opening a table feel slow.
+      // "Sync menu" (forceMenuRefresh) is the waiter's override.
+      if (cached != null && cached.isSkippable && cached.isFresh && !forceMenuRefresh) {
+        _applyCatalogExtras(
+          taxRows: cached.taxRows,
+          variantMaps: cached.variants,
+          deptMaps: cached.departments,
+        );
+        // Items were sorted before the variant names existed; redo it now or
+        // every variant item keeps a blank label for the whole session.
+        _setSortedMenuItems(_allItems);
+        _tableDetails = await _apiService.viewTableById(tableId);
+      } else {
+        final results = await Future.wait<Object?>([
+          _apiService.viewTableById(tableId),
+          _apiService.getActiveCategoryMaps(),
+          _apiService.getDineinMenuMaps(),
+          _bestEffortTax(),
+          _bestEffortVariantCatalog(),
+          _bestEffortKitchenDepartments(),
+        ]);
+        _tableDetails = results[0] as Map<String, dynamic>?;
+        final catMaps = results[1] as List<Map<String, dynamic>>;
+        final itemMaps = results[2] as List<Map<String, dynamic>>;
+        _categories = catMaps.map(MenuCategory.fromJson).toList();
+        _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
+        final taxRows = results[3] as List<Map<String, dynamic>>;
+        final variantMaps = results[4] as List<Map<String, dynamic>>;
+        final deptMaps = results[5] as List<Map<String, dynamic>>;
+        _applyCatalogExtras(
+          taxRows: taxRows,
+          variantMaps: variantMaps,
+          deptMaps: deptMaps,
+        );
 
-      await _menuCache.save(
-        restaurantId: restaurantId,
-        categories: catMaps,
-        items: itemMaps,
-      );
+        await _menuCache.save(
+          restaurantId: restaurantId,
+          categories: catMaps,
+          items: itemMaps,
+          taxRows: taxRows,
+          variants: variantMaps,
+          departments: deptMaps,
+        );
+        _menuCachedAt = DateTime.now();
+      }
 
       if (_tableDetails == null ||
           (_tableDetails!['table_id'] ?? _tableDetails!['_id']) == null) {
@@ -539,7 +613,9 @@ class PosProvider with ChangeNotifier {
       }
     } on ApiException catch (e) {
       debugPrint('[Fatfox POS] Load refused: $e');
-      _errorMessage = e.message;
+      if (!(e.isNetwork && await _openOffline(tableId, cached))) {
+        _errorMessage = e.message;
+      }
       _sessionExpired = e.isAuth;
     } catch (e) {
       debugPrint('[Fatfox POS] Load error: $e');
@@ -548,6 +624,80 @@ class PosProvider with ChangeNotifier {
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  /// No server: open the table from the cached menu and the last cart this
+  /// tablet saw, so the waiter can keep adding items. False when there is no
+  /// cached menu to show.
+  Future<bool> _openOffline(String tableId, CachedMenuSnapshot? cached) async {
+    if (cached == null || !cached.hasCatalog) return false;
+    // A cold start has nothing in memory yet.
+    _categories = cached.categories;
+    _allItems = cached.items;
+    _menuCachedAt = cached.savedAt;
+    _applyCatalogExtras(
+      taxRows: cached.taxRows,
+      variantMaps: cached.variants,
+      deptMaps: cached.departments,
+    );
+    _setSortedMenuItems(_allItems);
+    final snap = await _drafts.loadSnapshot(_restaurantId, tableId);
+    _tableDetails = snap?.table ?? {'table_id': tableId};
+    _cartData = snap?.cart ?? [];
+    _cartError = null;
+    // A copy from the tablet: KOT and bill must re-read the server first.
+    _cartStale = true;
+    return true;
+  }
+
+  Future<void> _saveSnapshot() => _drafts.saveSnapshot(
+    _restaurantId,
+    resolvedTableId,
+    table: _tableDetails,
+    cart: _cartData,
+  );
+
+  /// When the catalog was last downloaded — drives "Menu updated Xh ago".
+  DateTime? _menuCachedAt;
+  DateTime? get menuCachedAt => _menuCachedAt;
+
+  /// Tax rows, variant names and kitchen departments — applied the same way
+  /// whether they came from the network or the disk snapshot.
+  void _applyCatalogExtras({
+    required List<Map<String, dynamic>> taxRows,
+    required List<Map<String, dynamic>> variantMaps,
+    required List<Map<String, dynamic>> deptMaps,
+  }) {
+    _taxConfig = taxRows;
+    _buildConsolidatedTax();
+    final map = variantNamesFrom(variantMaps);
+    if (map.isNotEmpty) _variantNameById = map;
+    if (deptMaps.isNotEmpty) {
+      populateKitchenDepartments(deptMaps);
+    }
+  }
+
+  /// id → display name over every field spelling the API has used for variants.
+  static Map<String, String> variantNamesFrom(List<Map<String, dynamic>> rows) {
+    final map = <String, String>{};
+    for (final row in rows) {
+      final id =
+          (row['_id'] ?? row['id'] ?? row['variant_id'] ?? row['value_id'])
+                  ?.toString() ??
+              '';
+      if (id.isEmpty) continue;
+      final name = (row['name'] ??
+                  row['valuename'] ??
+                  row['displayname'] ??
+                  row['title'] ??
+                  row['variant_name'] ??
+                  row['value_name'])
+              ?.toString()
+              .trim() ??
+          '';
+      if (name.isNotEmpty) map[id] = name;
+    }
+    return map;
   }
 
   Future<List<Map<String, dynamic>>> _bestEffortTax() async {
@@ -626,17 +776,44 @@ class PosProvider with ChangeNotifier {
     try {
       _cartData = await _apiService.getCartItemsByTableId(tid);
       _cartError = null;
+      _cartStale = false;
+      await _saveSnapshot();
       debugPrint(
         '[Fatfox POS] Cart: ${cartMenuItems.length} lines, total ₹$grandTotal, '
         'status $tableStatus',
       );
     } on ApiException catch (e) {
-      _cartError = e.message;
       _sessionExpired = e.isAuth;
+      final snap = e.isNetwork && _cartData.isEmpty
+          ? await _drafts.loadSnapshot(_restaurantId, tid)
+          : null;
+      if (snap != null) {
+        _cartData = snap.cart;
+        _cartStale = true;
+      } else {
+        _cartError = e.message;
+      }
       debugPrint('[Fatfox POS] Cart reload refused: $e');
     } catch (e) {
       _cartError = friendlyError(e);
       debugPrint('[Fatfox POS] Cart reload error: $e');
+    }
+  }
+
+  /// Re-reads [tid]'s cart and fails loudly (unlike [_reloadCartData]).
+  Future<bool> _refreshCart(String tid) async {
+    try {
+      final carts = await _apiService.getCartItemsByTableId(tid);
+      if (!_isOpen(tid)) return false;
+      _cartData = carts;
+      _cartError = null;
+      _cartStale = false;
+      await _saveSnapshot();
+      return true;
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+      return false;
     }
   }
 
@@ -659,12 +836,14 @@ class PosProvider with ChangeNotifier {
     if (looksLikeSnapshot) {
       _cartData = list;
       _cartError = null;
+      await _saveSnapshot();
       return;
     }
     if (env.data == null || list.isEmpty) {
       // Last-line deletemenu returns [] — cart is already gone server-side.
       _cartData = [];
       _cartError = null;
+      await _saveSnapshot();
       return;
     }
     await _reloadCartData();
@@ -673,12 +852,16 @@ class PosProvider with ChangeNotifier {
   String get _containerPriceArg =>
       containerCharge > 0 ? containerCharge.toString() : '0';
 
+  /// True when the last [_write] never reached the server.
+  bool _lastWriteOffline = false;
+
   /// Leading-edge mutex for cart writes. Returns `null` if a write is already
   /// in flight (silent skip — callers must not toast that as failure).
   Future<bool?> _write(Future<ApiEnvelope> Function() call) async {
     if (_isBusy) return null;
     _isBusy = true;
     _errorMessage = null;
+    _lastWriteOffline = false;
     notifyListeners();
     try {
       final env = await call();
@@ -690,12 +873,70 @@ class PosProvider with ChangeNotifier {
     } on ApiException catch (e) {
       _errorMessage = e.message;
       _sessionExpired = e.isAuth;
+      _lastWriteOffline = e.isNetwork;
     } catch (e) {
       _errorMessage = friendlyError(e);
     }
     _isBusy = false;
     notifyListeners();
     return false;
+  }
+
+  /// Taps land on the tablet and are sent in one request at KOT. The one
+  /// exception is the first item on a table with no cart while online: the
+  /// server only accepts a batch into an existing cart, so that item opens it.
+  Future<bool?> _addLine(
+    DraftLine line,
+    Future<ApiEnvelope> Function() openCart,
+  ) async {
+    if (_openDraft == null &&
+        cartId.isEmpty &&
+        ConnectivityService.instance.isOnline) {
+      final wrote = await _write(openCart);
+      if (wrote == null) return null; // another action in flight
+      if (wrote) return true;
+      if (!_lastWriteOffline) return false;
+      // No answer: the cart may exist now. Keep the item, but locked, so KOT
+      // checks the live cart before sending it again.
+      return _addToDraft(line, maybeSent: true);
+    }
+    return _addToDraft(line);
+  }
+
+  bool _isOpen(String tableId) => resolvedTableId == tableId;
+
+  Future<bool> _addToDraft(DraftLine line, {bool maybeSent = false}) async {
+    final tid = resolvedTableId;
+    if (tid.isEmpty || _restaurantId.isEmpty) {
+      _errorMessage = 'Table not loaded';
+      notifyListeners();
+      return false;
+    }
+    if (_sending.contains(tid)) {
+      _errorMessage = _sendingMessage;
+      notifyListeners();
+      return false;
+    }
+    final current = _draft?.tableId == tid ? _draft : null;
+    final base = current ?? TableDraft.start(_restaurantId, tid, cartId);
+    _draft = maybeSent && base.isEmpty
+        ? base.copyWith(creatingLine: line)
+        : base.add(line);
+    _errorMessage = null;
+    notifyListeners();
+    await _drafts.save(_draft!);
+    return true;
+  }
+
+  static const String _sendingMessage =
+      'Sending to the server — try again in a moment.';
+
+  static String _newLineId() => DeviceIdService.randomHex().substring(0, 12);
+
+  /// Persists [d]; it becomes the painted draft only if its table is still open.
+  Future<void> _saveDraft(TableDraft d) async {
+    if (_isOpen(d.tableId)) _draft = d.isEmpty ? null : d;
+    await _drafts.save(d);
   }
 
   /// Add a menu item (admin `addItem` → createcart). The server merges into a
@@ -725,8 +966,20 @@ class PosProvider with ChangeNotifier {
       (sum, a) => sum + _num(a['addon_price']),
     );
     final menuPrice = (selectedVariant?.price ?? item.price) + addonTotal;
+    final line = DraftLine(
+      lineId: _newLineId(),
+      menuId: item.id,
+      name: item.displayName ?? item.name,
+      variantId: variantId,
+      variantName: selectedVariant?.name,
+      addons: addons ?? const [],
+      quantity: quantity,
+      unitPrice: menuPrice,
+      description: description ?? '',
+    );
 
-    return _write(
+    return _addLine(
+      line,
       () => _apiService.createCartItem(
         tableId: tid,
         cartId: cid,
@@ -756,7 +1009,16 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
       return Future.value(false);
     }
-    return _write(
+    final line = DraftLine(
+      lineId: _newLineId(),
+      menuId: null,
+      name: name.trim(),
+      quantity: 1,
+      unitPrice: price,
+      isExtra: true,
+    );
+    return _addLine(
+      line,
       () => _apiService.createCartItem(
         tableId: tid,
         cartId: cid,
@@ -788,6 +1050,7 @@ class PosProvider with ChangeNotifier {
 
   /// Quantity change — refused on KOT'd lines (admin hard-locks them).
   Future<bool?> updateItemQuantity(String cartmenuId, int newQty) async {
+    if (_isDraftLine(cartmenuId)) return _setDraftQty(cartmenuId, newQty);
     final line = _line(cartmenuId);
     if (line != null && isKotLine(line)) {
       _errorMessage =
@@ -813,6 +1076,7 @@ class PosProvider with ChangeNotifier {
 
   /// Remove an un-KOT'd line (hard delete). For a KOT'd line use [cancelKotLine].
   Future<bool?> removeCartItem(String cartmenuId) async {
+    if (_isDraftLine(cartmenuId)) return _setDraftQty(cartmenuId, 0);
     final line = _line(cartmenuId);
     if (line != null && isKotLine(line)) {
       return cancelKotLine(cartmenuId, reason: 'Removed from order');
@@ -829,6 +1093,377 @@ class PosProvider with ChangeNotifier {
         containerPrice: _containerPriceArg,
       ),
     );
+  }
+
+  static bool _isDraftLine(String id) => id.startsWith(TableDraft.lineIdPrefix);
+
+  Future<bool> _setDraftQty(String cartmenuId, int qty) async {
+    final d = _openDraft;
+    if (d == null) return false;
+    final lineId = cartmenuId.substring(TableDraft.lineIdPrefix.length);
+    final locked = d.creatingLine?.lineId == lineId && !d.conflict;
+    if (_openTableSending || locked) {
+      _errorMessage = locked
+          ? 'This item may already be on the order. Send the KOT, then cancel it if needed.'
+          : _sendingMessage;
+      notifyListeners();
+      return false;
+    }
+    _errorMessage = null;
+    final edited = d.creatingLine?.lineId == lineId
+        ? (qty > 0
+              ? d.copyWith(creatingLine: d.creatingLine!.withQuantity(qty))
+              : d.copyWith(clearCreating: true))
+        : d.setQuantity(lineId, qty);
+    final save = _saveDraft(edited);
+    notifyListeners();
+    await save;
+    return true;
+  }
+
+  /// Set when items reached the server but the cart on screen could not be
+  /// re-read; the next KOT must fetch before trusting it.
+  bool _cartStale = false;
+  static const String _staleMessage =
+      'Items were sent but the order could not be refreshed. Try again.';
+
+  /// Sends the open table's unsent items: one `offline-sync` request (plus one
+  /// `createcart` if the table has no cart yet). True when nothing is left.
+  ///
+  /// Never adds items to a different order than the one they were taken for:
+  /// if the table's cart changed meanwhile, the draft is flagged
+  /// [TableDraft.conflict] and waits for the waiter. Pinned to the draft's own
+  /// table, so leaving the screen mid-send cannot touch another table.
+  Future<bool> flushDraft() async {
+    final current = _openDraft;
+    if (current == null) return true;
+    return _flush(current, background: false);
+  }
+
+  /// Sends every table's unsent items (Sync on, back online, leaving a table).
+  /// Parked drafts wait for the waiter. Returns how many tables were sent.
+  /// Never writes the open screen's error text.
+  Future<int> flushAllDrafts() async {
+    // Always the signed-in restaurant: after a logout the provider may still
+    // hold the previous restaurant's id and tax.
+    final rid = await _authService.getRestaurantId() ?? '';
+    if (rid.isEmpty) return 0;
+    if (rid != _restaurantId) {
+      _restaurantId = rid;
+      _taxConfig = [];
+      _consolidatedTax = null;
+      _draft = null;
+    }
+    final tables = (await _drafts.all(rid)).map((d) => d.tableId).toList();
+    DraftCartStore.pendingTables.value = tables.length;
+    if (!ConnectivityService.instance.isOnline) return 0;
+    if (_sendingAll) {
+      _sendAllAgain = true; // e.g. back online while a loop is running
+      return 0;
+    }
+    // Tax is restaurant-wide; without it a send would price the cart untaxed.
+    if (_consolidatedTax == null) {
+      final cached = await _menuCache.load(rid);
+      if (cached != null && cached.taxRows.isNotEmpty) {
+        _taxConfig = cached.taxRows;
+        _buildConsolidatedTax();
+      }
+    }
+    if (_consolidatedTax == null) return 0;
+
+    _sendingAll = true;
+    _sendAuthFailed = false;
+    var sent = 0;
+    try {
+      for (final tid in tables) {
+        // Re-read right before sending: the waiter may have added, sent,
+        // parked or discarded this table's items since the loop started.
+        final open = _draft;
+        final d = open != null && open.tableId == tid
+            ? open
+            : await _drafts.load(rid, tid);
+        if (d == null || d.conflict || _sending.contains(tid)) continue;
+        if (await _flush(d, background: true)) sent++;
+        if (_sendAuthFailed || !ConnectivityService.instance.isOnline) break;
+      }
+    } finally {
+      _sendingAll = false;
+    }
+    notifyListeners();
+    if (_sendAllAgain) {
+      _sendAllAgain = false;
+      sent += await flushAllDrafts();
+    }
+    return sent;
+  }
+
+  /// "Send to current order" on a parked draft: the waiter has checked the
+  /// table, so the items go to whatever order is open now (or a new one),
+  /// under a NEW key — the old key's receipt would answer duplicate/409.
+  Future<bool> resendDraft() async {
+    final d = _openDraft;
+    if (d == null || !d.conflict) return false;
+    if (_sending.contains(d.tableId)) {
+      _errorMessage = _sendingMessage;
+      notifyListeners();
+      return false;
+    }
+    try {
+      final liveId = _cartIdOf(await _apiService.getCartItemsByTableId(d.tableId));
+      var next = TableDraft.start(d.restaurantId, d.tableId, liveId);
+      for (final l in d.allLines) {
+        next = next.add(l);
+      }
+      await _saveDraft(next);
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+      notifyListeners();
+      return false;
+    }
+    return flushDraft();
+  }
+
+  /// Whether [tableId] has unsent items stored on this tablet.
+  Future<bool> hasUnsentItems(String tableId) async {
+    final rid = await _authService.getRestaurantId() ?? '';
+    return await _drafts.load(rid, tableId) != null;
+  }
+
+  static const String unsentItemsMessage =
+      'This table has items not sent yet. Open it and send the KOT first.';
+
+  /// Drops the open table's unsent items (confirmed in the UI).
+  Future<void> discardDraft() async {
+    final d = _openDraft;
+    if (d == null || _sending.contains(d.tableId)) return;
+    _draft = null;
+    _errorMessage = null;
+    notifyListeners();
+    await _drafts.delete(d.restaurantId, d.tableId);
+  }
+
+  Future<bool> _flush(TableDraft current, {required bool background}) async {
+    final tid = current.tableId;
+    // Background sends record problems on their own draft only.
+    void say(String m) {
+      if (!background) _errorMessage = m;
+    }
+
+    if (current.conflict || _sending.contains(tid)) {
+      say(current.conflict
+          ? (current.lastError ?? 'Unsent items on this table need attention.')
+          : _sendingMessage);
+      notifyListeners();
+      return false;
+    }
+    _sending.add(tid);
+    var d = current;
+    var sent = false;
+    try {
+      var liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background));
+
+      if (d.baselineCartId == null) {
+        final pending = d.creatingLine;
+        if (liveId.isEmpty && pending != null) {
+          // An earlier createcart never answered and the table has no order
+          // now: it may have reached an order that was billed since. Only the
+          // waiter can tell, so never re-create it automatically.
+          return await _markConflict(
+            background,
+            d,
+            'An item from this table may already be on a bill that was closed. Check before sending it again.',
+          );
+        }
+        if (liveId.isEmpty) {
+          final first = d.lines.first;
+          // Persist before sending, so a lost answer is recognised next time.
+          d = d.copyWith(creatingLine: first, lines: d.lines.sublist(1));
+          await _saveDraft(d);
+          try {
+            await _createCartLine(tid, first, background: background);
+          } on ApiException catch (e) {
+            // A refusal is a definite "not added": put the item back so it
+            // can be edited or removed. Only a lost answer keeps it locked.
+            if (!e.isNetwork) {
+              d = d.copyWith(clearCreating: true, lines: [first, ...d.lines]);
+            }
+            rethrow;
+          }
+          liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background));
+          if (liveId.isEmpty) {
+            throw const ApiException('Could not open the order. Try again.');
+          }
+          d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+          await _saveDraft(d);
+        } else if (pending != null &&
+            _cartHasLine(await _apiService.getCartItemsByTableId(tid, background: background), pending)) {
+          d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+          await _saveDraft(d);
+        } else {
+          return await _markConflict(
+            background,
+            d,
+            'This table was opened on another device while these items were waiting.',
+          );
+        }
+      } else if (d.baselineCartId != liveId) {
+        return await _markConflict(
+            background,
+          d,
+          liveId.isEmpty
+              ? 'This table was billed or cleared while these items were waiting.'
+              : 'This table has a new order since these items were added.',
+        );
+      }
+
+      if (d.lines.isNotEmpty) {
+        await _apiService.offlineSync(
+          tableId: tid,
+          idempotencyKey: d.key,
+          lines: d.lines.map((l) => l.toSyncJson()).toList(),
+          background: background,
+        );
+      }
+      await _saveDraft(d.copyWith(lines: const []));
+      sent = true;
+      final fresh = await _repriceAfterSync(tid, background: background);
+      if (_isOpen(tid)) {
+        _cartData = fresh;
+        _cartStale = false;
+        await _saveSnapshot();
+      }
+      markFloorDirty();
+      return true;
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        _sessionExpired = true;
+        _sendAuthFailed = true;
+      }
+      if (sent) {
+        if (_isOpen(tid)) _cartStale = true;
+        say(_staleMessage);
+        return false;
+      }
+      if (e.code == 409 || e.isTableClaimed) {
+        return await _markConflict(
+            background,
+          d,
+          e.isTableClaimed
+              ? 'Another tablet is serving this table.'
+              : 'These items were edited after a send that may have reached the server. Check the order before sending again.',
+        );
+      }
+      say(e.message);
+      await _saveDraft(d.copyWith(lastError: e.message));
+      return false;
+    } catch (e) {
+      say(friendlyError(e));
+      return false;
+    } finally {
+      _sending.remove(tid);
+      notifyListeners();
+    }
+  }
+
+  static String _cartIdOf(List<Map<String, dynamic>> carts) =>
+      carts.isEmpty ? '' : (carts.first['_id']?.toString() ?? '');
+
+  Future<bool> _markConflict(bool background, TableDraft d, String why) async {
+    if (!background) _errorMessage = why;
+    await _saveDraft(d.copyWith(conflict: true, lastError: why));
+    return false;
+  }
+
+  Future<ApiEnvelope> _createCartLine(
+    String tableId,
+    DraftLine l, {
+    bool background = false,
+  }) => _apiService.createCartItem(
+        background: background,
+        tableId: tableId,
+        cartId: '',
+        menuId: l.isExtra ? null : l.menuId,
+        menuPrice: l.unitPrice,
+        variantId: l.variantId,
+        addons: l.addons,
+        isExtraAddon: l.isExtra,
+        menuName: l.isExtra ? l.name : null,
+        taxId: _consolidatedTax?['_id']?.toString(),
+        taxName: _consolidatedTax?['name']?.toString(),
+        taxValueType: _consolidatedTax?['value_type']?.toString(),
+        taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
+        // Only used when the table has no cart, so there is no container charge yet.
+        containerPrice: '0',
+        quantity: l.quantity,
+        description: l.description,
+      );
+
+  /// Did an earlier, unanswered createcart for [l] reach the server? The
+  /// pending line is locked, so its quantity can only match exactly.
+  bool _cartHasLine(List<Map<String, dynamic>> carts, DraftLine l) {
+    final lines = carts.isEmpty ? null : carts.first['cartMenuData'];
+    if (lines is! List) return false;
+    return lines.whereType<Map>().any((raw) {
+      final m = Map<String, dynamic>.from(raw);
+      if (isKotLine(m) || m['cancel_status'] == 1) return false;
+      final server = DraftLine(
+        lineId: '',
+        menuId: m['menu_id']?.toString(),
+        name: m['menu_name']?.toString() ?? '',
+        variantId: m['variant_id']?.toString(),
+        addons: (m['addons'] as List? ?? const [])
+            .whereType<Map>()
+            .map((a) => Map<String, dynamic>.from(a))
+            .toList(),
+        quantity: int.tryParse(m['quantity']?.toString() ?? '') ?? 0,
+        unitPrice: _num(m['individual_price']),
+        description: m['description']?.toString() ?? '',
+        isExtra: m['is_extra_addon'] == true,
+      );
+      return server.sameItemAs(l) && server.quantity == l.quantity;
+    });
+  }
+
+  /// Returns the table's cart after the sync. `offline-sync` on api-server main
+  /// only sums line prices, leaving GST, area charge and round-off stale, so one
+  /// line's quantity is re-saved to make the server run full pricing.
+  // lean: drop the re-save (and its request) once fatfox-api-server PR #294 is deployed.
+  Future<List<Map<String, dynamic>>> _repriceAfterSync(
+    String tid, {
+    bool background = false,
+  }) async {
+    final carts = await _apiService.getCartItemsByTableId(tid, background: background);
+    final lines = carts.isEmpty ? null : carts.first['cartMenuData'];
+    final line = lines is List
+        ? lines.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).where(
+              (m) => !isKotLine(m) && m['cancel_status'] != 1,
+            ).firstOrNull
+        : null;
+    if (line == null) return carts;
+    try {
+      final env = await _apiService.updateCartItemQuantity(
+        background: background,
+        cartId: _cartIdOf(carts),
+        cartmenuId: line['_id'].toString(),
+        quantity: int.tryParse(line['quantity']?.toString() ?? '') ?? 1,
+        taxId: _consolidatedTax?['_id']?.toString(),
+        taxValueType: _consolidatedTax?['value_type']?.toString(),
+        taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
+        containerPrice: _num(carts.first['container_price']) > 0
+            ? carts.first['container_price'].toString()
+            : '0',
+      );
+      final repriced = env.mapList;
+      return repriced.isNotEmpty && repriced.first.containsKey('cartMenuData')
+          ? repriced
+          : carts;
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      // Items are on the server; totals catch up on the next cart write.
+      debugPrint('[Fatfox POS] reprice after sync failed: $e');
+      return carts;
+    }
   }
 
   /// Cancel a KOT'd line with a reason (row kept, excluded from pricing).
@@ -1050,6 +1685,28 @@ class PosProvider with ChangeNotifier {
   /// print failed afterwards. Returns `null` if another action is in flight.
   Future<bool?> sendKotOrder() async {
     if (_isBusy) return null;
+    if (ConnectivityService.instance.syncOff) {
+      _errorMessage = _syncOffPrint;
+      notifyListeners();
+      return false;
+    }
+    final openTable = resolvedTableId;
+    // Paper must match the server: send unsent items, then work only from a
+    // cart read just now (a send already returns one). This also proves the
+    // server is reachable before anything prints.
+    _isBusy = true;
+    notifyListeners();
+    final hadDraft = _openDraft != null;
+    var ready = await flushDraft();
+    if (ready && (!hadDraft || _cartStale) && _isOpen(openTable)) {
+      ready = await _refreshCart(openTable);
+    }
+    _isBusy = false;
+    // The waiter may have left the table while it was sending.
+    if (!ready || !_isOpen(openTable)) {
+      notifyListeners();
+      return false;
+    }
     final tid = resolvedTableId;
     final cid = cartId;
     if (tid.isEmpty || cid.isEmpty) {
@@ -1143,7 +1800,9 @@ class PosProvider with ChangeNotifier {
   Future<List<Map<String, dynamic>>> listDiscounts({
     String searchName = '',
   }) async {
-    final amount = subTotal > 0 ? subTotal : grandTotal;
+    // Unsent items are not on the server cart the discount is checked against.
+    final serverTotal = _num(cart?['total_price']);
+    final amount = _serverSubTotal > 0 ? _serverSubTotal : serverTotal;
     try {
       return await _apiService.listAvailableDiscounts(
         orderAmount: amount,
@@ -1201,6 +1860,9 @@ class PosProvider with ChangeNotifier {
     final prevDetails = _tableDetails;
     final prevTax = List<Map<String, dynamic>>.from(_taxConfig);
     final prevConsolidated = _consolidatedTax;
+    final prevActiveTable = _activeTable;
+    final prevStale = _cartStale;
+    _activeTable = null;
     try {
       final prep = await prepareTableForBill(tableId: tableId, areaId: areaId);
       if (prep != null) return (skipped: false, error: prep);
@@ -1212,6 +1874,8 @@ class PosProvider with ChangeNotifier {
       _tableDetails = prevDetails;
       _taxConfig = prevTax;
       _consolidatedTax = prevConsolidated;
+      _activeTable = prevActiveTable;
+      _cartStale = prevStale;
       _isBusy = false;
       notifyListeners();
     }
@@ -1225,13 +1889,16 @@ class PosProvider with ChangeNotifier {
   }) async {
     _activeTableId = tableId;
     _activeAreaId = areaId;
+    final rid = await _authService.getRestaurantId() ?? '';
+    if (await _drafts.load(rid, tableId) != null) return unsentItemsMessage;
     try {
       final results = await Future.wait<Object?>([
         _apiService.viewTableById(tableId),
         _apiService.getCartItemsByTableId(tableId),
         _bestEffortTax(),
       ]);
-      _tableDetails = results[0] as Map<String, dynamic>?;
+      _tableDetails =
+          results[0] as Map<String, dynamic>? ?? {'table_id': tableId};
       _cartData = results[1] as List<Map<String, dynamic>>;
       _taxConfig = results[2] as List<Map<String, dynamic>>;
       _buildConsolidatedTax();
@@ -1245,6 +1912,11 @@ class PosProvider with ChangeNotifier {
       return friendlyError(e);
     }
   }
+
+  /// KOT and bill both print from local state before the server hears about
+  /// it, so with Sync off they would hand out paper the server never recorded.
+  static const String _syncOffPrint =
+      'Sync is off. Turn Sync on to print KOT or bill.';
 
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
   ///
@@ -1266,13 +1938,22 @@ class PosProvider with ChangeNotifier {
     }
 
     final tid = resolvedTableId;
-    final cid = cartId;
-    if (tid.isEmpty || cid.isEmpty) {
+    String? early;
+    if (ConnectivityService.instance.syncOff) {
+      early = _syncOffPrint;
+    } else if (tid.isEmpty || !await _refreshCart(tid) || cartId.isEmpty) {
+      // Paper must match the server: never print from a cart the tablet only
+      // remembers (opened offline, or read before other devices' changes).
+      early = tid.isEmpty || _errorMessage == null
+          ? 'No items on this table yet'
+          : _errorMessage!;
+    }
+    if (early != null) {
       if (!holdLock) {
         _isBusy = false;
         notifyListeners();
       }
-      return (skipped: false, error: 'No items on this table yet');
+      return (skipped: false, error: early);
     }
 
     String? failure;
@@ -1305,7 +1986,7 @@ class PosProvider with ChangeNotifier {
             debugPrint('[Fatfox POS] Bill thermal print error: $e');
             failure = 'Printer error: ${friendlyError(e)}';
           }
-          await _markPrintedWithRetry(cid);
+          await _markPrintedWithRetry(cartId);
           await _reloadCartData();
         }
       }
@@ -1346,9 +2027,18 @@ class PosProvider with ChangeNotifier {
   /// Returns `null` if another action is in flight.
   Future<bool?> discardCart() async {
     if (_isBusy) return null;
+    if (_openTableSending) {
+      _errorMessage = _sendingMessage;
+      notifyListeners();
+      return false;
+    }
     final cid = cartId;
+    final d = _openDraft;
     if (cid.isEmpty) {
+      if (d != null) await _drafts.delete(d.restaurantId, d.tableId);
+      _draft = null;
       _cartData = [];
+      await _saveSnapshot(); // or a later offline reload repaints the old cart
       _errorMessage = null;
       notifyListeners();
       return true;
@@ -1359,7 +2049,10 @@ class PosProvider with ChangeNotifier {
     notifyListeners();
     try {
       await _apiService.deleteCart(cid);
+      if (d != null) await _drafts.delete(d.restaurantId, d.tableId);
+      _draft = null;
       _cartData = [];
+      await _saveSnapshot();
       markFloorDirty();
       _isBusy = false;
       notifyListeners();
@@ -1400,6 +2093,7 @@ class PosProvider with ChangeNotifier {
     try {
       await _apiService.settleBill(cartId: cid, paymentType: mode);
       _cartData = [];
+      await _saveSnapshot();
       markFloorDirty();
       _isBusy = false;
       notifyListeners();

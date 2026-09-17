@@ -12,6 +12,9 @@ void main() {
 
   setUp(() {
     calls = [];
+    // Static printer-config cache: without this a test inherits the previous
+    // test's printers instead of its own SharedPreferences values.
+    ReceiptPrefs.invalidateCache();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
@@ -68,7 +71,7 @@ void main() {
     SharedPreferences.setMockInitialValues({'printer_type': 'USB'});
     await expectLater(
       ThermalPrinterService().printBytes(const [0x0A]),
-      throwsA(predicate((e) => e.toString().contains('USB printer not selected'))),
+      throwsA(predicate((e) => e.toString().contains('no USB printer is selected'))),
     );
     expect(calls, isEmpty);
   });

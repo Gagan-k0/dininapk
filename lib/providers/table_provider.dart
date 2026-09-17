@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../models/table_model.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
+import '../services/draft_cart_store.dart';
 
 /// Floor state. Mirrors the admin `dinein-table-list` contract:
 /// * areas + tables are the floor (mandatory); reservations + live orders are
@@ -193,17 +194,22 @@ class TableProvider with ChangeNotifier {
 
     try {
       // Floor (mandatory) — areas and tables in parallel.
-      final results = await Future.wait<Object>([
-        _apiService.getAreas(),
-        _apiService.getTables(),
+      final results = await Future.wait<List<Map<String, dynamic>>>([
+        _apiService.getAreaMaps(),
+        _apiService.getTableMaps(),
       ]);
       if (epoch != _loadEpoch) return;
 
       final rid = await _authService.getRestaurantId();
       if (epoch != _loadEpoch || rid != expectedRid) return;
 
-      _areas = results[0] as List<TableArea>;
-      _tables = results[1] as List<DineInTable>;
+      _areas = results[0].map(TableArea.fromJson).toList();
+      _tables = results[1].map(DineInTable.fromJson).toList();
+      await DraftCartStore().saveFloor(
+        rid ?? '',
+        areas: results[0],
+        tables: results[1],
+      );
       _lastSyncedAt = DateTime.now();
       _syncedRestaurantId = rid;
       _sessionExpired = false;
@@ -226,6 +232,17 @@ class TableProvider with ChangeNotifier {
       debugPrint('[Fatfox TableProvider] floor load refused: $e');
       _errorMessage = e.message;
       _sessionExpired = e.isAuth;
+      // No connection and nothing on screen (cold start): show the last floor
+      // this tablet saw, flagged stale, so tables can still be opened.
+      if (e.isNetwork && !hasFloor) {
+        final saved = await DraftCartStore().loadFloor(expectedRid ?? '');
+        if (epoch == _loadEpoch && saved != null) {
+          _areas = saved.areas.map(TableArea.fromJson).toList();
+          _tables = saved.tables.map(DineInTable.fromJson).toList();
+          _lastSyncedAt = saved.at;
+          _syncedRestaurantId = expectedRid;
+        }
+      }
     } catch (e) {
       if (epoch != _loadEpoch) return;
       debugPrint('[Fatfox TableProvider] floor load error: $e');

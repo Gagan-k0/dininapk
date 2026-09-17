@@ -198,16 +198,18 @@ class ApiService {
   /// GET /restaurant/table/area/all-avaliable?searchName=
   /// Throws [ApiException] on refusal (a wrong/expired JWT must never look
   /// like an empty floor).
-  Future<List<TableArea>> getAreas() async {
-    final env = await _client.get(ApiConfig.getAreaList);
-    return env.mapList.map(TableArea.fromJson).toList();
-  }
+  Future<List<TableArea>> getAreas() async =>
+      (await getAreaMaps()).map(TableArea.fromJson).toList();
+
+  Future<List<Map<String, dynamic>>> getAreaMaps() async =>
+      (await _client.get(ApiConfig.getAreaList)).mapList;
 
   /// GET /restaurant/table/all?searchNumber=
-  Future<List<DineInTable>> getTables() async {
-    final env = await _client.get(ApiConfig.getAllTables);
-    return env.mapList.map(DineInTable.fromJson).toList();
-  }
+  Future<List<DineInTable>> getTables() async =>
+      (await getTableMaps()).map(DineInTable.fromJson).toList();
+
+  Future<List<Map<String, dynamic>>> getTableMaps() async =>
+      (await _client.get(ApiConfig.getAllTables)).mapList;
 
   /// GET /restaurant/table/view/{tableId} → `{table_id, area_id, cart_id, table_number, …}`
   Future<Map<String, dynamic>?> viewTableById(String tableId) async {
@@ -367,10 +369,14 @@ class ApiService {
 
   /// GET /restaurant/cart/listallcartmenus?tableId=
   /// Returns the cart snapshot list (usually 0 or 1 cart) with `cartMenuData`.
-  Future<List<Map<String, dynamic>>> getCartItemsByTableId(String tableId) async {
+  Future<List<Map<String, dynamic>>> getCartItemsByTableId(
+    String tableId, {
+    bool background = false,
+  }) async {
     final env = await _client.get(
       ApiConfig.getCartDetails,
       query: {'tableId': tableId},
+      background: background,
     );
     return env.mapList;
   }
@@ -426,8 +432,9 @@ class ApiService {
     String? menuName,
     int quantity = 1,
     String? description,
+    bool background = false,
   }) {
-    return _client.post(ApiConfig.addToCart, body: {
+    return _client.post(ApiConfig.addToCart, background: background, body: {
       'table_id': tableId,
       if (cartId != null && cartId.isNotEmpty) 'cart_id': cartId,
       if (cartId != null && cartId.isNotEmpty) 'cartId': cartId,
@@ -449,6 +456,23 @@ class ApiService {
     });
   }
 
+  /// POST /restaurant/cart/offline-sync — adds draft lines to the table's
+  /// existing cart in one request. Same key + same lines is a safe duplicate;
+  /// same key + different lines is refused with 409.
+  Future<ApiEnvelope> offlineSync({
+    required String tableId,
+    required String idempotencyKey,
+    required List<Map<String, dynamic>> lines,
+    bool background = false,
+  }) {
+    return _client.post(
+      ApiConfig.offlineSync,
+      body: {'table_id': tableId, 'lines': lines},
+      extraHeaders: {'Idempotency-Key': idempotencyKey},
+      background: background,
+    );
+  }
+
   /// POST /restaurant/cart/updatecartmenuquantity
   Future<ApiEnvelope> updateCartItemQuantity({
     required String cartId,
@@ -458,8 +482,9 @@ class ApiService {
     String? taxValueType,
     String? taxValueAmount,
     String containerPrice = '0',
+    bool background = false,
   }) {
-    return _client.post(ApiConfig.updateCartQty, body: {
+    return _client.post(ApiConfig.updateCartQty, background: background, body: {
       'cartId': cartId,
       'cartmenuId': cartmenuId,
       'quantity': quantity,

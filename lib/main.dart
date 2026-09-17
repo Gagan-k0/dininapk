@@ -5,7 +5,10 @@ import 'providers/auth_provider.dart';
 import 'providers/table_provider.dart';
 import 'providers/pos_provider.dart';
 
+import 'config/api_config.dart';
 import 'services/api_client.dart';
+import 'services/auth_service.dart';
+import 'services/connectivity_service.dart';
 import 'views/auth/login_screen.dart';
 import 'views/tables/dinein_table_screen.dart';
 import 'views/pos/food_categories_screen.dart';
@@ -16,6 +19,15 @@ final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ConnectivityService.instance.load();
+  // Any answer, even a refusal, proves the server is reachable again.
+  ConnectivityService.instance.probe = () async {
+    final token = await AuthService().getToken();
+    if (token == null || token.isEmpty) {
+      return ConnectivityService.instance.clearSignal();
+    }
+    await ApiClient().get(ApiConfig.getTaxConfig, background: true);
+  };
   final auth = AuthProvider();
   await auth.checkSession();
   runApp(FatfoxDineInApp(authProvider: auth));
@@ -39,6 +51,7 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
   void initState() {
     super.initState();
     _initSession();
+    ConnectivityService.instance.onBackOnline = () => _pos.flushAllDrafts();
     // A 401 anywhere → drop the session, clear floor state, back to login.
     ApiClient.onSessionExpired = (reason) async {
       await _auth.sessionExpired(reason);
