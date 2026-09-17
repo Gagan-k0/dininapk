@@ -87,8 +87,11 @@ class ApiService {
               'Invalid Credentials. For staff, enter Restaurant No.',
         );
       }
+      // e.g. 403 `restaurant_blocked` carries a readable message.
+      final refused = _decodeOrNull(responseRest.body);
       throw Exception(
-        'Login failed (HTTP ${responseRest.statusCode}). Check username/password.',
+        _extractErrorMessage(refused) ??
+            'Login failed (HTTP ${responseRest.statusCode}). Check username/password.',
       );
     } catch (e) {
       debugPrint('[Fatfox Login] Owner login error: $e');
@@ -154,6 +157,14 @@ class ApiService {
           'then retry. Credentials are not the problem until the host resolves.';
     }
     return null;
+  }
+
+  static dynamic _decodeOrNull(String body) {
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _isSuccessResponse(dynamic data) {
@@ -474,11 +485,17 @@ class ApiService {
     required String tableId,
     required String idempotencyKey,
     required List<Map<String, dynamic>> lines,
+    DateTime? capturedAt,
     bool background = false,
   }) {
     return _client.post(
       ApiConfig.offlineSync,
-      body: {'table_id': tableId, 'lines': lines},
+      body: {
+        'table_id': tableId,
+        'lines': lines,
+        // Server accepts sales captured before grace end from a locked restaurant.
+        if (capturedAt != null) 'captured_at': capturedAt.toUtc().toIso8601String(),
+      },
       extraHeaders: {'Idempotency-Key': idempotencyKey},
       background: background,
     );

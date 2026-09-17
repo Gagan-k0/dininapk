@@ -24,6 +24,16 @@ class ApiConfig {
   static String staffLogin = '/restaurant/staff-login';
   static String login = '/user/login'; // not used for waiter POS
 
+  // Subscription — never refused by the lock middleware.
+  static String subscriptionStatus = '/restaurant/subscription/status';
+
+  /// Raw 32-byte Ed25519 public key (base64) that verifies offline licences.
+  /// Build config so it can be rotated: --dart-define=SUBSCRIPTION_PUBLIC_KEY=…
+  static const String subscriptionPublicKey = String.fromEnvironment(
+    'SUBSCRIPTION_PUBLIC_KEY',
+    defaultValue: 'xXsgsz5LPgJaQfw7WU1KBRY4j4QVhjKXXDQixmeN56Y=',
+  );
+
   // Table Management & Areas — search parameters are required by backend regex match
   static String getAllTables = '/restaurant/table/all?searchNumber=';
   static String getAreaList =

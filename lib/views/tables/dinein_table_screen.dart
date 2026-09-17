@@ -7,6 +7,7 @@ import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/api_service.dart';
 import '../../widgets/payment_mode_sheet.dart';
+import '../../widgets/subscription_banner.dart';
 import '../../widgets/sync_status_chip.dart';
 import '../../utils/async_guard.dart';
 
@@ -176,6 +177,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       ),
       body: Column(
         children: [
+          const SubscriptionBanner(),
           if (auth.isDemoMode)
             Material(
               color: const Color(0xFFFEF3C7),

@@ -9,6 +9,8 @@ import '../config/api_config.dart';
 import 'auth_service.dart';
 import 'connectivity_service.dart';
 import 'device_id_service.dart';
+import 'subscription_rules.dart';
+import 'subscription_service.dart';
 
 /// A refusal or transport failure from the FatFox API.
 ///
@@ -46,6 +48,11 @@ class ApiException implements Exception {
 
   /// Another tablet holds this table's claim (`helpers/tableClaim.js`).
   bool get isTableClaimed => reason == 'table_claimed_by_another_device';
+
+  /// The restaurant's subscription is locked or the restaurant is blocked
+  /// (HTTP 403). Not a session expiry: keep the session and any queued sends.
+  bool get isSubscriptionLocked =>
+      reason == subscriptionLockedCode || reason == restaurantBlockedCode;
 
   /// Device id holding the claim, when the server named it.
   String? get claimHeldBy =>
@@ -296,6 +303,13 @@ class ApiClient {
         code: 429,
         httpStatus: 429,
       );
+    }
+
+    if (env.reason == subscriptionLockedCode ||
+        env.reason == restaurantBlockedCode) {
+      // The lock screen follows from the new state; never onSessionExpired.
+      final data = env.map;
+      if (data != null) unawaited(SubscriptionService.instance.apply(data));
     }
 
     if (response.statusCode >= 400 || !env.ok) {

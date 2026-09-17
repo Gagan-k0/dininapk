@@ -9,10 +9,12 @@ import 'config/api_config.dart';
 import 'services/api_client.dart';
 import 'services/auth_service.dart';
 import 'services/connectivity_service.dart';
+import 'services/subscription_service.dart';
 import 'views/auth/login_screen.dart';
 import 'views/tables/dinein_table_screen.dart';
 import 'views/pos/food_categories_screen.dart';
 import 'views/settings/printer_settings_screen.dart';
+import 'views/subscription/subscription_locked_screen.dart';
 
 /// Lets non-widget code (session expiry) route back to login.
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
@@ -41,7 +43,8 @@ class FatfoxDineInApp extends StatefulWidget {
   State<FatfoxDineInApp> createState() => _FatfoxDineInAppState();
 }
 
-class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
+class _FatfoxDineInAppState extends State<FatfoxDineInApp>
+    with WidgetsBindingObserver {
   late final AuthProvider _auth = widget.authProvider ?? AuthProvider();
   late final TableProvider _tables = TableProvider();
   late final PosProvider _pos = PosProvider();
@@ -50,8 +53,13 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _auth.addListener(_syncSubscription);
     _initSession();
-    ConnectivityService.instance.onBackOnline = () => _pos.flushAllDrafts();
+    ConnectivityService.instance.onBackOnline = () {
+      _pos.flushAllDrafts();
+      SubscriptionService.instance.refresh();
+    };
     // A 401 anywhere → drop the session, clear floor state, back to login.
     ApiClient.onSessionExpired = (reason) async {
       await _auth.sessionExpired(reason);
@@ -70,10 +78,45 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
         _initialized = true;
       });
     }
+    _syncSubscription();
+  }
+
+  /// Restaurant the subscription check runs for; null while signed out.
+  String? _subscriptionFor;
+
+  /// Signed in (not demo) → check the subscription for that restaurant, with
+  /// the login answer when there is one. Signed out → no lock on the login screen.
+  void _syncSubscription() {
+    final rid = _auth.isLoggedIn && !_auth.isDemoMode ? _auth.restaurantId : null;
+    if (rid == _subscriptionFor) return;
+    _subscriptionFor = rid;
+    if (rid == null || rid.isEmpty) {
+      SubscriptionService.instance.stop();
+    } else {
+      SubscriptionService.instance.start(
+        loginSubscription: _auth.takeLoginSubscription(),
+      );
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      SubscriptionService.instance.refresh();
+    }
+  }
+
+  Future<void> _signOutFromLock() async {
+    await _auth.logout();
+    _tables.reset();
+    _pos.clearFloorDirty();
+    appNavigatorKey.currentState?.pushNamedAndRemoveUntil('/login', (_) => false);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _auth.removeListener(_syncSubscription);
     ApiClient.onSessionExpired = null;
     super.dispose();
   }
@@ -112,6 +155,21 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
               // System fonts only — google_fonts downloads from fonts.gstatic.com
               // and throws on tablets with no DNS / blocked Google domains.
               scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+            ),
+            // Lock gate: covers every route (the screens stay mounted, so
+            // unlocking returns to where the waiter was). A route push would
+            // race the login screen's own pushReplacement to /tables.
+            builder: (context, child) => ListenableBuilder(
+              listenable: SubscriptionService.instance,
+              builder: (context, _) => Stack(
+                children: [
+                  child ?? const SizedBox.shrink(),
+                  if (SubscriptionService.instance.isLocked)
+                    Positioned.fill(
+                      child: SubscriptionLockedScreen(onSignOut: _signOutFromLock),
+                    ),
+                ],
+              ),
             ),
             initialRoute: auth.isLoggedIn ? '/tables' : '/login',
             routes: {

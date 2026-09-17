@@ -54,6 +54,7 @@ class FakeServer {
     if (fail is Future) await fail;
     if (fail is Exception) throw fail;
     if (fail is Map) return http.Response(jsonEncode(fail), 200);
+    if (fail is http.Response) return fail;
     final p = req.url.path;
     Object? data = const [];
     if (p.contains('/table/view')) data = {'table_id': req.url.pathSegments.last, 'table_number': '5'};
@@ -165,6 +166,7 @@ void main() {
       final sync = server.last('/offline-sync');
       expect(sync.headers['Idempotency-Key'], isNotEmpty);
       expect((jsonDecode(sync.body)['lines'] as List).single['quantity'], 3);
+      expect(DateTime.parse(jsonDecode(sync.body)['captured_at']).isUtc, isTrue);
       expect(pos.draft, isNull);
       expect(await DraftCartStore().load('r1', tableId), isNull);
     });
@@ -398,6 +400,38 @@ void main() {
       expect(await store.load('r1', t2), isNull);
       expect((await store.load('r1', t3))!.conflict, isTrue);
       expect(DraftCartStore.pendingTables.value, 1);
+    });
+
+    test('a subscription lock keeps drafts queued, not held, and stops Send all', () async {
+      const t2 = '64b000000000000000000002';
+      const t3 = '64b000000000000000000003';
+      final store = DraftCartStore();
+      server.cart = [cartDoc(cartA, [])];
+      await store.save(TableDraft.start('r1', t2, cartA).add(line('a')));
+      await store.save(TableDraft.start('r1', t3, cartA).add(line('b')));
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? http.Response(
+              jsonEncode({
+                'status': {'code': 'subscription_locked', 'message': 'Subscription expired'},
+                'data': {'state': 'locked', 'enforcement': 'on'},
+              }),
+              403,
+            )
+          : null;
+
+      expect(await pos.flushAllDrafts(), 0);
+      expect(server.count('/offline-sync'), 1, reason: 'the loop stops at the first lock');
+      for (final t in [t2, t3]) {
+        final d = (await store.load('r1', t))!;
+        expect(d.conflict, isFalse);
+        expect(d.lines.length, 1);
+      }
+      final first = (await store.load('r1', jsonDecode(server.last('/offline-sync').body)['table_id']))!;
+      expect(first.lastError, PosProvider.subscriptionWaitMessage);
+      expect(DraftCartStore.pendingTables.value, 2);
+
+      server.failOn = null; // renewed
+      expect(await pos.flushAllDrafts(), 2);
     });
 
     test('nothing is sent in the background without a known tax', () async {
