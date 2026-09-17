@@ -7,6 +7,7 @@ import '../../providers/pos_provider.dart';
 import '../../models/table_model.dart';
 import '../../services/api_service.dart';
 import '../../widgets/payment_mode_sheet.dart';
+import '../../widgets/sync_status_chip.dart';
 
 class DineInTableScreen extends StatefulWidget {
   const DineInTableScreen({super.key});
@@ -56,6 +57,7 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
           ],
         ),
         actions: [
+          const SyncStatusChip(),
           IconButton(
             icon: const Icon(Icons.refresh, color: Color(0xFF64748B)),
             onPressed: () => tableProv.loadDashboardData(),

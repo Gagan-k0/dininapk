@@ -11,6 +11,7 @@ import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
+import '../../widgets/sync_status_chip.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
   const FoodCategoriesScreen({super.key});
@@ -400,6 +401,16 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
         ],
       ),
       actions: [
+        SyncStatusChip(
+          menuUpdatedAt: pos.menuCachedAt,
+          onSyncMenu: (pos.activeTableId ?? '').isEmpty
+              ? null
+              : () => pos.loadTableAndMenu(
+                  pos.activeTableId!,
+                  pos.activeAreaId ?? '',
+                  forceMenuRefresh: true,
+                ),
+        ),
         IconButton(
           icon: const Icon(Icons.refresh, color: Color(0xFF64748B), size: 22),
           onPressed: () {

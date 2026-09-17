@@ -6,6 +6,7 @@ import '../models/cart_model.dart';
 import '../services/api_service.dart';
 import '../services/auth_service.dart';
 import '../services/bill_builder.dart';
+import '../services/connectivity_service.dart';
 import '../services/menu_cache_service.dart';
 import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
@@ -1098,6 +1099,11 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
+    if (ConnectivityService.instance.syncOff) {
+      _errorMessage = _syncOffPrint;
+      notifyListeners();
+      return false;
+    }
 
     _isBusy = true;
     _errorMessage = null;
@@ -1277,6 +1283,11 @@ class PosProvider with ChangeNotifier {
     }
   }
 
+  /// KOT and bill both print from local state before the server hears about
+  /// it, so with Sync off they would hand out paper the server never recorded.
+  static const String _syncOffPrint =
+      'Sync is off. Turn Sync on to print KOT or bill.';
+
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
   /// Returns null on success, else the error text. Un-printed items are sent
   /// to the kitchen first so the bill never disagrees with the kitchen.
@@ -1284,6 +1295,7 @@ class PosProvider with ChangeNotifier {
     final tid = resolvedTableId;
     final cid = cartId;
     if (tid.isEmpty || cid.isEmpty) return 'No items on this table yet';
+    if (ConnectivityService.instance.syncOff) return _syncOffPrint;
 
     _isBusy = true;
     _errorMessage = null;

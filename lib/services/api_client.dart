@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../config/api_config.dart';
 import 'auth_service.dart';
+import 'connectivity_service.dart';
 import 'device_id_service.dart';
 
 /// A refusal or transport failure from the FatFox API.
@@ -214,6 +215,16 @@ class ApiClient {
       );
     }
     final token = await _auth.getToken();
+    final net = ConnectivityService.instance;
+    // Sync off means nothing leaves the tablet. Login (no token yet) is exempt,
+    // or a waiter who switched Sync off could never sign back in.
+    if (net.syncOff && token != null && token.isNotEmpty) {
+      throw const ApiException(
+        'Sync is off. Turn Sync on to reach the server.',
+        code: 0,
+        isNetwork: true,
+      );
+    }
     final restId = await _auth.getRestaurantId();
     final deviceId = await _deviceId.get();
     final url = uri(path, query);
@@ -231,15 +242,19 @@ class ApiClient {
       if (encoded != null) req.body = encoded;
       final streamed = await _http.send(req).timeout(timeout ?? defaultTimeout);
       response = await http.Response.fromStream(streamed);
+      net.reportReachable();
     } on TimeoutException {
+      net.reportNetworkFailure();
       throw ApiException(
         'Server did not respond in time. Check Wi-Fi and try again.',
         code: 0,
         isNetwork: true,
       );
     } on SocketException catch (e) {
+      net.reportNetworkFailure();
       throw ApiException(_networkMessage(e), code: 0, isNetwork: true);
     } on http.ClientException catch (e) {
+      net.reportNetworkFailure();
       throw ApiException(_networkMessage(e), code: 0, isNetwork: true);
     }
 
