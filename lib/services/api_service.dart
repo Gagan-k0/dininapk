@@ -449,6 +449,23 @@ class ApiService {
     });
   }
 
+  /// POST /restaurant/cart/offline-sync — adds draft lines to the table's
+  /// existing cart in one request. Same key + same lines is a safe duplicate;
+  /// same key + different lines is refused with 409.
+  Future<ApiEnvelope> offlineSync({
+    required String tableId,
+    required String idempotencyKey,
+    required List<Map<String, dynamic>> lines,
+    bool background = false,
+  }) {
+    return _client.post(
+      ApiConfig.offlineSync,
+      body: {'table_id': tableId, 'lines': lines},
+      extraHeaders: {'Idempotency-Key': idempotencyKey},
+      background: background,
+    );
+  }
+
   /// POST /restaurant/cart/updatecartmenuquantity
   Future<ApiEnvelope> updateCartItemQuantity({
     required String cartId,

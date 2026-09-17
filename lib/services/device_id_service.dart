@@ -16,7 +16,8 @@ class DeviceIdService {
   /// Cached so the header costs one prefs read per app run.
   static String? _cached;
 
-  static String _generate() {
+  /// 128 random bits as hex — also used for idempotency keys.
+  static String randomHex() {
     final rnd = Random.secure();
     final bytes = List<int>.generate(16, (_) => rnd.nextInt(256));
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
@@ -28,7 +29,7 @@ class DeviceIdService {
     final prefs = await SharedPreferences.getInstance();
     var id = prefs.getString(storageKey) ?? '';
     if (id.isEmpty) {
-      id = _generate();
+      id = randomHex();
       await prefs.setString(storageKey, id);
     }
     _cached = id;

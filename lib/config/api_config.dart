@@ -70,6 +70,8 @@ class ApiConfig {
   static String getCartDetails =
       '/restaurant/cart/listallcartmenus'; // ?tableId=
   static String updateCartQty = '/restaurant/cart/updatecartmenuquantity';
+  /// Batch of unsent draft lines, keyed by `Idempotency-Key`.
+  static String offlineSync = '/restaurant/cart/offline-sync';
   static String deleteCartMenu =
       '/restaurant/cart/deletemenu'; // ?cartId=&cartmenuId=&...
   /// Offline sync only — live KOT must use [setCartStatus], not createorder.

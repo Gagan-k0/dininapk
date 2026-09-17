@@ -74,11 +74,30 @@ Status: approved design, 2026-09-17. Branch `feat/waiter-offline-mode` (worktree
 ### Cart engine (`lib/providers/pos_provider.dart`)
 
 * Taps write to the draft, not the network. The painted cart = server snapshot +
-  draft lines, marked "not sent".
-* `flushDraft()` sends one `offline-sync` with the stored `Idempotency-Key`, then
-  re-reads the cart. Called before KOT, before Bill, by Sync, and on reconnect.
-* Re-key rule: a retry after edit must mint a NEW key (same key + changed content is a
-  terminal 409). Write the new draft before deleting the old.
+  draft lines, marked "NOT SENT". Draft lines count as un-KOT'd, so Bill and Release
+  stay blocked until KOT sends them.
+* **Exception (verified 2026-09-17):** `offline-sync` answers `422 no_cart` on a table
+  with no cart. Online, the first tap on an empty table goes straight to `createcart`.
+  A draft started with no cart opens one at flush via `createcart` for its first
+  line. That line is persisted as a locked `creatingLine` first: if the answer is
+  lost it is matched against the live cart; if the table has no cart any more it is
+  parked as a conflict (it may be on a bill that closed) and never re-created
+  automatically. A refused `createcart` puts the line back as an editable line.
+* Taps are refused while a send is in flight; a send is pinned to its own table; a
+  cart that could not be re-read after a send blocks KOT, bill and release until it
+  is fetched again.
+* `flushDraft()` re-reads the live cart and compares it with the draft's baseline cart
+  id; any difference is a conflict (never auto-applied). Then one `offline-sync` with
+  the stored `Idempotency-Key`. Called by KOT (Phase 4 adds Sync and reconnect).
+* **Key rule (corrected from admin's implementation):** the key is minted once and
+  kept through every edit. A lost response then re-sends as a duplicate (same
+  content) or a 409 conflict (edited) — never a second copy. A new key is minted only
+  by an explicit "Send again" on a conflict (Phase 4). The earlier "re-key on edit"
+  rule would have double-billed after a lost response.
+* **Server pricing gap:** `offline-sync` on api-server main only sums line prices
+  (tax, area charge and round-off go stale). The tablet re-saves one line's quantity
+  afterwards to trigger full pricing; api-server PR #294 fixes the endpoint, after
+  which that extra request is removed.
 
 ## Phases
 

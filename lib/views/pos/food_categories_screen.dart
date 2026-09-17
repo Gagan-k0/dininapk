@@ -1401,6 +1401,23 @@ class _CartBottomSheet extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 10, color: Color(0xFF64748B), fontStyle: FontStyle.italic),
                   ),
+                if (item['is_draft'] == true)
+                  Container(
+                    margin: const EdgeInsets.only(top: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE0F2FE),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'NOT SENT',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: Color(0xFF0369A1),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
                 if (isKot)
                   Container(
                     margin: const EdgeInsets.only(top: 2),

@@ -1,5 +1,6 @@
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/api_config.dart';
+import 'draft_cart_store.dart';
 
 class AuthService {
   static const String _keyToken = 'auth_token';
@@ -75,5 +76,7 @@ class AuthService {
     await prefs.remove(_keyRestaurantId);
     await prefs.remove(_keyRestaurantName);
     await prefs.remove(_keyDemoMode);
+    // Cart snapshots can hold guest names; unsent drafts are sales and stay.
+    await DraftCartStore.clearSnapshots();
   }
 }
