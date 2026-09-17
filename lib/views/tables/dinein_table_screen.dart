@@ -814,9 +814,16 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     // Block only concurrent same-frame opens; unlock as soon as the route
     // is pushed (pushNamed's Future completes on pop — do not hold that long).
     if (_openingPos) return;
+    final posProv = Provider.of<PosProvider>(context, listen: false);
+    // A bill or KOT still printing owns the POS state; opening a table now
+    // would swap the cart under it.
+    if (posProv.isBusy) {
+      _toast('Please wait — a print is still finishing.');
+      return;
+    }
     _openingPos = true;
     // Keeps the table number known even if the table is opened offline.
-    Provider.of<PosProvider>(context, listen: false).setActiveTable(table);
+    posProv.setActiveTable(table);
     late final Future<Object?> opened;
     try {
       opened = Navigator.pushNamed(
@@ -985,6 +992,15 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     if (confirmed != true || selectedId == null || !context.mounted) return;
 
     await _shiftGuard.run(() async {
+      // Unsent items are tied to their table on this tablet; after a shift
+      // they would open a new order on the old, now empty, table.
+      final pos = Provider.of<PosProvider>(context, listen: false);
+      if (await pos.hasUnsentItems(source.id) ||
+          await pos.hasUnsentItems(selectedId!)) {
+        _toast(PosProvider.unsentItemsMessage, error: true);
+        return;
+      }
+      if (!context.mounted) return;
       final ok = await tableProv.shiftTable(
         cartId: cartId,
         newTableId: selectedId!,

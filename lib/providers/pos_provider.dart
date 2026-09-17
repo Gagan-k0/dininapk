@@ -803,7 +803,7 @@ class PosProvider with ChangeNotifier {
   /// Re-reads [tid]'s cart and fails loudly (unlike [_reloadCartData]).
   Future<bool> _refreshCart(String tid) async {
     try {
-      final carts = await _apiService.getCartItemsByTableId(tid);
+      final carts = await _apiService.getCartItemsByTableId(tid, fresh: true);
       if (!_isOpen(tid)) return false;
       _cartData = carts;
       _cartError = null;
@@ -859,6 +859,9 @@ class PosProvider with ChangeNotifier {
   /// in flight (silent skip — callers must not toast that as failure).
   Future<bool?> _write(Future<ApiEnvelope> Function() call) async {
     if (_isBusy) return null;
+    // An in-flight send repaints the cart when it lands and would overwrite
+    // this write's result (or re-save a quantity read before it).
+    if (_refuseWhileSending(resolvedTableId)) return false;
     _isBusy = true;
     _errorMessage = null;
     _lastWriteOffline = false;
@@ -912,11 +915,7 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
-    if (_sending.contains(tid)) {
-      _errorMessage = _sendingMessage;
-      notifyListeners();
-      return false;
-    }
+    if (_refuseWhileSending(tid)) return false;
     final current = _draft?.tableId == tid ? _draft : null;
     final base = current ?? TableDraft.start(_restaurantId, tid, cartId);
     _draft = maybeSent && base.isEmpty
@@ -928,8 +927,22 @@ class PosProvider with ChangeNotifier {
     return true;
   }
 
+  /// Unsent items older than this on a table with no order wait for the
+  /// waiter instead of opening a new order in the background.
+  static const Duration _staleDraftAge = Duration(hours: 6);
+  static const String _staleDraftMessage =
+      'These items waited over 6 hours on an empty table. Check before sending.';
+
   static const String _sendingMessage =
       'Sending to the server — try again in a moment.';
+
+  /// True (with the message shown) while [tid]'s unsent items are being sent.
+  bool _refuseWhileSending(String tid) {
+    if (!_sending.contains(tid)) return false;
+    _errorMessage = _sendingMessage;
+    notifyListeners();
+    return true;
+  }
 
   static String _newLineId() => DeviceIdService.randomHex().substring(0, 12);
 
@@ -1162,6 +1175,8 @@ class PosProvider with ChangeNotifier {
       return 0;
     }
     // Tax is restaurant-wide; without it a send would price the cart untaxed.
+    // (Cached empty tax rows can mean a failed fetch, not "no tax", so a
+    // no-tax restaurant's items wait for KOT, which sends them in the foreground.)
     if (_consolidatedTax == null) {
       final cached = await _menuCache.load(rid);
       if (cached != null && cached.taxRows.isNotEmpty) {
@@ -1183,6 +1198,17 @@ class PosProvider with ChangeNotifier {
             ? open
             : await _drafts.load(rid, tid);
         if (d == null || d.conflict || _sending.contains(tid)) continue;
+        // An edit on the open table is in flight; its reprice could re-save
+        // a quantity read before that edit. The next pass sends it.
+        if (_isBusy && _isOpen(tid)) continue;
+        // (A locked creatingLine may have opened the order — _flush checks.)
+        if (d.baselineCartId == null &&
+            d.creatingLine == null &&
+            DateTime.now().difference(d.createdAt) > _staleDraftAge) {
+          // Days-old items must not silently open a new order on this table.
+          await _saveDraft(d.copyWith(conflict: true, lastError: _staleDraftMessage));
+          continue;
+        }
         if (await _flush(d, background: true)) sent++;
         if (_sendAuthFailed || !ConnectivityService.instance.isOnline) break;
       }
@@ -1209,7 +1235,7 @@ class PosProvider with ChangeNotifier {
       return false;
     }
     try {
-      final liveId = _cartIdOf(await _apiService.getCartItemsByTableId(d.tableId));
+      final liveId = _cartIdOf(await _apiService.getCartItemsByTableId(d.tableId, fresh: true));
       var next = TableDraft.start(d.restaurantId, d.tableId, liveId);
       for (final l in d.allLines) {
         next = next.add(l);
@@ -1261,7 +1287,7 @@ class PosProvider with ChangeNotifier {
     var d = current;
     var sent = false;
     try {
-      var liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background));
+      var liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true));
 
       if (d.baselineCartId == null) {
         final pending = d.creatingLine;
@@ -1290,14 +1316,14 @@ class PosProvider with ChangeNotifier {
             }
             rethrow;
           }
-          liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background));
+          liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true));
           if (liveId.isEmpty) {
             throw const ApiException('Could not open the order. Try again.');
           }
           d = d.copyWith(clearCreating: true, baselineCartId: liveId);
           await _saveDraft(d);
         } else if (pending != null &&
-            _cartHasLine(await _apiService.getCartItemsByTableId(tid, background: background), pending)) {
+            _cartHasLine(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true), pending)) {
           d = d.copyWith(clearCreating: true, baselineCartId: liveId);
           await _saveDraft(d);
         } else {
@@ -1354,6 +1380,8 @@ class PosProvider with ChangeNotifier {
               : 'These items were edited after a send that may have reached the server. Check the order before sending again.',
         );
       }
+      final refusal = _refusalText(e);
+      if (refusal != null) return await _markConflict(background, d, refusal);
       say(e.message);
       await _saveDraft(d.copyWith(lastError: e.message));
       return false;
@@ -1364,6 +1392,26 @@ class PosProvider with ChangeNotifier {
       _sending.remove(tid);
       notifyListeners();
     }
+  }
+
+  /// A definite "no" from the server: retrying the same items can never
+  /// succeed, so they wait for the waiter. Null = worth retrying (no signal,
+  /// server error, timeout, rate limit). offline-sync puts its reason word in
+  /// `status.message`, which lands in [ApiException.message].
+  static String? _refusalText(ApiException e) {
+    if (e.isNetwork || e.isAuth) return null;
+    if (e.code >= 500 || e.code == 408 || e.code == 429 || e.code < 400) {
+      return null;
+    }
+    return switch (e.message) {
+      'no_cart' =>
+        'This table was billed or cleared while these items were waiting.',
+      'menu_not_found' || 'item_missing_menu' =>
+        'An item was removed from the menu. Discard it and add it again.',
+      'cart_locked_by_paid_split' =>
+        'Part of this bill is already paid, so items cannot be added.',
+      _ => 'The server refused these items: ${e.message}',
+    };
   }
 
   static String _cartIdOf(List<Map<String, dynamic>> carts) =>
@@ -1433,7 +1481,7 @@ class PosProvider with ChangeNotifier {
     String tid, {
     bool background = false,
   }) async {
-    final carts = await _apiService.getCartItemsByTableId(tid, background: background);
+    final carts = await _apiService.getCartItemsByTableId(tid, background: background, fresh: true);
     final lines = carts.isEmpty ? null : carts.first['cartMenuData'];
     final line = lines is List
         ? lines.whereType<Map>().map((m) => Map<String, dynamic>.from(m)).where(
@@ -1696,101 +1744,98 @@ class PosProvider with ChangeNotifier {
     // server is reachable before anything prints.
     _isBusy = true;
     notifyListeners();
-    final hadDraft = _openDraft != null;
-    var ready = await flushDraft();
-    if (ready && (!hadDraft || _cartStale) && _isOpen(openTable)) {
-      ready = await _refreshCart(openTable);
-    }
-    _isBusy = false;
-    // The waiter may have left the table while it was sending.
-    if (!ready || !_isOpen(openTable)) {
-      notifyListeners();
-      return false;
-    }
-    final tid = resolvedTableId;
-    final cid = cartId;
-    if (tid.isEmpty || cid.isEmpty) {
-      _errorMessage = 'No items on this table yet';
-      notifyListeners();
-      return false;
-    }
-
-    _isBusy = true;
-    _errorMessage = null;
-    printError = null;
-    notifyListeners();
-
+    // One lock for the whole send + print; released however it ends.
     try {
-      // 1) Gather items from local state first to avoid network latency before print
-      List<CartLineItem> kotItems = _kotLinesFromMaps(
-        cartMenuItems
-            .where((i) =>
-                i['kotprint_status'] != 1 && i['kotprint_status'] != '1')
-            .toList(),
-      );
-      if (kotItems.isEmpty) kotItems = printCartLines;
-
-      // 2) Send unsent lines to kitchen backend if any
-      if (hasUnsentKotItems) {
-        await _apiService.sendKotToKitchen(cartId: cid);
-      }
-
-      // 3) Silent print KOT tickets (one per kitchen department, with ESC/POS autocut)
-      try {
-        final prefs = await ReceiptPrefs.load();
-        final customization = await _receiptCustomization.loadCached();
-        final groups = buildKotGroups(kotItems);
-        debugPrint('[Fatfox POS] KOT Print: ${kotItems.length} items divided into ${groups.length} department ticket(s):');
-        for (final g in groups) {
-          debugPrint('  - Station/Dept: "${g.name}", Items: ${g.items.map((i) => i.item.name).join(', ')}');
-        }
-        for (var i = 0; i < groups.length; i++) {
-          final group = groups[i];
-          final bytes = await _printer.generateKotBytes(
-            table: _printTable,
-            items: group.items,
-            restaurantName: prefs.header,
-            paperSize: prefs.paperSize,
-            department: group.name,
-            customization: customization,
-          );
-          await _printer.printBytes(bytes, role: PrinterRole.kot);
-          if (i < groups.length - 1) {
-            await Future.delayed(const Duration(milliseconds: 150));
-          }
-        }
-      } catch (e) {
-        printError = friendlyError(e);
-        debugPrint('[Fatfox POS] KOT thermal print error: $e');
-      }
-
-      // 4) Update status on backend to KOT_PRINT so order advances on server & table status updates
-      try {
-        await _apiService.setCartStatus(
-          cartId: cid,
-          tableStatus: 'KOT_PRINT',
-        );
-      } on ApiException catch (e) {
-        if (e.isAuth) rethrow;
-        debugPrint('[Fatfox POS] KOT_PRINT status failed: $e');
-      }
-
-      await _reloadCartData();
-
-      _isBusy = false;
-      notifyListeners();
-      markFloorDirty();
-      return true;
+      return await _sendKotLocked(openTable);
     } on ApiException catch (e) {
       _errorMessage = e.message;
       _sessionExpired = e.isAuth;
     } catch (e) {
       _errorMessage = friendlyError(e);
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+    return false;
+  }
+
+  Future<bool> _sendKotLocked(String openTable) async {
+    final hadDraft = _openDraft != null;
+    var ready = await flushDraft();
+    if (ready && (!hadDraft || _cartStale) && _isOpen(openTable)) {
+      ready = await _refreshCart(openTable);
+    }
+    // The waiter may have left the table while it was sending.
+    if (!ready || !_isOpen(openTable)) return false;
+    final tid = resolvedTableId;
+    final cid = cartId;
+    if (tid.isEmpty || cid.isEmpty) {
+      _errorMessage = 'No items on this table yet';
+      return false;
     }
 
-    _isBusy = false;
+    _errorMessage = null;
+    printError = null;
     notifyListeners();
-    return false;
+
+    // 1) Gather items from local state first to avoid network latency before print
+    List<CartLineItem> kotItems = _kotLinesFromMaps(
+      cartMenuItems
+          .where((i) =>
+              i['kotprint_status'] != 1 && i['kotprint_status'] != '1')
+          .toList(),
+    );
+    if (kotItems.isEmpty) kotItems = printCartLines;
+
+    // 2) Send unsent lines to kitchen backend if any
+    if (hasUnsentKotItems) {
+      await _apiService.sendKotToKitchen(cartId: cid);
+    }
+
+    // 3) Silent print KOT tickets (one per kitchen department, with ESC/POS autocut)
+    try {
+      final prefs = await ReceiptPrefs.load();
+      final customization = await _receiptCustomization.loadCached();
+      final groups = buildKotGroups(kotItems);
+      debugPrint('[Fatfox POS] KOT Print: ${kotItems.length} items divided into ${groups.length} department ticket(s):');
+      for (final g in groups) {
+        debugPrint('  - Station/Dept: "${g.name}", Items: ${g.items.map((i) => i.item.name).join(', ')}');
+      }
+      for (var i = 0; i < groups.length; i++) {
+        final group = groups[i];
+        final bytes = await _printer.generateKotBytes(
+          table: _printTable,
+          items: group.items,
+          restaurantName: prefs.header,
+          paperSize: prefs.paperSize,
+          department: group.name,
+          customization: customization,
+        );
+        await _printer.printBytes(bytes, role: PrinterRole.kot);
+        if (i < groups.length - 1) {
+          await Future.delayed(const Duration(milliseconds: 150));
+        }
+      }
+    } catch (e) {
+      printError = friendlyError(e);
+      debugPrint('[Fatfox POS] KOT thermal print error: $e');
+    }
+
+    // 4) Update status on backend to KOT_PRINT so order advances on server & table status updates
+    try {
+      await _apiService.setCartStatus(
+        cartId: cid,
+        tableStatus: 'KOT_PRINT',
+      );
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      debugPrint('[Fatfox POS] KOT_PRINT status failed: $e');
+    }
+
+    await _reloadCartData();
+
+    markFloorDirty();
+    return true;
   }
 
   // ============================================================
@@ -1937,59 +1982,65 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
     }
 
-    final tid = resolvedTableId;
-    String? early;
-    if (ConnectivityService.instance.syncOff) {
-      early = _syncOffPrint;
-    } else if (tid.isEmpty || !await _refreshCart(tid) || cartId.isEmpty) {
-      // Paper must match the server: never print from a cart the tablet only
-      // remembers (opened offline, or read before other devices' changes).
-      early = tid.isEmpty || _errorMessage == null
-          ? 'No items on this table yet'
-          : _errorMessage!;
-    }
-    if (early != null) {
+    try {
+      return (skipped: false, error: await _printBillLocked(paymentMode));
+    } finally {
       if (!holdLock) {
         _isBusy = false;
         notifyListeners();
       }
-      return (skipped: false, error: early);
     }
+  }
+
+  /// [printBill] under the caller's lock; returns the error, or null.
+  Future<String?> _printBillLocked(String? paymentMode) async {
+    final tid = resolvedTableId;
+    if (ConnectivityService.instance.syncOff) return _syncOffPrint;
+    // Items mid-send are not on the server cart yet (floor path included).
+    // Returned, not set on _errorMessage: the floor path restores the open
+    // table afterwards and must not leave this text on its screen.
+    if (_sending.contains(tid)) return _sendingMessage;
+    if (tid.isEmpty || !await _refreshCart(tid) || cartId.isEmpty) {
+      // Paper must match the server: never print from a cart the tablet only
+      // remembers (opened offline, or read before other devices' changes).
+      return tid.isEmpty || _errorMessage == null
+          ? 'No items on this table yet'
+          : _errorMessage!;
+    }
+    // Pinned now: later awaits must not pick up another table's state.
+    final cid = cartId;
+    final snapshot = cart;
+    final number = tableNumber;
 
     String? failure;
     try {
       if (hasUnsentKotItems) {
-        failure = 'Send KOT to kitchen before printing the bill';
+        return 'Send KOT to kitchen before printing the bill';
       }
-      if (failure == null) {
-        final data = await BillBuilder(_apiService).build(
-          tableId: tid,
-          tableNumber: tableNumber,
-          paymentMode: paymentMode,
-          cartSnapshot: cart,
-          taxRows: _taxConfig,
+      final data = await BillBuilder(_apiService).build(
+        tableId: tid,
+        tableNumber: number,
+        paymentMode: paymentMode,
+        cartSnapshot: snapshot,
+        taxRows: _taxConfig,
+      );
+      if (data == null) return 'No active cart found for this table';
+      final prefs = await ReceiptPrefs.load();
+      final customization = await _receiptCustomization.loadCached();
+      try {
+        final bytes = await _printer.generateBillBytes(
+          bill: data,
+          paperSize: prefs.paperSize,
+          customization: customization,
         );
-        if (data == null) {
-          failure = 'No active cart found for this table';
-        } else {
-          final prefs = await ReceiptPrefs.load();
-          final customization = await _receiptCustomization.loadCached();
-          try {
-            final bytes = await _printer.generateBillBytes(
-              bill: data,
-              paperSize: prefs.paperSize,
-              customization: customization,
-            );
-            await _printer.printBytes(bytes, role: PrinterRole.bill);
-          } catch (e) {
-            printError = friendlyError(e);
-            debugPrint('[Fatfox POS] Bill thermal print error: $e');
-            failure = 'Printer error: ${friendlyError(e)}';
-          }
-          await _markPrintedWithRetry(cartId);
-          await _reloadCartData();
-        }
+        await _printer.printBytes(bytes, role: PrinterRole.bill);
+      } catch (e) {
+        printError = friendlyError(e);
+        debugPrint('[Fatfox POS] Bill thermal print error: $e');
+        failure = 'Printer error: ${friendlyError(e)}';
       }
+      await _markPrintedWithRetry(cid);
+      await _reloadCartData();
     } on ApiException catch (e) {
       failure = e.message;
       _sessionExpired = e.isAuth;
@@ -1997,13 +2048,8 @@ class PosProvider with ChangeNotifier {
       failure = friendlyError(e);
       printError = failure;
     }
-
-    if (!holdLock) {
-      _isBusy = false;
-      notifyListeners();
-    }
     if (failure == null || printError != null) markFloorDirty();
-    return (skipped: false, error: failure);
+    return failure;
   }
 
   /// PRINTED is what unlocks Release — retry transport failures like admin.
@@ -2027,11 +2073,7 @@ class PosProvider with ChangeNotifier {
   /// Returns `null` if another action is in flight.
   Future<bool?> discardCart() async {
     if (_isBusy) return null;
-    if (_openTableSending) {
-      _errorMessage = _sendingMessage;
-      notifyListeners();
-      return false;
-    }
+    if (_refuseWhileSending(resolvedTableId)) return false;
     final cid = cartId;
     final d = _openDraft;
     if (cid.isEmpty) {
@@ -2073,6 +2115,7 @@ class PosProvider with ChangeNotifier {
   /// Returns `null` if another action is in flight.
   Future<bool?> settleAndPrintBill({String paymentType = 'CASH'}) async {
     if (_isBusy) return null;
+    if (_refuseWhileSending(resolvedTableId)) return false;
     final cid = cartId;
     if (cid.isEmpty) {
       _errorMessage = 'No active cart for this table';

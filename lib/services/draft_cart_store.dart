@@ -170,7 +170,10 @@ class TableDraft {
   final String? lastError;
   final bool conflict;
 
-  const TableDraft({
+  /// When the first item was added; kept across edits and sends.
+  final DateTime createdAt;
+
+  TableDraft({
     required this.restaurantId,
     required this.tableId,
     required this.key,
@@ -179,7 +182,8 @@ class TableDraft {
     this.lines = const [],
     this.lastError,
     this.conflict = false,
-  });
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
 
   factory TableDraft.start(String rid, String tid, String? cartId) =>
       TableDraft(
@@ -218,6 +222,7 @@ class TableDraft {
     lines: lines ?? this.lines,
     lastError: clearError ? null : (lastError ?? this.lastError),
     conflict: conflict ?? this.conflict,
+    createdAt: createdAt,
   );
 
   /// Adds [line], merging into an identical line like the server would.
@@ -252,6 +257,7 @@ class TableDraft {
     'lines': lines.map((l) => l.toJson()).toList(),
     'lastError': lastError,
     'conflict': conflict,
+    'createdAt': createdAt.toIso8601String(),
   };
 
   factory TableDraft.fromJson(Map<String, dynamic> j) => TableDraft(
@@ -268,6 +274,8 @@ class TableDraft {
         .toList(),
     lastError: j['lastError']?.toString(),
     conflict: j['conflict'] == true,
+    // Rows saved before this field existed read as "now" until next saved.
+    createdAt: DateTime.tryParse(j['createdAt']?.toString() ?? ''),
   );
 }
 

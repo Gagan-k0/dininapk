@@ -372,21 +372,32 @@ class ApiService {
   Future<List<Map<String, dynamic>>> getCartItemsByTableId(
     String tableId, {
     bool background = false,
+    bool fresh = false,
   }) async {
     final env = await _client.get(
       ApiConfig.getCartDetails,
-      query: {'tableId': tableId},
+      query: _tableQuery(tableId, fresh),
       background: background,
     );
     return env.mapList;
   }
 
+  /// api-server caches these reads for 60s keyed by the full URL, and
+  /// offline-sync does not clear that cache — a unique param skips it.
+  static Map<String, String> _tableQuery(String tableId, bool fresh) => {
+    'tableId': tableId,
+    if (fresh) '_ts': DateTime.now().microsecondsSinceEpoch.toString(),
+  };
+
   /// GET /restaurant/cart/vieworder-save?tableId= — cart header joined with the
   /// restaurant doc (name/address/gstin/UPI). Used for the printed bill header.
-  Future<Map<String, dynamic>?> getBillView(String tableId) async {
+  Future<Map<String, dynamic>?> getBillView(
+    String tableId, {
+    bool fresh = false,
+  }) async {
     final env = await _client.get(
       ApiConfig.billView,
-      query: {'tableId': tableId},
+      query: _tableQuery(tableId, fresh),
     );
     if (env.map != null) return env.map;
     final list = env.mapList;

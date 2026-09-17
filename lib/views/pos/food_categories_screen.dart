@@ -633,7 +633,17 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
 
   Future<void> _handleItemTap(PosProvider pos, MenuItem item) async {
     await _itemTapGuard.run(() async {
-      if (pos.isLoading || pos.isBusy) return;
+      if (pos.isLoading) return;
+      if (pos.isBusy) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please wait — finishing the last action.'),
+            duration: Duration(milliseconds: 1200),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
 
       if (item.isCustomAddonTrigger) {
         await _showCustomExtraDialog(pos);
