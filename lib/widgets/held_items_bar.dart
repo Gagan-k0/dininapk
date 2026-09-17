@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../providers/pos_provider.dart';
 import '../services/connectivity_service.dart';
+import '../utils/pos_toast.dart';
 
 /// Shown when this table's unsent items were held back (the order changed,
 /// another tablet holds the table, or a send may already have landed).
@@ -76,12 +77,10 @@ class HeldItemsBar extends StatelessWidget {
     }
     final ok = await pos.resendDraft();
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(ok ? 'Held items sent' : (pos.errorMessage ?? 'Could not send')),
-        backgroundColor: ok ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-      ),
+    showPosToast(
+      context,
+      ok ? 'Held items sent' : (pos.errorMessage ?? 'Could not send'),
+      error: !ok,
     );
   }
 
