@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'package:provider/provider.dart';
+
+import '../providers/pos_provider.dart';
 import '../services/connectivity_service.dart';
+import '../services/draft_cart_store.dart';
 
 /// App-bar chip: Online / No signal / Sync off. Tapping opens the Sync switch.
 /// On the POS screen, pass [menuUpdatedAt] + [onSyncMenu] to add the menu row.
@@ -42,14 +46,19 @@ class SyncStatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final net = ConnectivityService.instance;
     return ListenableBuilder(
-      listenable: net,
+      listenable: Listenable.merge([net, DraftCartStore.pendingTables]),
       builder: (context, _) {
         final l = look(net.state);
+        final pending = DraftCartStore.pendingTables.value;
         // Phones: the POS search field needs the width, so show the icon only.
         if (MediaQuery.sizeOf(context).width < 600) {
           return IconButton(
             tooltip: 'Sync: ${l.label}',
-            icon: Icon(l.icon, color: l.color),
+            icon: Badge(
+              isLabelVisible: pending > 0,
+              label: Text('$pending'),
+              child: Icon(l.icon, color: l.color),
+            ),
             onPressed: () => _openSheet(context),
           );
         }
@@ -61,7 +70,7 @@ class SyncStatusChip extends StatelessWidget {
             child: ActionChip(
               avatar: Icon(l.icon, size: 16, color: l.color),
               label: Text(
-                l.label,
+                pending > 0 ? '${l.label} · $pending unsent' : l.label,
                 style: TextStyle(
                   color: l.color,
                   fontWeight: FontWeight.w600,
@@ -84,9 +93,13 @@ class SyncStatusChip extends StatelessWidget {
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => ListenableBuilder(
-        listenable: ConnectivityService.instance,
+        listenable: Listenable.merge([
+          ConnectivityService.instance,
+          DraftCartStore.pendingTables,
+        ]),
         builder: (sheetContext, _) {
           final net = ConnectivityService.instance;
+          final pending = DraftCartStore.pendingTables.value;
           final noSignal = net.state == SyncState.offlineNoSignal;
           final updated = menuUpdatedAt;
           return SafeArea(
@@ -107,6 +120,25 @@ class SyncStatusChip extends StatelessWidget {
                     value: !net.syncOff,
                     onChanged: net.setSyncOn,
                   ),
+                  if (pending > 0)
+                    ListTile(
+                      leading: const Icon(Icons.outbox_outlined),
+                      title: Text(
+                        'Unsent items on $pending table${pending == 1 ? '' : 's'}',
+                      ),
+                      subtitle: const Text(
+                        'Held items wait on their table until you choose.',
+                      ),
+                      trailing: FilledButton.tonal(
+                        onPressed: net.isOnline
+                            ? () => Provider.of<PosProvider>(
+                                context,
+                                listen: false,
+                              ).flushAllDrafts()
+                            : null,
+                        child: const Text('Send now'),
+                      ),
+                    ),
                   if (onSyncMenu != null)
                     ListTile(
                       leading: const Icon(Icons.restaurant_menu),

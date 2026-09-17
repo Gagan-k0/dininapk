@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -14,6 +15,7 @@ import 'package:dineinapk/services/auth_service.dart';
 import 'package:dineinapk/services/connectivity_service.dart';
 import 'package:dineinapk/services/draft_cart_store.dart';
 import 'package:dineinapk/services/menu_cache_service.dart';
+import 'package:dineinapk/widgets/held_items_bar.dart';
 
 const tableId = '64b000000000000000000001';
 const cartA = '64c000000000000000000001';
@@ -368,6 +370,148 @@ void main() {
       expect(pos.canRelease, isFalse);
       expect(await pos.printBill(), contains('could not be refreshed'));
       expect(server.count('/vieworder-save'), 0);
+    });
+
+    test('Send now sends every table, skips held ones, and updates the count', () async {
+      const t2 = '64b000000000000000000002';
+      const t3 = '64b000000000000000000003';
+      final store = DraftCartStore();
+      server.cart = [cartDoc(cartA, [])];
+      await store.save(TableDraft.start('r1', t2, cartA).add(line('a')));
+      await store.save(TableDraft.start('r1', t3, cartA).add(line('b')).copyWith(conflict: true));
+      expect(DraftCartStore.pendingTables.value, 2);
+
+      expect(await pos.flushAllDrafts(), 1);
+      expect(server.count('/offline-sync'), 1);
+      expect(jsonDecode(server.last('/offline-sync').body)['table_id'], t2);
+      expect(await store.load('r1', t2), isNull);
+      expect((await store.load('r1', t3))!.conflict, isTrue);
+      expect(DraftCartStore.pendingTables.value, 1);
+    });
+
+    test('nothing is sent in the background without a known tax', () async {
+      SharedPreferences.setMockInitialValues({});
+      await AuthService().saveSession(token: 'tok', restaurantId: 'r1');
+      await DraftCartStore().save(TableDraft.start('r1', tableId, cartA).add(line('a')));
+      server.cart = [cartDoc(cartA, [])];
+      final fresh = PosProvider(api: ApiService(client: ApiClient(httpClient: server.client)));
+      expect(await fresh.flushAllDrafts(), 0);
+      expect(server.count('/offline-sync'), 0);
+    });
+
+    test('coming back online sends waiting items', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await ConnectivityService.instance.setSyncOn(false);
+      await pos.addItemToCart(item);
+      ConnectivityService.instance.onBackOnline = () => pos.flushAllDrafts();
+      addTearDown(() => ConnectivityService.instance.onBackOnline = null);
+      await ConnectivityService.instance.setSyncOn(true);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(server.count('/offline-sync'), 1);
+    });
+
+    test('Send to current order re-keys and sends a held draft', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      final oldKey = pos.draft!.key;
+      server.cart = [cartDoc(cartB, [])];
+      expect(await pos.flushDraft(), isFalse); // held: order changed
+
+      expect(await pos.resendDraft(), isTrue);
+      final sync = server.last('/offline-sync');
+      expect(sync.headers['Idempotency-Key'], isNot(oldKey));
+      expect(pos.draft, isNull);
+    });
+
+    test('Discard drops held items for good', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      server.cart = [];
+      await pos.flushDraft();
+      await pos.discardDraft();
+      expect(pos.draft, isNull);
+      expect(await DraftCartStore().load('r1', tableId), isNull);
+      expect(DraftCartStore.pendingTables.value, 0);
+    });
+
+    testWidgets('held bar fits a phone and Discard asks first', (tester) async {
+      tester.view.physicalSize = const Size(360, 740);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.runAsync(() async {
+        server.cart = [cartDoc(cartA, [])];
+        await open();
+        await pos.addItemToCart(item);
+        server.cart = [];
+        await pos.flushDraft();
+      });
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(body: Column(children: [HeldItemsBar(pos: pos)])),
+      ));
+      expect(find.textContaining('1 unsent item held'), findsOneWidget);
+
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+      expect(find.text('Discard held items?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(pos.draft, isNotNull);
+    });
+
+    test('Send now re-reads each table: items discarded meanwhile are not sent', () async {
+      const t2 = '64b000000000000000000002';
+      const t3 = '64b000000000000000000003';
+      final store = DraftCartStore();
+      server.cart = [cartDoc(cartA, [])];
+      await open(); // tax known
+      await store.save(TableDraft.start('r1', t2, cartA).add(line('a')));
+      await store.save(TableDraft.start('r1', t3, cartA).add(line('b')));
+      server.failOn = (r) {
+        // While table 2 sends, the waiter discards table 3 elsewhere.
+        if (r.url.path.endsWith('/offline-sync')) return store.delete('r1', t3);
+        return null;
+      };
+      expect(await pos.flushAllDrafts(), 1);
+      expect(server.count('/offline-sync'), 1);
+    });
+
+    test('after switching restaurant, the old restaurant\'s items are never sent', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item); // r1 draft
+      await AuthService().logout();
+      await AuthService().saveSession(token: 'tok2', restaurantId: 'r2');
+      expect(await pos.flushAllDrafts(), 0);
+      expect(server.count('/offline-sync'), 0);
+      expect(DraftCartStore.pendingTables.value, 0);
+    });
+
+    test('a background send for another table does not block taps here', () async {
+      const t2 = '64b000000000000000000002';
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await DraftCartStore().save(TableDraft.start('r1', t2, cartA).add(line('a')));
+      Future<bool>? tapHere;
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-sync')) tapHere = pos.addItemToCart(item);
+        return null;
+      };
+      await pos.flushAllDrafts();
+      expect(await tapHere, isTrue);
+      expect(pos.draft!.itemCount, 1);
+    });
+
+    test('a background problem on another table never shows on this screen', () async {
+      const t2 = '64b000000000000000000002';
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await DraftCartStore().save(TableDraft.start('r1', t2, cartB).add(line('a')));
+      await pos.flushAllDrafts(); // t2's order changed → parked
+      expect(pos.errorMessage, isNull);
+      expect((await DraftCartStore().load('r1', t2))!.conflict, isTrue);
     });
   });
 }

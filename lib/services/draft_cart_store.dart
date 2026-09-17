@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'device_id_service.dart';
@@ -277,6 +278,26 @@ class DraftCartStore {
   static const String _snapPrefix = 'waiter_cart_snap_';
 
   static String _draftKey(String rid, String tid) => '$_draftPrefix${rid}_$tid';
+
+  /// Tables on this tablet with unsent items — drives the Sync chip badge.
+  static final ValueNotifier<int> pendingTables = ValueNotifier(0);
+
+  /// Every stored draft for [rid] (other restaurants' rows are never read).
+  Future<List<TableDraft>> all(String rid) async {
+    if (rid.isEmpty) return const [];
+    final prefs = await SharedPreferences.getInstance();
+    final out = <TableDraft>[];
+    for (final k in prefs.getKeys().where((k) => k.startsWith('$_draftPrefix${rid}_'))) {
+      final d = await load(rid, k.substring('$_draftPrefix${rid}_'.length));
+      if (d != null) out.add(d);
+    }
+    return out;
+  }
+
+  /// Recounts [pendingTables] for [rid].
+  Future<void> refreshPending(String rid) async {
+    pendingTables.value = (await all(rid)).length;
+  }
   static String _snapKey(String rid, String tid) => '$_snapPrefix${rid}_$tid';
 
   Future<TableDraft?> load(String rid, String tid) async {
@@ -302,11 +323,13 @@ class DraftCartStore {
     } else {
       await prefs.setString(k, jsonEncode(d.toJson()));
     }
+    await refreshPending(d.restaurantId);
   }
 
   Future<void> delete(String rid, String tid) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_draftKey(rid, tid));
+    await refreshPending(rid);
   }
 
   /// Last server view of a table, so it can still be opened offline.

@@ -22,6 +22,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       Provider.of<TableProvider>(context, listen: false).ensureLoaded();
+      // Also recounts unsent items for the Sync chip after login.
+      Provider.of<PosProvider>(context, listen: false).flushAllDrafts();
     });
   }
 
@@ -809,6 +811,10 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     );
     if (!context.mounted) return;
     final pos = Provider.of<PosProvider>(context, listen: false);
+    // Items left unsent on that table go now, without holding up the floor.
+    pos.flushAllDrafts().then((sent) {
+      if (sent > 0 && mounted) tableProv.refresh();
+    });
     if (pos.consumeFloorDirty()) {
       await tableProv.refresh();
     } else {

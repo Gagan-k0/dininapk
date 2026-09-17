@@ -25,6 +25,10 @@ class ConnectivityService with ChangeNotifier {
   /// flows back through [reportReachable] / [reportNetworkFailure].
   Future<void> Function()? probe;
 
+  /// Called whenever the tablet becomes able to reach the server again
+  /// (Sync switched on, or the first answer after no signal).
+  void Function()? onBackOnline;
+
   bool _manualOff = false;
   bool _noSignal = false;
   Timer? _probeTimer;
@@ -58,6 +62,7 @@ class ConnectivityService with ChangeNotifier {
       unawaited(_runProbe()); // turning Sync on should answer "is it back?" now
     }
     notifyListeners();
+    if (isOnline) onBackOnline?.call();
   }
 
   /// The server answered (any verdict, even a refusal).
@@ -66,6 +71,7 @@ class ConnectivityService with ChangeNotifier {
     _noSignal = false;
     _stopProbe();
     notifyListeners();
+    if (isOnline) onBackOnline?.call();
   }
 
   /// A request never got a verdict (DNS, socket, timeout).

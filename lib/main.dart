@@ -51,6 +51,7 @@ class _FatfoxDineInAppState extends State<FatfoxDineInApp> {
   void initState() {
     super.initState();
     _initSession();
+    ConnectivityService.instance.onBackOnline = () => _pos.flushAllDrafts();
     // A 401 anywhere → drop the session, clear floor state, back to login.
     ApiClient.onSessionExpired = (reason) async {
       await _auth.sessionExpired(reason);

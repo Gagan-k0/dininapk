@@ -85,7 +85,12 @@ class PosProvider with ChangeNotifier {
   // ── Draft (items added on this tablet, not sent yet) ──
   TableDraft? _draft;
   String _restaurantId = '';
-  bool _flushing = false;
+  /// Tables with a send in flight. Per table, so a background send for one
+  /// table never blocks the waiter on another.
+  final Set<String> _sending = {};
+  bool get _openTableSending => _sending.contains(resolvedTableId);
+  bool _sendingAll = false;
+  bool _sendAllAgain = false;
 
   // ── Tax ──
   List<Map<String, dynamic>> _taxConfig = [];
@@ -849,7 +854,7 @@ class PosProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
-    if (_flushing) {
+    if (_sending.contains(tid)) {
       _errorMessage = _sendingMessage;
       notifyListeners();
       return false;
@@ -1039,7 +1044,7 @@ class PosProvider with ChangeNotifier {
     if (d == null) return false;
     final lineId = cartmenuId.substring(TableDraft.lineIdPrefix.length);
     final locked = d.creatingLine?.lineId == lineId && !d.conflict;
-    if (_flushing || locked) {
+    if (_openTableSending || locked) {
       _errorMessage = locked
           ? 'This item may already be on the order. Send the KOT, then cancel it if needed.'
           : _sendingMessage;
@@ -1071,23 +1076,121 @@ class PosProvider with ChangeNotifier {
   /// if the table's cart changed meanwhile, the draft is flagged
   /// [TableDraft.conflict] and waits for the waiter. Pinned to the draft's own
   /// table, so leaving the screen mid-send cannot touch another table.
-  Future<bool> flushDraft({bool background = false}) async {
+  Future<bool> flushDraft() async {
     final current = _draft;
     if (current == null) return true;
-    if (current.conflict) {
-      _errorMessage =
-          current.lastError ?? 'Unsent items on this table need attention.';
-      notifyListeners();
-      return false;
+    return _flush(current, background: false);
+  }
+
+  /// Sends every table's unsent items (Sync on, back online, leaving a table).
+  /// Parked drafts wait for the waiter. Returns how many tables were sent.
+  /// Never writes the open screen's error text.
+  Future<int> flushAllDrafts() async {
+    // Always the signed-in restaurant: after a logout the provider may still
+    // hold the previous restaurant's id and tax.
+    final rid = await _authService.getRestaurantId() ?? '';
+    if (rid.isEmpty) return 0;
+    if (rid != _restaurantId) {
+      _restaurantId = rid;
+      _taxConfig = [];
+      _consolidatedTax = null;
+      _draft = null;
     }
-    if (_flushing) {
+    final tables = (await _drafts.all(rid)).map((d) => d.tableId).toList();
+    DraftCartStore.pendingTables.value = tables.length;
+    if (!ConnectivityService.instance.isOnline) return 0;
+    if (_sendingAll) {
+      _sendAllAgain = true; // e.g. back online while a loop is running
+      return 0;
+    }
+    // Tax is restaurant-wide; without it a send would price the cart untaxed.
+    if (_consolidatedTax == null) {
+      final cached = await _menuCache.load(rid);
+      if (cached != null && cached.taxRows.isNotEmpty) {
+        _taxConfig = cached.taxRows;
+        _buildConsolidatedTax();
+      }
+    }
+    if (_consolidatedTax == null) return 0;
+
+    _sendingAll = true;
+    var sent = 0;
+    try {
+      for (final tid in tables) {
+        // Re-read right before sending: the waiter may have added, sent,
+        // parked or discarded this table's items since the loop started.
+        final open = _draft;
+        final d = open != null && open.tableId == tid
+            ? open
+            : await _drafts.load(rid, tid);
+        if (d == null || d.conflict || _sending.contains(tid)) continue;
+        if (await _flush(d, background: true)) sent++;
+        if (_sessionExpired || !ConnectivityService.instance.isOnline) break;
+      }
+    } finally {
+      _sendingAll = false;
+    }
+    notifyListeners();
+    if (_sendAllAgain) {
+      _sendAllAgain = false;
+      sent += await flushAllDrafts();
+    }
+    return sent;
+  }
+
+  /// "Send to current order" on a parked draft: the waiter has checked the
+  /// table, so the items go to whatever order is open now (or a new one),
+  /// under a NEW key — the old key's receipt would answer duplicate/409.
+  Future<bool> resendDraft() async {
+    final d = _draft;
+    if (d == null || !d.conflict) return false;
+    if (_sending.contains(d.tableId)) {
       _errorMessage = _sendingMessage;
       notifyListeners();
       return false;
     }
-    _flushing = true;
+    try {
+      final liveId = _cartIdOf(await _apiService.getCartItemsByTableId(d.tableId));
+      var next = TableDraft.start(d.restaurantId, d.tableId, liveId);
+      for (final l in d.allLines) {
+        next = next.add(l);
+      }
+      await _saveDraft(next);
+    } on ApiException catch (e) {
+      _errorMessage = e.message;
+      _sessionExpired = e.isAuth;
+      notifyListeners();
+      return false;
+    }
+    return flushDraft();
+  }
+
+  /// Drops the open table's unsent items (confirmed in the UI).
+  Future<void> discardDraft() async {
+    final d = _draft;
+    if (d == null || _sending.contains(d.tableId)) return;
+    _draft = null;
+    _errorMessage = null;
+    notifyListeners();
+    await _drafts.delete(d.restaurantId, d.tableId);
+  }
+
+  Future<bool> _flush(TableDraft current, {required bool background}) async {
+    final tid = current.tableId;
+    // Background sends record problems on their own draft only.
+    void say(String m) {
+      if (!background) _errorMessage = m;
+    }
+
+    if (current.conflict || _sending.contains(tid)) {
+      say(current.conflict
+          ? (current.lastError ?? 'Unsent items on this table need attention.')
+          : _sendingMessage);
+      notifyListeners();
+      return false;
+    }
+    _sending.add(tid);
     var d = current;
-    final tid = d.tableId;
     var sent = false;
     try {
       var liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid));
@@ -1099,6 +1202,7 @@ class PosProvider with ChangeNotifier {
           // now: it may have reached an order that was billed since. Only the
           // waiter can tell, so never re-create it automatically.
           return await _markConflict(
+            background,
             d,
             'An item from this table may already be on a bill that was closed. Check before sending it again.',
           );
@@ -1130,12 +1234,14 @@ class PosProvider with ChangeNotifier {
           await _saveDraft(d);
         } else {
           return await _markConflict(
+            background,
             d,
             'This table was opened on another device while these items were waiting.',
           );
         }
       } else if (d.baselineCartId != liveId) {
         return await _markConflict(
+            background,
           d,
           liveId.isEmpty
               ? 'This table was billed or cleared while these items were waiting.'
@@ -1162,28 +1268,29 @@ class PosProvider with ChangeNotifier {
       markFloorDirty();
       return true;
     } on ApiException catch (e) {
-      _sessionExpired = e.isAuth;
+      if (e.isAuth) _sessionExpired = true;
       if (sent) {
         if (_isOpen(tid)) _cartStale = true;
-        _errorMessage = _staleMessage;
+        say(_staleMessage);
         return false;
       }
       if (e.code == 409 || e.isTableClaimed) {
         return await _markConflict(
+            background,
           d,
           e.isTableClaimed
               ? 'Another tablet is serving this table.'
               : 'These items were edited after a send that may have reached the server. Check the order before sending again.',
         );
       }
-      _errorMessage = e.message;
+      say(e.message);
       await _saveDraft(d.copyWith(lastError: e.message));
       return false;
     } catch (e) {
-      _errorMessage = friendlyError(e);
+      say(friendlyError(e));
       return false;
     } finally {
-      _flushing = false;
+      _sending.remove(tid);
       notifyListeners();
     }
   }
@@ -1191,8 +1298,8 @@ class PosProvider with ChangeNotifier {
   static String _cartIdOf(List<Map<String, dynamic>> carts) =>
       carts.isEmpty ? '' : (carts.first['_id']?.toString() ?? '');
 
-  Future<bool> _markConflict(TableDraft d, String why) async {
-    _errorMessage = why;
+  Future<bool> _markConflict(bool background, TableDraft d, String why) async {
+    if (!background) _errorMessage = why;
     await _saveDraft(d.copyWith(conflict: true, lastError: why));
     return false;
   }
@@ -1211,7 +1318,8 @@ class PosProvider with ChangeNotifier {
         taxName: _consolidatedTax?['name']?.toString(),
         taxValueType: _consolidatedTax?['value_type']?.toString(),
         taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
-        containerPrice: _containerPriceArg,
+        // Only used when the table has no cart, so there is no container charge yet.
+        containerPrice: '0',
         quantity: l.quantity,
         description: l.description,
       );
@@ -1263,7 +1371,9 @@ class PosProvider with ChangeNotifier {
         taxId: _consolidatedTax?['_id']?.toString(),
         taxValueType: _consolidatedTax?['value_type']?.toString(),
         taxValueAmount: _consolidatedTax?['value_amount']?.toString(),
-        containerPrice: _containerPriceArg,
+        containerPrice: _num(carts.first['container_price']) > 0
+            ? carts.first['container_price'].toString()
+            : '0',
       );
       final repriced = env.mapList;
       return repriced.isNotEmpty && repriced.first.containsKey('cartMenuData')
@@ -1805,6 +1915,11 @@ class PosProvider with ChangeNotifier {
   /// Admin Discard: delete the whole cart without creating an Order/ledger.
   /// Confirmed in the UI before calling. Does not settle payment.
   Future<bool> discardCart() async {
+    if (_openTableSending) {
+      _errorMessage = _sendingMessage;
+      notifyListeners();
+      return false;
+    }
     final cid = cartId;
     final d = _draft;
     if (cid.isEmpty) {

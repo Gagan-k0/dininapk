@@ -11,6 +11,7 @@ import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
+import '../../widgets/held_items_bar.dart';
 import '../../widgets/sync_status_chip.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
@@ -156,6 +157,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 if (pos.isBusy)
                   const LinearProgressIndicator(minHeight: 2, color: Color(0xFFF97316)),
                 if (pos.cartError != null) _buildCartErrorBar(pos),
+                HeldItemsBar(pos: pos),
                 Expanded(
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
