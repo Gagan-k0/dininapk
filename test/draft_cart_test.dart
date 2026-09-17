@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:dineinapk/models/menu_model.dart';
 import 'package:dineinapk/providers/pos_provider.dart';
+import 'package:dineinapk/providers/table_provider.dart';
 import 'package:dineinapk/services/api_client.dart';
 import 'package:dineinapk/services/api_service.dart';
 import 'package:dineinapk/services/auth_service.dart';
@@ -368,7 +369,7 @@ void main() {
       };
       expect(await pos.flushDraft(), isFalse);
       expect(pos.canRelease, isFalse);
-      expect(await pos.printBill(), contains('could not be refreshed'));
+      expect(await pos.printBill(), contains('Cannot reach the server'));
       expect(server.count('/vieworder-save'), 0);
     });
 
@@ -512,6 +513,118 @@ void main() {
       await pos.flushAllDrafts(); // t2's order changed → parked
       expect(pos.errorMessage, isNull);
       expect((await DraftCartStore().load('r1', t2))!.conflict, isTrue);
+    });
+
+    test('no signal: KOT prints nothing when the server cannot be reached', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1}])];
+      await open();
+      server.failOn = (r) => const SocketException('down');
+      expect(await pos.sendKotOrder(), isFalse);
+      expect(server.count('/setcartstatus'), 0);
+      expect(pos.printError, isNull, reason: 'never reached the printer');
+    });
+
+    test('a table opened offline re-reads the server before a bill', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1}])];
+      await open(); // snapshot saved
+      await ConnectivityService.instance.setSyncOn(false);
+      pos = PosProvider(api: ApiService(client: ApiClient(httpClient: server.client)));
+      final before = server.requests.length;
+      await open();
+      expect(server.requests.length, before, reason: 'known offline: no waiting on requests');
+      expect(pos.filteredMenuItems, isNotEmpty, reason: 'cold start still shows the menu');
+
+      await ConnectivityService.instance.setSyncOn(true);
+      // Another device added an item meanwhile.
+      server.cart = [cartDoc(cartA, [
+        {'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1},
+        {'_id': 'l1', 'menu_id': soup, 'quantity': 2, 'kot_status': 1, 'kotprint_status': 1},
+      ])];
+      final from = server.requests.length;
+      await pos.printBill();
+      final paths = server.requests.skip(from).map((r) => r.url.path).toList();
+      final firstRead = paths.indexWhere((p) => p.endsWith('/listallcartmenus'));
+      final billView = paths.indexWhere((p) => p.contains('vieworder'));
+      expect(firstRead, isNot(-1));
+      expect(firstRead, lessThan(billView), reason: 'cart re-read before the bill is built');
+    });
+
+    test('unsent items on one table never block the floor bill of another', () async {
+      const other = '64b000000000000000000099';
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item); // this table: unsent
+      server.cart = [cartDoc(cartB, [{'_id': 'x', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1}])];
+      final err = await pos.printBillForFloorTable(tableId: other, areaId: 'area1');
+      expect(err ?? '', isNot(contains('Send KOT')));
+      expect(pos.draft, isNotNull, reason: 'back on the open table, its items remain');
+    });
+
+    test('floor settle sees unsent items stored on the tablet', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      expect(await pos.hasUnsentItems(tableId), isTrue);
+      expect(await pos.hasUnsentItems('64b000000000000000000099'), isFalse);
+    });
+
+    test('tax-inclusive (BACKWARD) prices get no extra estimated tax', () async {
+      await MenuCacheService().save(
+        restaurantId: 'r1',
+        categories: [{'_id': 'c1', 'category_name': 'Soups'}],
+        items: [{'_id': soup, 'name': 'Soup', 'price': 90}],
+        taxRows: [
+          {'_id': 't1', 'name': 'GST', 'tax_type': 'BACKWARD', 'value_type': 'PERCENTAGE', 'value_amount': 5},
+        ],
+      );
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await pos.addItemToCart(item);
+      expect(pos.taxAmount, 0);
+      expect(pos.grandTotal, 90);
+    });
+
+    test('a background send never logs the waiter out', () async {
+      var loggedOut = 0;
+      ApiClient.onSessionExpired = (_) => loggedOut++;
+      addTearDown(() => ApiClient.onSessionExpired = null);
+      server.cart = [cartDoc(cartA, [])];
+      await open();
+      await DraftCartStore().save(TableDraft.start('r1', '64b000000000000000000002', cartA).add(line('a')));
+      server.failOn = (r) => {'status': {'code': 401, 'message': 'Invalid Token'}};
+      await pos.flushAllDrafts();
+      expect(loggedOut, 0);
+    });
+
+    test('cold start with no connection shows the last floor', () async {
+      final floorServer = FakeServer();
+      final auth = AuthService();
+      final api = ApiService(auth: auth, client: ApiClient(auth: auth, httpClient: floorServer.client));
+      await DraftCartStore().saveFloor('r1',
+          areas: [{'_id': 'area1', 'name': 'Main'}],
+          tables: [{'_id': tableId, 'table_number': '5', 'area_id': 'area1'}]);
+      floorServer.failOn = (r) => const SocketException('down');
+      final floor = TableProvider(api: api, auth: auth);
+      await floor.loadDashboardData();
+      expect(floor.tables.single.tableNumber, '5');
+      expect(floor.isStale, isTrue);
+    });
+
+    test('a second BILL tap during the cart read does not print twice', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1}])];
+      await open();
+      final first = pos.printBill();
+      expect(pos.isBusy, isTrue, reason: 'busy before the network read');
+      await first;
+    });
+
+    test('after discard, an offline reload never repaints the old cart', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 0}])];
+      await open();
+      expect(await pos.discardCart(), isTrue);
+      server.failOn = (r) => const SocketException('down');
+      await pos.reloadCart();
+      expect(pos.cartId, isEmpty);
     });
   });
 }

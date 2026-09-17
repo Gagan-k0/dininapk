@@ -213,15 +213,20 @@ class _FakeApiService extends ApiService {
   ApiException? settleError;
 
   @override
-  Future<List<TableArea>> getAreas() async {
+  Future<List<Map<String, dynamic>>> getAreaMaps() async {
     if (floorError != null) throw floorError!;
-    return areasResult;
+    return [
+      for (final a in areasResult) {'_id': a.id, 'name': a.name},
+    ];
   }
 
   @override
-  Future<List<DineInTable>> getTables() async {
+  Future<List<Map<String, dynamic>>> getTableMaps() async {
     if (floorError != null) throw floorError!;
-    return tablesResult;
+    return [
+      for (final t in tablesResult)
+        {'_id': t.id, 'table_number': t.tableNumber, 'area_id': t.areaId},
+    ];
   }
 
   @override

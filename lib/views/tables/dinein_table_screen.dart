@@ -804,6 +804,8 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
     TableProvider tableProv,
     DineInTable table,
   ) async {
+    // Keeps the table number known even if the table is opened offline.
+    Provider.of<PosProvider>(context, listen: false).setActiveTable(table);
     await Navigator.pushNamed(
       context,
       '/food-categories',
@@ -1473,6 +1475,13 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
       _toast('Print the bill before settling', color: const Color(0xFFD97706));
       return;
     }
+    // The floor card only knows the server; unsent items live on this tablet.
+    final pos = Provider.of<PosProvider>(context, listen: false);
+    if (await pos.hasUnsentItems(table.id)) {
+      _toast(PosProvider.unsentItemsMessage, error: true);
+      return;
+    }
+    if (!context.mounted) return;
     final mode = await showPaymentModeSheet(
       context,
       title: 'Settle Table ${table.tableNumber}',

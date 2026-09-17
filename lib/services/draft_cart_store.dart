@@ -368,6 +368,53 @@ class DraftCartStore {
     }
   }
 
+  /// Last floor (areas + tables) so the app can start with no connection.
+  /// Shares the snapshot prefix, so logout clears it too.
+  Future<void> saveFloor(
+    String rid, {
+    required List<Map<String, dynamic>> areas,
+    required List<Map<String, dynamic>> tables,
+  }) async {
+    if (rid.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      '${_snapPrefix}floor_$rid',
+      jsonEncode({
+        'areas': areas,
+        'tables': tables,
+        'at': DateTime.now().toIso8601String(),
+      }),
+    );
+  }
+
+  Future<
+    ({
+      List<Map<String, dynamic>> areas,
+      List<Map<String, dynamic>> tables,
+      DateTime? at,
+    })?
+  >
+  loadFloor(String rid) async {
+    if (rid.isEmpty) return null;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('${_snapPrefix}floor_$rid');
+    if (raw == null) return null;
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      List<Map<String, dynamic>> maps(Object? v) => (v as List? ?? const [])
+          .whereType<Map>()
+          .map((m) => Map<String, dynamic>.from(m))
+          .toList();
+      return (
+        areas: maps(j['areas']),
+        tables: maps(j['tables']),
+        at: DateTime.tryParse(j['at']?.toString() ?? ''),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<void> clearSnapshots() async {
     final prefs = await SharedPreferences.getInstance();
     for (final k in prefs.getKeys().where((k) => k.startsWith(_snapPrefix))) {

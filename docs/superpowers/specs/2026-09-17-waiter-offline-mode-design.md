@@ -17,7 +17,9 @@ Status: approved design, 2026-09-17. Branch `feat/waiter-offline-mode` (worktree
   Rationale: the api-server offline contract covers draft lines + settle only; a
   fully offline KOT/bill design was reviewed and rejected in this workspace.
 * **Online cart:** local-first, flushed in ONE request on KOT/Bill.
-* **Conflicts:** surfaced to the waiter (Retry / Move / Discard), never auto-resolved.
+* **Conflicts:** surfaced to the waiter, never auto-resolved. As built: a held-items
+  bar with **Send to current order** (new key, onto whatever order is open now) and
+  **Discard**, both confirmed.
 
 ## Server contract (already on api-server `main`, verified 2026-09-17)
 
@@ -88,7 +90,9 @@ Status: approved design, 2026-09-17. Branch `feat/waiter-offline-mode` (worktree
   is fetched again.
 * `flushDraft()` re-reads the live cart and compares it with the draft's baseline cart
   id; any difference is a conflict (never auto-applied). Then one `offline-sync` with
-  the stored `Idempotency-Key`. Called by KOT (Phase 4 adds Sync and reconnect).
+  the stored `Idempotency-Key`. Called by KOT, and (Phase 4) for every table when
+  the waiter returns to the floor, when the tablet is back online, and by Send now.
+  So unsent items reach the server without a KOT once the waiter leaves the table.
 * **Key rule (corrected from admin's implementation):** the key is minted once and
   kept through every edit. A lost response then re-sends as a duplicate (same
   content) or a 409 conflict (edited) — never a second copy. A new key is minted only
@@ -112,6 +116,20 @@ Status: approved design, 2026-09-17. Branch `feat/waiter-offline-mode` (worktree
 Each phase: `flutter analyze` + `flutter test` clean, an independent skeptic pass on the
 diff, then commit. No push without the user's approval.
 
+## Printing and the floor (Phase 5)
+
+* KOT and bill always re-read the table's cart from the server right before printing
+  (a send already returns one). With no connection nothing prints, and a table opened
+  from the tablet's copy can never bill a stale order.
+* A table is opened straight from the tablet (cached menu + last cart) when the app
+  already knows it is offline, so there are no 15s waits per action.
+* The floor is saved on every load and shown (flagged stale) on a cold start with no
+  connection. It shares the snapshot prefix, so logout clears it.
+* Only the open table's draft is painted or counted; floor Print bill and Settle both
+  refuse a table with unsent items on the tablet.
+* Estimated tax for unsent items adds only percentage taxes that are not BACKWARD
+  (price already includes tax) and none when a CALC_ON_TAX row exists.
+
 ## Security
 
 * Drafts hold menu ids, quantities and notes — no card or personal data.
@@ -120,7 +138,14 @@ diff, then commit. No push without the user's approval.
 * Sync traffic uses `background: true`, so a background 401 never logs a waiter out
   mid-shift; it surfaces as "sign in again to sync".
 * Drafts are cleared on logout except unsent ones, which are retained for the same
-  restaurant only.
+  restaurant only. Cart and floor snapshots are cleared on logout.
+* `android:allowBackup="false"`: offline data never goes to cloud backup or restores
+  onto another tablet (which would also copy the device id).
+* Background sends pass `background: true` on every call, so a dead session stops
+  the loop instead of logging the waiter out mid-screen.
+* Open, server-side (api-server): offline-sync trusts client `addon_price`
+  (can lower a bill); device id is a coordination hint, not access control, and the
+  refusal echoes `held_by`. App-side, `usesCleartextTraffic="true"` predates this work.
 
 ## Known risks
 

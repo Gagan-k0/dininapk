@@ -89,7 +89,10 @@ class HeldItemsBar extends StatelessWidget {
     if (await _confirm(
       context,
       'Discard held items?',
-      'They were never added to the order. This cannot be undone.',
+      pos.draft?.creatingLine != null
+          ? 'One item may already be on the order — check it there. '
+                'The rest were never added. This cannot be undone.'
+          : 'They were never added to the order. This cannot be undone.',
       'Discard',
     )) {
       await pos.discardDraft();
