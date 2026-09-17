@@ -87,8 +87,11 @@ class ApiService {
               'Invalid Credentials. For staff, enter Restaurant No.',
         );
       }
+      // e.g. 403 `restaurant_blocked` carries a readable message.
+      final refused = _decodeOrNull(responseRest.body);
       throw Exception(
-        'Login failed (HTTP ${responseRest.statusCode}). Check username/password.',
+        _extractErrorMessage(refused) ??
+            'Login failed (HTTP ${responseRest.statusCode}). Check username/password.',
       );
     } catch (e) {
       debugPrint('[Fatfox Login] Owner login error: $e');
@@ -154,6 +157,14 @@ class ApiService {
           'then retry. Credentials are not the problem until the host resolves.';
     }
     return null;
+  }
+
+  static dynamic _decodeOrNull(String body) {
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return null;
+    }
   }
 
   bool _isSuccessResponse(dynamic data) {
