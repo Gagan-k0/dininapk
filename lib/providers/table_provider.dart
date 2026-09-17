@@ -279,9 +279,14 @@ class TableProvider with ChangeNotifier {
     return null;
   }
 
+  bool _mutating = false;
+
   /// Runs a mutating action; on success reloads the floor, on refusal stores
-  /// the SERVER message and returns false.
-  Future<bool> _mutate(Future<void> Function() action) async {
+  /// the SERVER message and returns false. Returns `null` if already mutating
+  /// (silent skip — callers must not toast that as failure).
+  Future<bool?> _mutate(Future<void> Function() action) async {
+    if (_mutating) return null;
+    _mutating = true;
     try {
       await action();
       _errorMessage = null;
@@ -290,32 +295,38 @@ class TableProvider with ChangeNotifier {
     } on ApiException catch (e) {
       _errorMessage = e.message;
       _sessionExpired = e.isAuth;
+      notifyListeners();
+      return false;
     } catch (e) {
       _errorMessage = friendlyError(e);
+      notifyListeners();
+      return false;
+    } finally {
+      _mutating = false;
     }
-    notifyListeners();
-    return false;
   }
 
   /// SETTLE — admin "Release Table": POST setcarttobill { cartId, paymentType }.
   /// Creates the Order + ledger row and frees the table. Never deletecart.
-  Future<bool> settleTable({
+  Future<bool?> settleTable({
     required String cartId,
     required String paymentType,
-  }) => _mutate(
-    () => _apiService.settleBill(cartId: cartId, paymentType: paymentType),
-  );
+  }) =>
+      _mutate(
+        () => _apiService.settleBill(cartId: cartId, paymentType: paymentType),
+      );
 
   /// Move an active cart to another blank/available table.
-  Future<bool> shiftTable({
+  Future<bool?> shiftTable({
     required String cartId,
     required String newTableId,
-  }) => _mutate(
-    () => _apiService.switchTable(cartId: cartId, tableId: newTableId),
-  );
+  }) =>
+      _mutate(
+        () => _apiService.switchTable(cartId: cartId, tableId: newTableId),
+      );
 
   /// Accept or reject a QR dine-in order waiting for staff approval.
-  Future<bool> decideQrOrder({
+  Future<bool?> decideQrOrder({
     required String cartId,
     required String action,
   }) =>

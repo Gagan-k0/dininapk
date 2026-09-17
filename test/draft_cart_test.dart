@@ -249,7 +249,7 @@ void main() {
       await open();
       await pos.addItemToCart(item);
       final err = await pos.printBillForFloorTable(tableId: tableId, areaId: 'area1');
-      expect(err, contains('not sent'));
+      expect(err.error, contains('not sent'));
     });
 
     test('opening another table offline never inherits the previous table', () async {
@@ -286,7 +286,7 @@ void main() {
       server.cart = [cartDoc(cartA, [])];
       await open();
       await pos.addItemToCart(item);
-      Future<bool>? tapDuringSend;
+      Future<bool?>? tapDuringSend;
       server.failOn = (r) {
         if (r.url.path.endsWith('/offline-sync')) tapDuringSend = pos.addItemToCart(item);
         return null;
@@ -369,7 +369,7 @@ void main() {
       };
       expect(await pos.flushDraft(), isFalse);
       expect(pos.canRelease, isFalse);
-      expect(await pos.printBill(), contains('Cannot reach the server'));
+      expect((await pos.printBill()).error, contains('Cannot reach the server'));
       expect(server.count('/vieworder-save'), 0);
     });
 
@@ -495,7 +495,7 @@ void main() {
       server.cart = [cartDoc(cartA, [])];
       await open();
       await DraftCartStore().save(TableDraft.start('r1', t2, cartA).add(line('a')));
-      Future<bool>? tapHere;
+      Future<bool?>? tapHere;
       server.failOn = (r) {
         if (r.url.path.endsWith('/offline-sync')) tapHere = pos.addItemToCart(item);
         return null;
@@ -556,7 +556,7 @@ void main() {
       await pos.addItemToCart(item); // this table: unsent
       server.cart = [cartDoc(cartB, [{'_id': 'x', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1}])];
       final err = await pos.printBillForFloorTable(tableId: other, areaId: 'area1');
-      expect(err ?? '', isNot(contains('Send KOT')));
+      expect(err.error ?? '', isNot(contains('Send KOT')));
       expect(pos.draft, isNotNull, reason: 'back on the open table, its items remain');
     });
 
