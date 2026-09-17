@@ -387,16 +387,7 @@ class PosProvider with ChangeNotifier {
     if (_variantNameById.isNotEmpty) return;
     try {
       final rows = await _apiService.getAllVariants();
-      final map = <String, String>{};
-      for (final row in rows) {
-        final id = (row['_id'] ?? row['id'] ?? row['variant_id'] ?? row['value_id'])?.toString() ?? '';
-        if (id.isEmpty) continue;
-        final name = (row['name'] ?? row['valuename'] ?? row['displayname'] ?? row['title'] ?? row['variant_name'] ?? row['value_name'])
-                ?.toString()
-                .trim() ??
-            '';
-        if (name.isNotEmpty) map[id] = name;
-      }
+      final map = variantNamesFrom(rows);
       _variantNameById = map;
       if (_allItems.isNotEmpty && map.isNotEmpty) {
         _setSortedMenuItems(_allItems);
@@ -464,7 +455,11 @@ class PosProvider with ChangeNotifier {
   ///
   /// Categories/menu paint from disk cache first (if any), then refresh from
   /// the network like admin's warm menu cache.
-  Future<void> loadTableAndMenu(String tableId, String areaId) async {
+  Future<void> loadTableAndMenu(
+    String tableId,
+    String areaId, {
+    bool forceMenuRefresh = false,
+  }) async {
     _isLoading = true;
     _errorMessage = null;
     _cartError = null;
@@ -477,54 +472,61 @@ class PosProvider with ChangeNotifier {
       _receiptPrefs = await ReceiptPrefs.load();
       final restaurantId = await _authService.getRestaurantId() ?? '';
       final cached = await _menuCache.load(restaurantId);
-      if (cached != null &&
-          (cached.categories.isNotEmpty || cached.items.isNotEmpty)) {
+      if (cached != null && cached.hasCatalog) {
         _categories = cached.categories;
         _setSortedMenuItems(cached.items);
+        _menuCachedAt = cached.savedAt;
         // Let the grid paint while table + network refresh continue.
         notifyListeners();
       }
 
-      final results = await Future.wait<Object?>([
-        _apiService.viewTableById(tableId),
-        _apiService.getActiveCategoryMaps(),
-        _apiService.getDineinMenuMaps(),
-        _bestEffortTax(),
-        _bestEffortVariantCatalog(),
-        _bestEffortKitchenDepartments(),
-      ]);
-      _tableDetails = results[0] as Map<String, dynamic>?;
-      final catMaps = results[1] as List<Map<String, dynamic>>;
-      final itemMaps = results[2] as List<Map<String, dynamic>>;
-      _categories = catMaps.map(MenuCategory.fromJson).toList();
-      _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
-      _taxConfig = results[3] as List<Map<String, dynamic>>;
-      _buildConsolidatedTax();
-      final variantMaps = results[4] as List<Map<String, dynamic>>;
-      if (variantMaps.isNotEmpty) {
-        final map = <String, String>{};
-        for (final row in variantMaps) {
-          final id = row['_id']?.toString() ?? '';
-          if (id.isEmpty) continue;
-          final name =
-              (row['name'] ?? row['valuename'] ?? row['displayname'])
-                      ?.toString()
-                      .trim() ??
-                  '';
-          if (name.isNotEmpty) map[id] = name;
-        }
-        if (map.isNotEmpty) _variantNameById = map;
-      }
-      final deptMaps = results[5] as List<Map<String, dynamic>>;
-      if (deptMaps.isNotEmpty) {
-        populateKitchenDepartments(deptMaps);
-      }
+      // A fresh snapshot makes 5 of the 7 opening requests pointless — the
+      // catalog barely changes during a shift, and re-downloading the whole
+      // dine-in menu per table open is what made opening a table feel slow.
+      // "Sync menu" (forceMenuRefresh) is the waiter's override.
+      if (cached != null && cached.isSkippable && cached.isFresh && !forceMenuRefresh) {
+        _applyCatalogExtras(
+          taxRows: cached.taxRows,
+          variantMaps: cached.variants,
+          deptMaps: cached.departments,
+        );
+        // Items were sorted before the variant names existed; redo it now or
+        // every variant item keeps a blank label for the whole session.
+        _setSortedMenuItems(_allItems);
+        _tableDetails = await _apiService.viewTableById(tableId);
+      } else {
+        final results = await Future.wait<Object?>([
+          _apiService.viewTableById(tableId),
+          _apiService.getActiveCategoryMaps(),
+          _apiService.getDineinMenuMaps(),
+          _bestEffortTax(),
+          _bestEffortVariantCatalog(),
+          _bestEffortKitchenDepartments(),
+        ]);
+        _tableDetails = results[0] as Map<String, dynamic>?;
+        final catMaps = results[1] as List<Map<String, dynamic>>;
+        final itemMaps = results[2] as List<Map<String, dynamic>>;
+        _categories = catMaps.map(MenuCategory.fromJson).toList();
+        _setSortedMenuItems(itemMaps.map(MenuItem.fromJson).toList());
+        final taxRows = results[3] as List<Map<String, dynamic>>;
+        final variantMaps = results[4] as List<Map<String, dynamic>>;
+        final deptMaps = results[5] as List<Map<String, dynamic>>;
+        _applyCatalogExtras(
+          taxRows: taxRows,
+          variantMaps: variantMaps,
+          deptMaps: deptMaps,
+        );
 
-      await _menuCache.save(
-        restaurantId: restaurantId,
-        categories: catMaps,
-        items: itemMaps,
-      );
+        await _menuCache.save(
+          restaurantId: restaurantId,
+          categories: catMaps,
+          items: itemMaps,
+          taxRows: taxRows,
+          variants: variantMaps,
+          departments: deptMaps,
+        );
+        _menuCachedAt = DateTime.now();
+      }
 
       if (_tableDetails == null ||
           (_tableDetails!['table_id'] ?? _tableDetails!['_id']) == null) {
@@ -548,6 +550,49 @@ class PosProvider with ChangeNotifier {
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  /// When the catalog was last downloaded — drives "Menu updated Xh ago".
+  DateTime? _menuCachedAt;
+  DateTime? get menuCachedAt => _menuCachedAt;
+
+  /// Tax rows, variant names and kitchen departments — applied the same way
+  /// whether they came from the network or the disk snapshot.
+  void _applyCatalogExtras({
+    required List<Map<String, dynamic>> taxRows,
+    required List<Map<String, dynamic>> variantMaps,
+    required List<Map<String, dynamic>> deptMaps,
+  }) {
+    _taxConfig = taxRows;
+    _buildConsolidatedTax();
+    final map = variantNamesFrom(variantMaps);
+    if (map.isNotEmpty) _variantNameById = map;
+    if (deptMaps.isNotEmpty) {
+      populateKitchenDepartments(deptMaps);
+    }
+  }
+
+  /// id → display name over every field spelling the API has used for variants.
+  static Map<String, String> variantNamesFrom(List<Map<String, dynamic>> rows) {
+    final map = <String, String>{};
+    for (final row in rows) {
+      final id =
+          (row['_id'] ?? row['id'] ?? row['variant_id'] ?? row['value_id'])
+                  ?.toString() ??
+              '';
+      if (id.isEmpty) continue;
+      final name = (row['name'] ??
+                  row['valuename'] ??
+                  row['displayname'] ??
+                  row['title'] ??
+                  row['variant_name'] ??
+                  row['value_name'])
+              ?.toString()
+              .trim() ??
+          '';
+      if (name.isNotEmpty) map[id] = name;
+    }
+    return map;
   }
 
   Future<List<Map<String, dynamic>>> _bestEffortTax() async {

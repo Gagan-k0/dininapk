@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../config/api_config.dart';
 import 'auth_service.dart';
+import 'device_id_service.dart';
 
 /// A refusal or transport failure from the FatFox API.
 ///
@@ -28,6 +29,10 @@ class ApiException implements Exception {
   /// Machine-readable detail some endpoints attach (`data.reason`, `data.code`).
   final dynamic data;
 
+  /// Non-numeric `status.code` (e.g. `table_claimed_by_another_device`), which
+  /// some endpoints send instead of a number — [code] cannot carry it.
+  final String reason;
+
   const ApiException(
     this.message, {
     this.code = 500,
@@ -35,7 +40,15 @@ class ApiException implements Exception {
     this.isAuth = false,
     this.isNetwork = false,
     this.data,
+    this.reason = '',
   });
+
+  /// Another tablet holds this table's claim (`helpers/tableClaim.js`).
+  bool get isTableClaimed => reason == 'table_claimed_by_another_device';
+
+  /// Device id holding the claim, when the server named it.
+  String? get claimHeldBy =>
+      data is Map ? (data as Map)['held_by']?.toString() : null;
 
   @override
   String toString() => message;
@@ -48,11 +61,16 @@ class ApiEnvelope {
   final dynamic data;
   final Map<String, dynamic> raw;
 
+  /// `status.code` when it is a word, not a number (the offline/claim endpoints
+  /// answer e.g. `table_claimed_by_another_device`); '' otherwise.
+  final String reason;
+
   const ApiEnvelope({
     required this.code,
     required this.message,
     required this.data,
     required this.raw,
+    this.reason = '',
   });
 
   bool get ok => code == 200 || code == 0;
@@ -78,9 +96,13 @@ class ApiEnvelope {
     final status = raw['status'];
     int code = -1;
     String message = '';
+    String reason = '';
     if (status is Map) {
       final c = status['code'];
       code = c is int ? c : int.tryParse(c?.toString() ?? '') ?? -1;
+      if (code == -1 && c != null && c.toString().trim().isNotEmpty) {
+        reason = c.toString().trim();
+      }
       message = status['message']?.toString() ?? '';
     } else if (status is String) {
       message = status;
@@ -96,6 +118,7 @@ class ApiEnvelope {
       message: message,
       data: raw['data'],
       raw: raw,
+      reason: reason,
     );
   }
 }
@@ -117,6 +140,7 @@ class ApiClient {
 
   final AuthService _auth;
   final http.Client _http;
+  final DeviceIdService _deviceId = DeviceIdService();
 
   ApiClient({AuthService? auth, http.Client? httpClient})
     : _auth = auth ?? AuthService(),
@@ -191,9 +215,10 @@ class ApiClient {
     }
     final token = await _auth.getToken();
     final restId = await _auth.getRestaurantId();
+    final deviceId = await _deviceId.get();
     final url = uri(path, query);
     final headers = {
-      ...ApiConfig.headers(token, restId),
+      ...ApiConfig.headers(token, restId, deviceId: deviceId),
       if (extraHeaders != null) ...extraHeaders,
     };
     final encoded = body == null
@@ -267,6 +292,7 @@ class ApiClient {
         code: env.code == 200 || env.code == 0 ? response.statusCode : env.code,
         httpStatus: response.statusCode,
         data: env.data,
+        reason: env.reason,
       );
     }
     return env;

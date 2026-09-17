@@ -276,7 +276,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                     ),
                     onPressed: () {
                       final tid = pos.activeTableId ?? '';
-                      if (tid.isNotEmpty) pos.loadTableAndMenu(tid, pos.activeAreaId ?? '');
+                      // forceMenuRefresh: RETRY must re-download the catalog,
+                      // not re-serve the cached copy that just failed the user.
+                      if (tid.isNotEmpty) {
+                        pos.loadTableAndMenu(tid, pos.activeAreaId ?? '',
+                            forceMenuRefresh: true);
+                      }
                     },
                   ),
                   const SizedBox(width: 12),
@@ -400,7 +405,11 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           onPressed: () {
             final tid = pos.activeTableId ?? '';
             final aid = pos.activeAreaId ?? '';
-            if (tid.isNotEmpty) pos.loadTableAndMenu(tid, aid);
+            // The Refresh button is the waiter's "the menu changed" control, so
+            // it always re-downloads rather than serving the cached snapshot.
+            if (tid.isNotEmpty) {
+              pos.loadTableAndMenu(tid, aid, forceMenuRefresh: true);
+            }
           },
           tooltip: 'Refresh',
         ),

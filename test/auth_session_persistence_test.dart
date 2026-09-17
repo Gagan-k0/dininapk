@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:dineinapk/services/auth_service.dart';
 import 'package:dineinapk/providers/auth_provider.dart';
 
 void main() {

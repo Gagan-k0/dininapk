@@ -92,7 +92,11 @@ class ApiConfig {
   /// Staff accept/reject first QR dine-in order awaiting approval.
   static String qrApproval = '/restaurant/cart/qr-approval';
 
-  static Map<String, String> headers(String? token, String? restaurantId) {
+  static Map<String, String> headers(
+    String? token,
+    String? restaurantId, {
+    String? deviceId,
+  }) {
     final Map<String, String> h = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
@@ -102,6 +106,11 @@ class ApiConfig {
     }
     if (restaurantId != null && restaurantId.isNotEmpty) {
       h['x-restaurant-id'] = restaurantId;
+    }
+    // Server table claim reads x-device-id; without it every tablet on the same
+    // staff login shares one claim (helpers/tableClaim.js deviceIdFromRestaurantReq).
+    if (deviceId != null && deviceId.isNotEmpty) {
+      h['x-device-id'] = deviceId;
     }
     return h;
   }
