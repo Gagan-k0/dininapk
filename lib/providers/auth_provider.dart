@@ -32,6 +32,16 @@ class AuthProvider with ChangeNotifier {
   String get restaurantName => _restaurantName;
   String? get errorMessage => _errorMessage;
 
+  Map<String, dynamic>? _loginSubscription;
+
+  /// `data.subscription` from the last login, handed out once (the app root
+  /// starts [SubscriptionService] with it instead of a second status call).
+  Map<String, dynamic>? takeLoginSubscription() {
+    final s = _loginSubscription;
+    _loginSubscription = null;
+    return s;
+  }
+
   Future<void> checkSession() async {
     await _authService.initBaseUrl();
     _isDemoMode = await _authService.isDemoMode();
@@ -142,6 +152,9 @@ class AuthProvider with ChangeNotifier {
           baseUrl: ApiConfig.cleanBaseUrl,
           demoMode: false,
         );
+        _loginSubscription = data['subscription'] is Map
+            ? Map<String, dynamic>.from(data['subscription'] as Map)
+            : null;
         _isDemoMode = false;
         _isLoggedIn = true;
         _isLoading = false;

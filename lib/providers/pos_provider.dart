@@ -90,9 +90,9 @@ class PosProvider with ChangeNotifier {
   final Set<String> _sending = {};
   bool get _openTableSending => _sending.contains(resolvedTableId);
   bool _sendingAll = false;
-  /// A send in this loop was refused as signed out (background calls never
-  /// log the waiter out, so the loop must stop by itself).
-  bool _sendAuthFailed = false;
+  /// A send in this loop was refused as signed out or subscription-locked
+  /// (background calls never log out or lock, so the loop stops by itself).
+  bool _stopSendAll = false;
   bool _sendAllAgain = false;
 
   // ── Tax ──
@@ -1187,7 +1187,7 @@ class PosProvider with ChangeNotifier {
     if (_consolidatedTax == null) return 0;
 
     _sendingAll = true;
-    _sendAuthFailed = false;
+    _stopSendAll = false;
     var sent = 0;
     try {
       for (final tid in tables) {
@@ -1210,7 +1210,7 @@ class PosProvider with ChangeNotifier {
           continue;
         }
         if (await _flush(d, background: true)) sent++;
-        if (_sendAuthFailed || !ConnectivityService.instance.isOnline) break;
+        if (_stopSendAll || !ConnectivityService.instance.isOnline) break;
       }
     } finally {
       _sendingAll = false;
@@ -1386,6 +1386,7 @@ class PosProvider with ChangeNotifier {
           tableId: tid,
           idempotencyKey: d.key,
           lines: d.lines.map((l) => l.toSyncJson()).toList(),
+          capturedAt: d.createdAt,
           background: background,
         );
       }
@@ -1402,11 +1403,19 @@ class PosProvider with ChangeNotifier {
     } on ApiException catch (e) {
       if (e.isAuth) {
         _sessionExpired = true;
-        _sendAuthFailed = true;
+        _stopSendAll = true;
       }
       if (sent) {
         if (_isOpen(tid)) _cartStale = true;
         say(_staleMessage);
+        return false;
+      }
+      if (e.isSubscriptionLocked) {
+        // Not a problem with these items: keep them queued as they are (never
+        // held) and stop sending other tables until the renewal.
+        _stopSendAll = true;
+        say(subscriptionWaitMessage);
+        await _saveDraft(d.copyWith(lastError: subscriptionWaitMessage));
         return false;
       }
       if (e.isTableClaimed) {
@@ -1437,6 +1446,9 @@ class PosProvider with ChangeNotifier {
   /// succeed, so they wait for the waiter. Null = worth retrying (no signal,
   /// server error, timeout, rate limit). offline-sync puts its reason word in
   /// `status.message`, which lands in [ApiException.message].
+  static const String subscriptionWaitMessage =
+      'Subscription expired — items will send after renewal.';
+
   static String? _refusalText(ApiException e) {
     if (e.isNetwork || e.isAuth) return null;
     if (e.code >= 500 || e.code == 408 || e.code == 429 || e.code < 400) {
