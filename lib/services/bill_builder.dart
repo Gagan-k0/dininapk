@@ -26,7 +26,7 @@ class BillBuilder {
 
     Map<String, dynamic>? header;
     try {
-      header = await _api.getBillView(tableId);
+      header = await _api.getBillView(tableId, fresh: true);
     } on ApiException catch (e) {
       if (e.isAuth) rethrow;
       header = null; // bill still prints from the snapshot
@@ -71,7 +71,7 @@ class BillBuilder {
   }
 
   Future<Map<String, dynamic>?> _firstCart(String tableId) async {
-    final carts = await _api.getCartItemsByTableId(tableId);
+    final carts = await _api.getCartItemsByTableId(tableId, fresh: true);
     return carts.isEmpty ? null : carts.first;
   }
 

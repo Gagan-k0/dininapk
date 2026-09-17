@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -90,6 +91,15 @@ void main() {
       final edited = d.add(line('a')).setQuantity('a', 4).setQuantity('a', 0).add(line('b'));
       expect(edited.key, d.key);
       expect(TableDraft.fromJson(jsonDecode(jsonEncode(edited.toJson()))).key, d.key);
+    });
+
+    test('the first-added time survives edits and restarts', () {
+      final at = DateTime(2026, 9, 1, 12);
+      final d = TableDraft(restaurantId: 'r1', tableId: tableId, key: 'k', createdAt: at)
+          .add(line('a'))
+          .copyWith(conflict: true);
+      expect(d.createdAt, at);
+      expect(TableDraft.fromJson(jsonDecode(jsonEncode(d.toJson()))).createdAt, at);
     });
 
     test('a draft is never read for another restaurant', () async {
@@ -615,7 +625,9 @@ void main() {
       await open();
       final first = pos.printBill();
       expect(pos.isBusy, isTrue, reason: 'busy before the network read');
+      expect((await pos.printBill()).skipped, isTrue);
       await first;
+      expect(pos.isBusy, isFalse);
     });
 
     test('after discard, an offline reload never repaints the old cart', () async {
@@ -625,6 +637,91 @@ void main() {
       server.failOn = (r) => const SocketException('down');
       await pos.reloadCart();
       expect(pos.cartId, isEmpty);
+    });
+    const otherTable = '64b000000000000000000002';
+
+    test('reads after a send and the bill header skip the server cache', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': 'other', 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1}])];
+      await open();
+      await pos.addItemToCart(item);
+      final from = server.requests.length;
+      await pos.sendKotOrder();
+      final after = server.requests.skip(from).toList();
+      final synced = after.indexWhere((r) => r.url.path.endsWith('/offline-sync'));
+      expect(synced, isNot(-1));
+      // Up to the next write: every cart write clears the server cache itself.
+      final reads = after
+          .skip(synced + 1)
+          .takeWhile((r) => r.method == 'GET')
+          .where((r) => r.url.path.endsWith('/listallcartmenus'));
+      expect(reads, isNotEmpty);
+      for (final r in reads) {
+        expect(r.url.queryParameters['_ts'], isNotNull, reason: 'a cached read returns the cart from before the send');
+      }
+      await pos.printBill();
+      expect(server.last('vieworder-save').url.queryParameters['_ts'], isNotNull);
+    });
+
+    test('BILL, settle and cart edits wait while this table is sending', () async {
+      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': 'other', 'quantity': 1, 'kot_status': 0}])];
+      await open();
+      await pos.addItemToCart(item);
+      final gate = Completer<void>();
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync') ? gate.future : null;
+      final sending = pos.flushAllDrafts();
+      for (var i = 0; i < 100 && server.count('/offline-sync') == 0; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(server.count('/offline-sync'), 1);
+
+      expect((await pos.printBill()).error, contains('Sending'));
+      expect(await pos.updateItemQuantity('l0', 2), isFalse);
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(server.count('/updatecartmenuquantity'), 0);
+      expect(pos.isBusy, isFalse);
+
+      gate.complete();
+      server.failOn = null;
+      await sending;
+    });
+
+    test('a refused item is held for the waiter instead of retried forever', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await DraftCartStore().save(TableDraft.start('r1', otherTable, cartA).add(line('a')));
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? {'status': {'code': 422, 'message': 'menu_not_found'}}
+          : null;
+      await pos.flushAllDrafts();
+      final held = await DraftCartStore().load('r1', otherTable);
+      expect(held!.conflict, isTrue);
+      expect(held.lastError, contains('removed from the menu'));
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-sync'), 1, reason: 'held items are not retried');
+    });
+
+    test('a server error keeps retrying', () async {
+      server.cart = [cartDoc(cartA, [])];
+      await DraftCartStore().save(TableDraft.start('r1', otherTable, cartA).add(line('a')));
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? {'status': {'code': 500, 'message': 'internal_server_error'}}
+          : null;
+      await pos.flushAllDrafts();
+      expect((await DraftCartStore().load('r1', otherTable))!.conflict, isFalse);
+    });
+
+    test('hours-old items never open a new order in the background', () async {
+      await DraftCartStore().save(TableDraft(
+        restaurantId: 'r1',
+        tableId: otherTable,
+        key: 'k1',
+        lines: [line('a')],
+        createdAt: DateTime.now().subtract(const Duration(hours: 7)),
+      ));
+      await pos.flushAllDrafts();
+      expect(server.count('/createcart'), 0);
+      final held = await DraftCartStore().load('r1', otherTable);
+      expect(held!.conflict, isTrue);
+      expect(held.lastError, contains('6 hours'));
     });
   });
 }
