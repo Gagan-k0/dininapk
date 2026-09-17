@@ -204,11 +204,26 @@ class MenuVariant {
       return '';
     }
 
-    final id = json['_id']?.toString() ??
-        json['variant_id']?.toString() ??
-        json['value_id']?.toString() ??
-        json['id']?.toString() ??
-        '';
+    // Prefer catalog variant_id (admin join key / createcart) over the
+    // mongoose subdocument _id on menu.variants[] embeds.
+    String extractId() {
+      final variantId = json['variant_id'];
+      if (variantId is String && variantId.trim().isNotEmpty) {
+        return variantId.trim();
+      }
+      if (variantId is Map) {
+        final nested = variantId['_id'] ?? variantId['id'];
+        if (nested != null && nested.toString().trim().isNotEmpty) {
+          return nested.toString().trim();
+        }
+      }
+      return json['_id']?.toString() ??
+          json['value_id']?.toString() ??
+          json['id']?.toString() ??
+          '';
+    }
+
+    final id = extractId();
 
     final price = double.tryParse(
           json['price']?.toString() ??
