@@ -114,19 +114,25 @@ Future<LicencePayload?> verifyLicence(String token, String publicKeyBase64) asyn
 
 /// Client offline rule: may this tablet be used without reaching the server?
 ///
-/// No stored licence → allowed (first run after the update, until the first
-/// status call). Otherwise the licence must verify, be for [restaurantId], not
-/// be locked/blocked, `now < offline_until`, and the clock must not be earlier
-/// than [lastServerTime] − 10 min.
+/// A verified `blocked` licence for this restaurant always locks. Otherwise the
+/// lock applies only when the last seen [enforcement] is `on` (under `warn` the
+/// server locks nobody, so neither does the tablet). Under `on`: no stored
+/// licence → allowed (first run after the update, until the first status call);
+/// else the licence must verify, be for [restaurantId], not be locked,
+/// `now < offline_until`, and the clock must not be earlier than
+/// [lastServerTime] − 10 min.
 Future<bool> evaluateOffline({
   required String? licenceToken,
   required String restaurantId,
   required DateTime now,
   required DateTime? lastServerTime,
   required String publicKeyBase64,
+  required String enforcement,
 }) async {
   if (licenceToken == null || licenceToken.isEmpty) return true;
   final p = await verifyLicence(licenceToken, publicKeyBase64);
+  if (p != null && p.rid == restaurantId && p.state == 'blocked') return false;
+  if (enforcement != 'on') return true;
   if (p == null) return false;
   if (restaurantId.isEmpty || p.rid != restaurantId) return false;
   if (p.state == 'locked' || p.state == 'blocked') return false;

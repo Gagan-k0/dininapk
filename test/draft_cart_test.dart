@@ -166,6 +166,7 @@ void main() {
       final sync = server.last('/offline-sync');
       expect(sync.headers['Idempotency-Key'], isNotEmpty);
       expect((jsonDecode(sync.body)['lines'] as List).single['quantity'], 3);
+      expect(DateTime.parse(jsonDecode(sync.body)['captured_at']).isUtc, isTrue);
       expect(pos.draft, isNull);
       expect(await DraftCartStore().load('r1', tableId), isNull);
     });

@@ -1348,6 +1348,7 @@ class PosProvider with ChangeNotifier {
           tableId: tid,
           idempotencyKey: d.key,
           lines: d.lines.map((l) => l.toSyncJson()).toList(),
+          capturedAt: d.createdAt,
           background: background,
         );
       }

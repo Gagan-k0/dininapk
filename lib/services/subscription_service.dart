@@ -110,6 +110,7 @@ class SubscriptionService with ChangeNotifier {
         'restaurantId': rid,
         'licence': licence,
         'lastServerTime': lastSeen?.toIso8601String(),
+        'enforcement': info.enforcement,
       }),
     );
     await _recomputeOffline(notify: false);
@@ -130,6 +131,7 @@ class SubscriptionService with ChangeNotifier {
       now: DateTime.now(),
       lastServerTime: own ? DateTime.tryParse('${stored['lastServerTime']}') : null,
       publicKeyBase64: ApiConfig.subscriptionPublicKey,
+      enforcement: own ? '${stored['enforcement'] ?? ''}' : '',
     );
     if (notify) notifyListeners();
   }

@@ -485,11 +485,17 @@ class ApiService {
     required String tableId,
     required String idempotencyKey,
     required List<Map<String, dynamic>> lines,
+    DateTime? capturedAt,
     bool background = false,
   }) {
     return _client.post(
       ApiConfig.offlineSync,
-      body: {'table_id': tableId, 'lines': lines},
+      body: {
+        'table_id': tableId,
+        'lines': lines,
+        // Server accepts sales captured before grace end from a locked restaurant.
+        if (capturedAt != null) 'captured_at': capturedAt.toUtc().toIso8601String(),
+      },
       extraHeaders: {'Idempotency-Key': idempotencyKey},
       background: background,
     );

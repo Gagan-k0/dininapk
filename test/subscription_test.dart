@@ -42,8 +42,10 @@ void main() {
     return '$payload.${b64url(sig.bytes)}';
   }
 
-  Future<bool> offline(String? token, {String rid = 'r1', DateTime? at, DateTime? lastSeen}) =>
+  Future<bool> offline(String? token,
+          {String rid = 'r1', DateTime? at, DateTime? lastSeen, String enforcement = 'on'}) =>
       evaluateOffline(
+        enforcement: enforcement,
         licenceToken: token,
         restaurantId: rid,
         now: at ?? now,
@@ -95,6 +97,17 @@ void main() {
     test('a locked or blocked licence never works offline', () async {
       expect(await offline(await licence(state: 'locked')), isFalse);
       expect(await offline(await licence(state: 'blocked')), isFalse);
+    });
+
+    test('under warn a locked licence still works offline; under on it locks', () async {
+      final t = await licence(state: 'locked');
+      expect(await offline(t, enforcement: 'warn'), isTrue);
+      expect(await offline(t, enforcement: 'on'), isFalse);
+      expect(await offline('garbage', enforcement: 'warn'), isTrue);
+    });
+
+    test('blocked locks offline even under warn', () async {
+      expect(await offline(await licence(state: 'blocked'), enforcement: 'warn'), isFalse);
     });
 
     test('the shipped public key is a 32-byte key', () {
