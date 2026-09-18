@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 
-/// Compact floating toast that stays in the menu column on tablets so it
-/// does not cover the cart's KOT / BILL / SETTLE row.
+/// Compact floating toast for non-add feedback (errors, held-items, etc.).
+/// Stays in the menu column on tablets so it does not cover KOT / BILL / SETTLE.
 void showPosToast(
   BuildContext context,
   String message, {
   Color? backgroundColor,
   bool error = false,
+  Duration duration = const Duration(milliseconds: 900),
 }) {
   if (!context.mounted) return;
   final wide = MediaQuery.sizeOf(context).width >= 720;
@@ -16,10 +17,11 @@ void showPosToast(
       SnackBar(
         content: Text(
           message,
-          maxLines: 1,
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 13),
         ),
-        duration: const Duration(milliseconds: 900),
+        duration: duration,
         backgroundColor: backgroundColor ??
             (error ? const Color(0xFFDC2626) : const Color(0xFF16A34A)),
         behavior: SnackBarBehavior.floating,

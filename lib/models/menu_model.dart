@@ -472,8 +472,9 @@ class MenuItem {
         } else if (groupMap['addonvalue_id'] != null ||
             groupMap['value_id'] != null ||
             groupMap['valuename'] != null ||
-            groupMap['value_name'] != null ||
-            groupMap['_id'] != null) {
+            groupMap['value_name'] != null) {
+          // Do NOT treat bare {_id, addon_id} getmenu stubs as options —
+          // those need catalog expand in enrichMenuItem (admin AllAvailableAddons).
           if (isActive(groupMap['status'] ?? groupMap['active'])) {
             addList.add(MenuAddon.fromJson(groupMap));
           }
