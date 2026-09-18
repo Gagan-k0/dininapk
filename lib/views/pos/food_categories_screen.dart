@@ -381,7 +381,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           pos.selectCategory(id);
                           if (id == kExtraAddonsCategoryId) {
                             await pos.ensureExtraAddonsLoaded();
-                            if (!mounted) return;
+                            if (!context.mounted) return;
                             if (pos.errorMessage ==
                                 'Failed to load extra add-ons') {
                               showPosToast(
@@ -1365,15 +1365,7 @@ class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
       final v = double.tryParse(_controller.text.trim());
       if (v == null || v <= 0) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Enter an amount greater than 0'),
-            backgroundColor: Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          ),
-        );
+        showPosToast(context, 'Enter an amount greater than 0', error: true);
         return;
       }
       if (!mounted) return;
@@ -1448,14 +1440,10 @@ class _CustomExtraDialogState extends State<_CustomExtraDialog> {
       final price = double.tryParse(_priceCtrl.text.trim());
       if (name.isEmpty || price == null || price <= 0) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Enter a name and amount greater than 0'),
-            backgroundColor: Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          ),
+        showPosToast(
+          context,
+          'Enter a name and amount greater than 0',
+          error: true,
         );
         return;
       }
@@ -1989,12 +1977,10 @@ class _CartBottomSheet extends StatelessWidget {
     final ok = await write();
     if (ok == null || !context.mounted) return;
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pos.errorMessage ?? 'Could not update the order'),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Could not update the order',
+        error: true,
       );
     }
   }
@@ -2401,22 +2387,14 @@ class _CartBottomSheet extends StatelessWidget {
     final success = await pos.settleAndPrintBill(paymentType: paymentType);
     if (!context.mounted || success == null) return;
     if (success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Table released ✓'),
-          backgroundColor: Color(0xFF16A34A),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      showPosToast(context, 'Table released ✓');
       // Cart no longer exists — back to the floor.
       Navigator.of(context).popUntil((r) => r.isFirst || r.settings.name == '/tables');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pos.errorMessage ?? 'Settle failed'),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Settle failed',
+        error: true,
       );
     }
   }
@@ -2439,23 +2417,19 @@ class _CartBottomSheet extends StatelessWidget {
                             final success = await pos.sendKotOrder();
                             if (!context.mounted || success == null) return;
                             final printNote = pos.printError;
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  !success
-                                      ? (pos.errorMessage ?? 'KOT failed')
-                                      : printNote == null
-                                          ? 'KOT sent + printed ✓'
-                                          : 'KOT sent to kitchen. Print failed: $printNote',
-                                ),
-                                backgroundColor: !success
-                                    ? const Color(0xFFDC2626)
-                                    : printNote == null
-                                        ? const Color(0xFF16A34A)
-                                        : const Color(0xFFD97706),
-                                behavior: SnackBarBehavior.floating,
-                              ),
-                            );
+                            final Color bg;
+                            final String msg;
+                            if (!success) {
+                              bg = const Color(0xFFDC2626);
+                              msg = pos.errorMessage ?? 'KOT failed';
+                            } else if (printNote == null) {
+                              bg = const Color(0xFF16A34A);
+                              msg = 'KOT sent + printed ✓';
+                            } else {
+                              bg = const Color(0xFFD97706);
+                              msg = 'KOT sent. Print failed';
+                            }
+                            showPosToast(context, msg, backgroundColor: bg);
                           },
                     icon: const Icon(Icons.soup_kitchen, size: 18),
                     label: const Text(
@@ -2481,16 +2455,10 @@ class _CartBottomSheet extends StatelessWidget {
                             final result = await pos.printBill();
                             if (!context.mounted || result.skipped) return;
                             final err = result.error;
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  err == null ? 'Bill printed ✓' : err,
-                                ),
-                                backgroundColor: err == null
-                                    ? const Color(0xFF16A34A)
-                                    : const Color(0xFFDC2626),
-                                behavior: SnackBarBehavior.floating,
-                              ),
+                            showPosToast(
+                              context,
+                              err ?? 'Bill printed ✓',
+                              error: err != null,
                             );
                           },
                     icon: const Icon(Icons.print, size: 18),
@@ -2591,17 +2559,10 @@ class _CartBottomSheet extends StatelessWidget {
 
     final success = await pos.discardCart();
     if (!context.mounted || success == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Cart discarded'
-              : (pos.errorMessage ?? 'Discard failed'),
-        ),
-        backgroundColor:
-            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-      ),
+    showPosToast(
+      context,
+      success ? 'Cart discarded' : (pos.errorMessage ?? 'Discard failed'),
+      error: !success,
     );
     if (success && context.mounted && !embedded) {
       Navigator.pop(context); // close cart sheet only (not POS when embedded)
