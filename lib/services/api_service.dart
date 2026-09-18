@@ -501,6 +501,11 @@ class ApiService {
     );
   }
 
+  /// POST /restaurant/cart/table-claim/release — data `{released: bool}`.
+  /// Older servers answer 404.
+  Future<ApiEnvelope> releaseTableClaim(String tableId) =>
+      _client.post(ApiConfig.releaseTableClaim, body: {'table_id': tableId});
+
   /// POST /restaurant/cart/updatecartmenuquantity
   Future<ApiEnvelope> updateCartItemQuantity({
     required String cartId,
