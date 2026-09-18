@@ -2070,7 +2070,7 @@ class _CartBottomSheet extends StatelessWidget {
             _totalRow('Container Charge', '₹${pos.containerCharge.toStringAsFixed(2)}'),
           if (pos.areaCharge > 0)
             _totalRow('AC / Area Charge', '₹${pos.areaCharge.toStringAsFixed(2)}'),
-          if (taxPrice > 0) _totalRow('Tax', '₹${taxPrice.toStringAsFixed(2)}'),
+          // if (taxPrice > 0) _totalRow('Tax', '₹${taxPrice.toStringAsFixed(2)}'),
           if (roundOff != 0)
             _totalRow('Round Off', '₹${roundOff.toStringAsFixed(2)}'),
           const Divider(height: 8, color: Color(0xFFE2E8F0)),
@@ -2213,11 +2213,11 @@ class _CartBottomSheet extends StatelessWidget {
                               'Sub Total',
                               '₹${pos.subTotal.toStringAsFixed(2)}',
                             ),
-                            if (pos.taxAmount > 0)
-                              _totalRow(
-                                'Tax',
-                                '₹${pos.taxAmount.toStringAsFixed(2)}',
-                              ),
+                            // if (pos.taxAmount > 0)
+                            //   _totalRow(
+                            //     'Tax',
+                            //     '₹${pos.taxAmount.toStringAsFixed(2)}',
+                            //   ),
                             const Divider(height: 12, color: Color(0xFFE2E8F0)),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
