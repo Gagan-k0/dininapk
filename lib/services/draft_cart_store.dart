@@ -92,7 +92,9 @@ class DraftLine {
   };
 
   /// Painted in the cart list next to server lines (same keys the screen reads).
-  Map<String, dynamic> toCartLineMap() => {
+  /// [printed] lines were already handed to the kitchen on an offline KOT, so
+  /// they read as KOT'd here too until the server has them.
+  Map<String, dynamic> toCartLineMap({bool printed = false}) => {
     '_id': '${TableDraft.lineIdPrefix}$lineId',
     'menu_id': menuId,
     'menu_name': name,
@@ -106,8 +108,8 @@ class DraftLine {
     'individual_price': unitPrice,
     'price': unitPrice * quantity,
     'description': description,
-    'kot_status': 0,
-    'kotprint_status': 0,
+    'kot_status': printed ? 1 : 0,
+    'kotprint_status': printed ? 1 : 0,
     'is_draft': true,
   };
 
@@ -166,6 +168,22 @@ class TableDraft {
 
   final List<DraftLine> lines;
 
+  /// Lines already printed on an offline KOT. They ride their own
+  /// [printedKey] and are uploaded BEFORE [pendingOps] replays their status,
+  /// so items added afterwards (kept in [lines], under a fresh [key]) can
+  /// never be swept in by the server's blanket status update.
+  final List<DraftLine> printedLines;
+  final String? printedKey;
+
+  /// `setcartstatus` values for a print that already happened on paper,
+  /// replayed in [opOrder] once the server has [printedLines]. 'KOT' is never
+  /// queued: only that status builds the kitchen-display notification, so
+  /// replaying it would re-fire the kitchen for food already cooked.
+  final List<String> pendingOps;
+
+  /// The only statuses a print may queue, in the order they must be applied.
+  static const List<String> opOrder = ['KOT_PRINT', 'PRINTED'];
+
   /// Why the last send was refused; [conflict] means waiting on the waiter.
   final String? lastError;
   final bool conflict;
@@ -183,6 +201,9 @@ class TableDraft {
     this.baselineCartId,
     this.creatingLine,
     this.lines = const [],
+    this.printedLines = const [],
+    this.printedKey,
+    this.pendingOps = const [],
     this.lastError,
     this.conflict = false,
     this.claimed = false,
@@ -197,10 +218,18 @@ class TableDraft {
         baselineCartId: cartId == null || cartId.isEmpty ? null : cartId,
       );
 
-  bool get isEmpty => lines.isEmpty && creatingLine == null;
+  /// Items on this tablet the server has not received yet.
+  bool get hasItems =>
+      lines.isNotEmpty || creatingLine != null || printedLines.isNotEmpty;
 
-  /// Everything still shown as "not sent", the locked [creatingLine] first.
-  List<DraftLine> get allLines => [?creatingLine, ...lines];
+  /// Nothing left to send AND nothing left to replay — the row can go.
+  bool get isEmpty => !hasItems && pendingOps.isEmpty;
+
+  /// Not printed yet, the locked [creatingLine] first.
+  List<DraftLine> get unprintedLines => [?creatingLine, ...lines];
+
+  /// Everything still shown as "not sent", oldest batch first.
+  List<DraftLine> get allLines => [...printedLines, ...unprintedLines];
   int get itemCount => allLines.fold(0, (s, l) => s + l.quantity);
   double get subtotal =>
       allLines.fold(0.0, (s, l) => s + l.unitPrice * l.quantity);
@@ -212,6 +241,10 @@ class TableDraft {
     DraftLine? creatingLine,
     bool clearCreating = false,
     List<DraftLine>? lines,
+    List<DraftLine>? printedLines,
+    String? printedKey,
+    List<String>? pendingOps,
+    bool clearOps = false,
     String? lastError,
     bool clearError = false,
     bool? conflict,
@@ -225,10 +258,25 @@ class TableDraft {
         : (baselineCartId ?? this.baselineCartId),
     creatingLine: clearCreating ? null : (creatingLine ?? this.creatingLine),
     lines: lines ?? this.lines,
+    printedLines: printedLines ?? this.printedLines,
+    printedKey: printedKey ?? this.printedKey,
+    pendingOps: clearOps ? const [] : (pendingOps ?? this.pendingOps),
     lastError: clearError ? null : (lastError ?? this.lastError),
     conflict: conflict ?? this.conflict,
     claimed: claimed ?? this.claimed,
     createdAt: createdAt,
+  );
+
+  /// Freezes what an offline print just put on paper: those lines read as
+  /// printed and keep the key they were collected under, [status] is queued
+  /// for replay, and anything added next waits under a NEW key so a later
+  /// blanket status update cannot mark it printed too.
+  TableDraft sealPrinted(String status) => copyWith(
+    key: DeviceIdService.randomHex(),
+    printedKey: printedLines.isEmpty ? key : printedKey,
+    printedLines: [...printedLines, ...lines],
+    lines: const [],
+    pendingOps: pendingOps.contains(status) ? pendingOps : [...pendingOps, status],
   );
 
   /// Adds [line], merging into an identical line like the server would.
@@ -261,6 +309,9 @@ class TableDraft {
     'baselineCartId': baselineCartId,
     'creatingLine': creatingLine?.toJson(),
     'lines': lines.map((l) => l.toJson()).toList(),
+    'printedLines': printedLines.map((l) => l.toJson()).toList(),
+    'printedKey': printedKey,
+    'pendingOps': pendingOps,
     'lastError': lastError,
     'conflict': conflict,
     'claimed': claimed,
@@ -278,6 +329,15 @@ class TableDraft {
     lines: (j['lines'] as List? ?? const [])
         .whereType<Map>()
         .map((l) => DraftLine.fromJson(Map<String, dynamic>.from(l)))
+        .toList(),
+    printedLines: (j['printedLines'] as List? ?? const [])
+        .whereType<Map>()
+        .map((l) => DraftLine.fromJson(Map<String, dynamic>.from(l)))
+        .toList(),
+    printedKey: j['printedKey']?.toString(),
+    pendingOps: (j['pendingOps'] as List? ?? const [])
+        .map((o) => o.toString())
+        .where(opOrder.contains)
         .toList(),
     lastError: j['lastError']?.toString(),
     conflict: j['conflict'] == true,
@@ -312,9 +372,10 @@ class DraftCartStore {
     return out;
   }
 
-  /// Recounts [pendingTables] for [rid].
+  /// Recounts [pendingTables] for [rid]. A row kept only to replay a print's
+  /// status holds no items, so it must not show as a table waiting to send.
   Future<void> refreshPending(String rid) async {
-    pendingTables.value = (await all(rid)).length;
+    pendingTables.value = (await all(rid)).where((d) => d.hasItems).length;
   }
   static String _snapKey(String rid, String tid) => '$_snapPrefix${rid}_$tid';
 
@@ -350,7 +411,8 @@ class DraftCartStore {
     await refreshPending(rid);
   }
 
-  /// Last server view of a table, so it can still be opened offline.
+  /// Last server view of a table, so it can still be opened offline. Stamped,
+  /// because paper may only be printed from a copy that is still young.
   Future<void> saveSnapshot(
     String rid,
     String tid, {
@@ -359,13 +421,45 @@ class DraftCartStore {
   }) async {
     if (rid.isEmpty || tid.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
+    // A background sync knows the cart but not the table header; keep the one
+    // already stored rather than losing the table number.
+    final header = table ?? (await loadSnapshot(rid, tid))?.table;
     await prefs.setString(
       _snapKey(rid, tid),
-      jsonEncode({'table': table, 'cart': cart}),
+      jsonEncode({
+        'table': header,
+        'cart': cart,
+        'at': DateTime.now().toIso8601String(),
+      }),
     );
   }
 
-  Future<({Map<String, dynamic>? table, List<Map<String, dynamic>> cart})?>
+  /// This copy is known to be behind the server (items were just uploaded
+  /// from it). Durable, so a later offline open cannot print from it — only a
+  /// fresh [saveSnapshot] clears the mark.
+  Future<void> markSnapshotStale(String rid, String tid) async {
+    if (rid.isEmpty || tid.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final snap = await loadSnapshot(rid, tid);
+    await prefs.setString(
+      _snapKey(rid, tid),
+      jsonEncode({
+        'table': snap?.table,
+        'cart': snap?.cart ?? const [],
+        'at': snap?.at?.toIso8601String(),
+        'stale': true,
+      }),
+    );
+  }
+
+  Future<
+    ({
+      Map<String, dynamic>? table,
+      List<Map<String, dynamic>> cart,
+      DateTime? at,
+      bool stale,
+    })?
+  >
   loadSnapshot(String rid, String tid) async {
     if (rid.isEmpty || tid.isEmpty) return null;
     final prefs = await SharedPreferences.getInstance();
@@ -380,6 +474,8 @@ class DraftCartStore {
             .whereType<Map>()
             .map((m) => Map<String, dynamic>.from(m))
             .toList(),
+        at: DateTime.tryParse(j['at']?.toString() ?? ''),
+        stale: j['stale'] == true,
       );
     } catch (_) {
       return null;

@@ -235,7 +235,8 @@ class PosProvider with ChangeNotifier {
   /// Server lines, then this tablet's unsent draft lines (`is_draft: true`).
   List<Map<String, dynamic>> get cartMenuItems => [
     ..._serverLines,
-    ...?_openDraft?.allLines.map((l) => l.toCartLineMap()),
+    ...?_openDraft?.printedLines.map((l) => l.toCartLineMap(printed: true)),
+    ...?_openDraft?.unprintedLines.map((l) => l.toCartLineMap()),
   ];
 
   List<Map<String, dynamic>> get _serverLines {
@@ -599,6 +600,7 @@ class PosProvider with ChangeNotifier {
     _cartData = [];
     _draft = null;
     _cartStale = false;
+    _cartFromSnapshot = false;
     notifyListeners();
 
     CachedMenuSnapshot? cached;
@@ -715,8 +717,12 @@ class PosProvider with ChangeNotifier {
     _tableDetails = snap?.table ?? {'table_id': tableId};
     _cartData = snap?.cart ?? [];
     _cartError = null;
-    // A copy from the tablet: KOT and bill must re-read the server first.
+    _cartAt = snap?.at;
+    // A copy from the tablet: KOT and bill must re-read the server first
+    // (an offline print works from this copy — see [_canPrintOffline]), but
+    // never from one an upload already left behind.
     _cartStale = true;
+    _cartFromSnapshot = !(snap?.stale ?? false);
     return true;
   }
 
@@ -847,6 +853,8 @@ class PosProvider with ChangeNotifier {
       _cartData = await _apiService.getCartItemsByTableId(tid);
       _cartError = null;
       _cartStale = false;
+      _cartFromSnapshot = false;
+      _cartAt = DateTime.now();
       await _saveSnapshot();
       debugPrint(
         '[Fatfox POS] Cart: ${cartMenuItems.length} lines, total ₹$grandTotal, '
@@ -860,6 +868,8 @@ class PosProvider with ChangeNotifier {
       if (snap != null) {
         _cartData = snap.cart;
         _cartStale = true;
+        _cartFromSnapshot = !snap.stale;
+        _cartAt = snap.at;
       } else {
         _cartError = e.message;
       }
@@ -878,6 +888,8 @@ class PosProvider with ChangeNotifier {
       _cartData = carts;
       _cartError = null;
       _cartStale = false;
+      _cartFromSnapshot = false;
+      _cartAt = DateTime.now();
       await _saveSnapshot();
       return true;
     } on ApiException catch (e) {
@@ -1184,6 +1196,13 @@ class PosProvider with ChangeNotifier {
     final d = _openDraft;
     if (d == null) return false;
     final lineId = cartmenuId.substring(TableDraft.lineIdPrefix.length);
+    if (d.printedLines.any((l) => l.lineId == lineId)) {
+      // Already on a KOT the kitchen holds — same rule as a server KOT'd line.
+      _errorMessage =
+          'This item is already sent to the kitchen. Cancel it instead.';
+      notifyListeners();
+      return false;
+    }
     final locked = d.creatingLine?.lineId == lineId && !d.conflict;
     if (_openTableSending || locked) {
       _errorMessage = locked
@@ -1207,6 +1226,17 @@ class PosProvider with ChangeNotifier {
   /// Set when items reached the server but the cart on screen could not be
   /// re-read; the next KOT must fetch before trusting it.
   bool _cartStale = false;
+
+  /// The cart on screen is the tablet's own copy, never read from the server
+  /// this session. Unlike [_cartStale] that is not a warning about prices the
+  /// server may have changed since — nothing was sent, so this copy is the
+  /// whole truth the tablet has, and an offline print may use it.
+  bool _cartFromSnapshot = false;
+
+  /// When the cart on screen was last true: a server read, or the moment the
+  /// snapshot it came from was written. Paper is never printed from a copy
+  /// older than [offlinePrintMaxCartAge].
+  DateTime? _cartAt;
   static const String _staleMessage =
       'Items were sent but the order could not be refreshed. Try again.';
 
@@ -1361,7 +1391,8 @@ class PosProvider with ChangeNotifier {
   /// Whether [tableId] has unsent items stored on this tablet.
   Future<bool> hasUnsentItems(String tableId) async {
     final rid = await _authService.getRestaurantId() ?? '';
-    return await _drafts.load(rid, tableId) != null;
+    // A row kept only to replay a print's status holds no items.
+    return (await _drafts.load(rid, tableId))?.hasItems ?? false;
   }
 
   static const String unsentItemsMessage =
@@ -1389,13 +1420,40 @@ class PosProvider with ChangeNotifier {
           ? (current.lastError ?? 'Unsent items on this table need attention.')
           : _sendingMessage);
       notifyListeners();
+      // Held items may be re-sent to a different order, so a status printed
+      // for the old one can never be replayed.
+      if (current.conflict && current.pendingOps.isNotEmpty) {
+        await _saveDraft(current.copyWith(clearOps: true));
+      }
       return false;
     }
     _sending.add(tid);
     var d = current;
     var sent = false;
     try {
-      var liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true));
+      final live = await _apiService.getCartItemsByTableId(tid, background: background, fresh: true);
+      var liveId = _cartIdOf(live);
+      // Read before this send's own writes: a table already billed must never
+      // be walked backwards by a status printed offline.
+      final liveStatus = live.isEmpty
+          ? ''
+          : (live.first['table_status']?.toString() ?? '');
+
+      if (!d.hasItems && d.baselineCartId == null) {
+        // Nothing but a status to replay, and no order it could belong to.
+        return await _markConflict(
+          background,
+          d,
+          'That order is no longer on this table.',
+        );
+      }
+
+      if (d.hasItems) {
+        // From here the tablet's copy of this table is behind the server, even
+        // if an answer never comes back (a createcart below included).
+        // Cleared by the fresh read at the end.
+        await _drafts.markSnapshotStale(d.restaurantId, tid);
+      }
 
       if (d.baselineCartId == null) {
         final pending = d.creatingLine;
@@ -1410,9 +1468,15 @@ class PosProvider with ChangeNotifier {
           );
         }
         if (liveId.isEmpty) {
-          final first = d.lines.first;
+          // The oldest batch opens the order: a printed line if there is one.
+          final fromPrinted = d.printedLines.isNotEmpty;
+          final first = fromPrinted ? d.printedLines.first : d.lines.first;
           // Persist before sending, so a lost answer is recognised next time.
-          d = d.copyWith(creatingLine: first, lines: d.lines.sublist(1));
+          d = d.copyWith(
+            creatingLine: first,
+            lines: fromPrinted ? d.lines : d.lines.sublist(1),
+            printedLines: fromPrinted ? d.printedLines.sublist(1) : d.printedLines,
+          );
           await _saveDraft(d);
           try {
             await _createCartLine(tid, first, background: background);
@@ -1420,7 +1484,12 @@ class PosProvider with ChangeNotifier {
             // A refusal is a definite "not added": put the item back so it
             // can be edited or removed. Only a lost answer keeps it locked.
             if (!e.isNetwork) {
-              d = d.copyWith(clearCreating: true, lines: [first, ...d.lines]);
+              d = d.copyWith(
+                clearCreating: true,
+                lines: fromPrinted ? d.lines : [first, ...d.lines],
+                printedLines:
+                    fromPrinted ? [first, ...d.printedLines] : d.printedLines,
+              );
             }
             rethrow;
           }
@@ -1451,6 +1520,30 @@ class PosProvider with ChangeNotifier {
         );
       }
 
+      // Order matters: the printed batch, then its status, then whatever was
+      // added after the print (which that status must not touch).
+      if (d.printedLines.isNotEmpty) {
+        await _apiService.offlineSync(
+          tableId: tid,
+          idempotencyKey: d.printedKey ?? d.key,
+          lines: d.printedLines.map((l) => l.toSyncJson()).toList(),
+          capturedAt: d.createdAt,
+          background: background,
+        );
+        sent = true;
+        d = d.copyWith(printedLines: const []);
+        await _saveDraft(d);
+      }
+      if (d.pendingOps.isNotEmpty) {
+        // [onProgress] keeps `d` in step, so a status refused mid-way leaves
+        // the ones that already landed out of the saved draft.
+        await _replayPrintOps(
+          d,
+          liveStatus,
+          background: background,
+          onProgress: (progressed) => d = progressed,
+        );
+      }
       if (d.lines.isNotEmpty) {
         await _apiService.offlineSync(
           tableId: tid,
@@ -1466,7 +1559,14 @@ class PosProvider with ChangeNotifier {
       if (_isOpen(tid)) {
         _cartData = fresh;
         _cartStale = false;
+        _cartFromSnapshot = false;
+        _cartAt = DateTime.now();
         await _saveSnapshot();
+      } else {
+        // A background send for another table: its stored copy must not stay
+        // at the one from before these items landed, or a later offline open
+        // would print a ticket without them.
+        await _drafts.saveSnapshot(d.restaurantId, tid, cart: fresh);
       }
       markFloorDirty();
       return true;
@@ -1476,7 +1576,11 @@ class PosProvider with ChangeNotifier {
         _stopSendAll = true;
       }
       if (sent) {
-        if (_isOpen(tid)) _cartStale = true;
+        // Sent, prices unread: the tablet's copy is now behind the server.
+        if (_isOpen(tid)) {
+          _cartStale = true;
+          _cartFromSnapshot = false;
+        }
         say(_staleMessage);
         return false;
       }
@@ -1540,14 +1644,59 @@ class PosProvider with ChangeNotifier {
   static String _cartIdOf(List<Map<String, dynamic>> carts) =>
       carts.isEmpty ? '' : (carts.first['_id']?.toString() ?? '');
 
+  /// A KOT or bill already on paper whose status the server never got. Said
+  /// out loud: the waiter must not assume the order advanced.
+  static const String printNotRecordedMessage =
+      'A KOT or bill printed offline could not be recorded on this order. Check the order.';
+
+  /// Applies the statuses of prints that already happened on paper, oldest
+  /// first. Dropped — never forced — when the order they were printed from is
+  /// gone or has already moved past them.
+  Future<void> _replayPrintOps(
+    TableDraft d,
+    String liveStatus, {
+    required bool background,
+    required void Function(TableDraft) onProgress,
+  }) async {
+    final cid = d.baselineCartId ?? '';
+    if (cid.isEmpty || liveStatus == 'PRINTED' || liveStatus == 'PAID') {
+      if (!background) _errorMessage = printNotRecordedMessage;
+      final dropped = d.copyWith(
+        clearOps: true,
+        lastError: printNotRecordedMessage,
+      );
+      onProgress(dropped);
+      await _saveDraft(dropped);
+      return;
+    }
+    for (final status in TableDraft.opOrder) {
+      if (!d.pendingOps.contains(status)) continue;
+      await _apiService.setCartStatus(
+        cartId: cid,
+        tableStatus: status,
+        background: background,
+      );
+      // One at a time: a refused PRINTED must not make the server re-live a
+      // KOT_PRINT it already has.
+      d = d.copyWith(pendingOps: [...d.pendingOps]..remove(status));
+      onProgress(d);
+      await _saveDraft(d);
+    }
+  }
+
   Future<bool> _markConflict(
     bool background,
     TableDraft d,
     String why, {
     bool claimed = false,
   }) async {
-    if (!background) _errorMessage = why;
-    await _saveDraft(d.copyWith(conflict: true, claimed: claimed, lastError: why));
+    // A parked draft may be re-sent to a different order, so a status printed
+    // for the old one can never be replayed — it goes, and is said out loud.
+    final text = d.pendingOps.isEmpty ? why : '$why $printNotRecordedMessage';
+    if (!background) _errorMessage = text;
+    await _saveDraft(
+      d.copyWith(conflict: true, claimed: claimed, lastError: text, clearOps: true),
+    );
     return false;
   }
 
@@ -1888,13 +2037,24 @@ class PosProvider with ChangeNotifier {
   }
 
   Future<bool> _sendKotLocked(String openTable) async {
+    // No signal: the kitchen still needs its ticket.
+    if (_canPrintOffline) return _printKotOffline();
     final hadDraft = _openDraft != null;
     var ready = await flushDraft();
     if (ready && (!hadDraft || _cartStale) && _isOpen(openTable)) {
       ready = await _refreshCart(openTable);
     }
     // The waiter may have left the table while it was sending.
-    if (!ready || !_isOpen(openTable)) return false;
+    if (!ready || !_isOpen(openTable)) {
+      // A refused send is often how the tablet learns the signal is gone:
+      // print from what it holds rather than asking for a second KOT press.
+      if (!_isOpen(openTable)) return false;
+      if (_canPrintOffline) return await _printKotOffline();
+      if (_offlinePrint && _offlinePrintBlocked == _offlineCopyTooOld) {
+        _errorMessage = _offlineCopyTooOld;
+      }
+      return false;
+    }
     final tid = resolvedTableId;
     final cid = cartId;
     if (tid.isEmpty || cid.isEmpty) {
@@ -1922,28 +2082,7 @@ class PosProvider with ChangeNotifier {
 
     // 3) Silent print KOT tickets (one per kitchen department, with ESC/POS autocut)
     try {
-      final prefs = await ReceiptPrefs.load();
-      final customization = await _receiptCustomization.loadCached();
-      final groups = buildKotGroups(kotItems);
-      debugPrint('[Fatfox POS] KOT Print: ${kotItems.length} items divided into ${groups.length} department ticket(s):');
-      for (final g in groups) {
-        debugPrint('  - Station/Dept: "${g.name}", Items: ${g.items.map((i) => i.item.name).join(', ')}');
-      }
-      for (var i = 0; i < groups.length; i++) {
-        final group = groups[i];
-        final bytes = await _printer.generateKotBytes(
-          table: _printTable,
-          items: group.items,
-          restaurantName: prefs.header,
-          paperSize: prefs.paperSize,
-          department: group.name,
-          customization: customization,
-        );
-        await _printer.printBytes(bytes, role: PrinterRole.kot);
-        if (i < groups.length - 1) {
-          await Future.delayed(const Duration(milliseconds: 150));
-        }
-      }
+      await _printKotTickets(kotItems);
     } catch (e) {
       printError = friendlyError(e);
       debugPrint('[Fatfox POS] KOT thermal print error: $e');
@@ -1964,6 +2103,86 @@ class PosProvider with ChangeNotifier {
 
     markFloorDirty();
     return true;
+  }
+
+  /// One ticket per kitchen department, with ESC/POS autocut between stations.
+  Future<void> _printKotTickets(
+    List<CartLineItem> kotItems, {
+    bool offline = false,
+  }) async {
+    final prefs = await ReceiptPrefs.load();
+    final customization = await _receiptCustomization.loadCached();
+    final groups = buildKotGroups(kotItems);
+    debugPrint('[Fatfox POS] KOT Print: ${kotItems.length} items divided into ${groups.length} department ticket(s):');
+    for (final g in groups) {
+      debugPrint('  - Station/Dept: "${g.name}", Items: ${g.items.map((i) => i.item.name).join(', ')}');
+    }
+    for (var i = 0; i < groups.length; i++) {
+      final group = groups[i];
+      final bytes = await _printer.generateKotBytes(
+        table: _printTable,
+        items: group.items,
+        restaurantName: prefs.header,
+        paperSize: prefs.paperSize,
+        department: group.name,
+        customization: customization,
+        offline: offline,
+      );
+      await _printer.printBytes(bytes, role: PrinterRole.kot);
+      if (i < groups.length - 1) {
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+    }
+  }
+
+  /// No signal: print the kitchen ticket from what the tablet holds, then
+  /// SEAL what went on paper — those lines read as KOT'd here, ride their own
+  /// batch to the server, and carry a KOT_PRINT to replay. `KOT` is never
+  /// queued: that status is what fires the kitchen display, and the food is
+  /// already being cooked from this ticket.
+  Future<bool> _printKotOffline() async {
+    final tid = resolvedTableId;
+    if (tid.isEmpty || cartMenuItems.isEmpty) {
+      _errorMessage = 'No items on this table yet';
+      return false;
+    }
+    final held = _openDraft;
+    if (held != null && held.conflict) {
+      // Held items may belong to another order; they must not be sealed into
+      // this one, and a ticket without them would be wrong.
+      _errorMessage = held.lastError ?? 'Unsent items on this table need attention.';
+      return false;
+    }
+    _errorMessage = null;
+    printError = null;
+    notifyListeners();
+
+    var kotItems = _kotLinesFromMaps(
+      cartMenuItems
+          .where((i) => i['kotprint_status'] != 1 && i['kotprint_status'] != '1')
+          .toList(),
+    );
+    if (kotItems.isEmpty) kotItems = printCartLines;
+    try {
+      await _printKotTickets(kotItems, offline: true);
+    } catch (e) {
+      // Nothing reached the paper, so there is nothing to seal or replay.
+      printError = friendlyError(e);
+      debugPrint('[Fatfox POS] Offline KOT print error: $e');
+      return false;
+    }
+    await _queuePrintStatus('KOT_PRINT');
+    markFloorDirty();
+    return true;
+  }
+
+  /// Records a print that only happened on paper: the lines just printed are
+  /// sealed under their own key and [status] waits for the reconnect.
+  Future<void> _queuePrintStatus(String status) async {
+    final tid = resolvedTableId;
+    if (_restaurantId.isEmpty || tid.isEmpty) return;
+    final d = _openDraft ?? TableDraft.start(_restaurantId, tid, cartId);
+    await _saveDraft(d.sealPrinted(status));
   }
 
   // ============================================================
@@ -2035,6 +2254,8 @@ class PosProvider with ChangeNotifier {
     final prevConsolidated = _consolidatedTax;
     final prevActiveTable = _activeTable;
     final prevStale = _cartStale;
+    final prevFromSnapshot = _cartFromSnapshot;
+    final prevCartAt = _cartAt;
     _activeTable = null;
     try {
       final prep = await prepareTableForBill(tableId: tableId, areaId: areaId);
@@ -2049,6 +2270,10 @@ class PosProvider with ChangeNotifier {
       _consolidatedTax = prevConsolidated;
       _activeTable = prevActiveTable;
       _cartStale = prevStale;
+      _cartFromSnapshot = prevFromSnapshot;
+      // A floor bill reads ANOTHER table: its freshness must not be left
+      // attached to the copy the open table is restored to.
+      _cartAt = prevCartAt;
       _isBusy = false;
       notifyListeners();
     }
@@ -2062,8 +2287,14 @@ class PosProvider with ChangeNotifier {
   }) async {
     _activeTableId = tableId;
     _activeAreaId = areaId;
+    // The floor list has no menu, tax or cart for this table on the tablet, so
+    // it can only bill what the server answers with.
+    if (!ConnectivityService.instance.isOnline) {
+      return 'No connection. Open the table to print its bill.';
+    }
     final rid = await _authService.getRestaurantId() ?? '';
-    if (await _drafts.load(rid, tableId) != null) return unsentItemsMessage;
+    _restaurantId = rid;
+    if (await hasUnsentItems(tableId)) return unsentItemsMessage;
     try {
       final results = await Future.wait<Object?>([
         _apiService.viewTableById(tableId),
@@ -2090,6 +2321,37 @@ class PosProvider with ChangeNotifier {
   /// it, so with Sync off they would hand out paper the server never recorded.
   static const String _syncOffPrint =
       'Sync is off. Turn Sync on to print KOT or bill.';
+
+  /// No signal: print from the tablet and replay the status later. Sync
+  /// switched off by hand is a deliberate "talk to nobody" — it keeps
+  /// refusing ([_syncOffPrint]), so no paper is handed out behind its back.
+  bool get _offlinePrint =>
+      !ConnectivityService.instance.isOnline &&
+      !ConnectivityService.instance.syncOff;
+
+  /// How old the tablet's copy of a cart may be and still be put on paper.
+  /// Far shorter than the menu's cache rule: a menu barely moves during a
+  /// shift, while another device can change an order minute to minute.
+  static const Duration offlinePrintMaxCartAge = Duration(minutes: 30);
+
+  static const String _offlineCopyTooOld =
+      'This order was last read too long ago to print from the tablet. '
+      'Reconnect and try again.';
+
+  /// Why an offline print is refused, or null when the tablet's copy of the
+  /// cart is good enough to put on paper. Asked only while there is no signal.
+  String? get _offlinePrintBlocked {
+    // Items reached the server and their prices came back unread: that paper
+    // could not match the order. The re-read path reports this one.
+    if (_cartStale && !_cartFromSnapshot) return _staleMessage;
+    if (cartId.isNotEmpty &&
+        !_freshEnough(_cartAt, maxAge: offlinePrintMaxCartAge)) {
+      return _offlineCopyTooOld;
+    }
+    return null;
+  }
+
+  bool get _canPrintOffline => _offlinePrint && _offlinePrintBlocked == null;
 
   /// Print the customer bill and mark the table PRINTED (admin "KOT + Bill").
   ///
@@ -2134,7 +2396,14 @@ class PosProvider with ChangeNotifier {
       return '$n item${n == 1 ? '' : 's'} on this table ${n == 1 ? 'is' : 'are'} held: '
           '${held.lastError ?? 'check the order.'} ${held.claimed ? 'Unlock' : 'Send'} or discard ${n == 1 ? 'it' : 'them'} first.';
     }
+    if (_canPrintOffline) return _printBillOffline(tid, paymentMode);
     if (tid.isEmpty || !await _refreshCart(tid) || cartId.isEmpty) {
+      // A refused read is often how the tablet learns the signal is gone.
+      if (tid.isNotEmpty && cartId.isNotEmpty && _offlinePrint) {
+        final blocked = _offlinePrintBlocked;
+        if (blocked == null) return _printBillOffline(tid, paymentMode);
+        if (blocked == _offlineCopyTooOld) return blocked;
+      }
       // Paper must match the server: never print from a cart the tablet only
       // remembers (opened offline, or read before other devices' changes).
       return tid.isEmpty || _errorMessage == null
@@ -2185,6 +2454,130 @@ class PosProvider with ChangeNotifier {
     if (failure == null || printError != null) markFloorDirty();
     return failure;
   }
+
+  /// No signal, but the guest is leaving: print the same bill from the cart
+  /// this tablet holds, and queue PRINTED for the reconnect.
+  Future<String?> _printBillOffline(String tid, String? paymentMode) async {
+    if (tid.isEmpty || cartId.isEmpty) return 'No items on this table yet';
+    if (hasUnsentKotItems) return 'Send KOT to kitchen before printing the bill';
+    final refusal = await _offlineBillRefusal();
+    if (refusal != null) return refusal;
+
+    final prefs = await ReceiptPrefs.load();
+    final customization = await _receiptCustomization.loadCached();
+    try {
+      final data = await BillBuilder(_apiService).build(
+        tableId: tid,
+        tableNumber: tableNumber,
+        paymentMode: paymentMode,
+        cartSnapshot: _offlineCartSnapshot(prefs.header),
+        taxRows: _taxConfig,
+      );
+      if (data == null) return 'No active cart found for this table';
+      final bytes = await _printer.generateBillBytes(
+        bill: data,
+        paperSize: prefs.paperSize,
+        customization: customization,
+        offline: true,
+      );
+      await _printer.printBytes(bytes, role: PrinterRole.bill);
+    } on ApiException catch (e) {
+      _sessionExpired = e.isAuth;
+      return e.message;
+    } catch (e) {
+      printError = friendlyError(e);
+      debugPrint('[Fatfox POS] Offline bill print error: $e');
+      return 'Printer error: ${friendlyError(e)}';
+    }
+    await _queuePrintStatus('PRINTED');
+    markFloorDirty();
+    return null;
+  }
+
+  /// The open cart as this tablet knows it, with the unsent lines folded in.
+  /// The server's round-off goes (it was computed for a smaller total) and is
+  /// worked out again the way the server does it: the charged total is the
+  /// unrounded one rounded UP, so the till never collects less than the order.
+  Map<String, dynamic> _offlineCartSnapshot(String restaurantName) {
+    final base = {...?cart};
+    // No bill header offline, so the receipt's own name is the one on file.
+    if (restaurantName.isNotEmpty) base['restaurant_name'] = restaurantName;
+    if (_openDraft?.allLines.isEmpty ?? true) return base;
+    final unrounded = grandTotal - roundOff;
+    final total = unrounded.ceilToDouble();
+    return {
+      ...base,
+      'cartMenuData': cartMenuItems,
+      'food_subtotal': subTotal,
+      'tax_price': taxAmount,
+      'unrounded_total': unrounded,
+      'total_price': total,
+      'round_off': total - unrounded,
+    };
+  }
+
+  static const String _offlineBillNotPriceable =
+      'Send these items when back online before printing the bill.';
+
+  /// Offline the tablet prices the unsent lines itself, so it may print only
+  /// when nothing on this cart needs the server's pricing engine and the
+  /// cached rows it prices from are still fresh. A reprint of what the server
+  /// already priced is always allowed.
+  Future<String?> _offlineBillRefusal() async {
+    if (_openDraft?.allLines.isEmpty ?? true) return null;
+    final snapshot = cart ?? const <String, dynamic>{};
+    final compounded = _taxConfig.any(
+      (t) => t['tax_type']?.toString().toUpperCase() == 'CALC_ON_TAX',
+    );
+    if (compounded ||
+        discountAmount > 0 ||
+        (discountName?.isNotEmpty ?? false) ||
+        areaCharge > 0 ||
+        _hasSplit(snapshot) ||
+        !_freshEnough(_menuCachedAt) ||
+        await _areaBlocksOfflineBill(snapshot)) {
+      return _offlineBillNotPriceable;
+    }
+    return null;
+  }
+
+  /// True when the area's surge cannot be trusted: it charges one (per item,
+  /// which only the server prices), or the floor it would be read from is
+  /// missing or older than the app's cache rule.
+  Future<bool> _areaBlocksOfflineBill(Map<String, dynamic> snapshot) async {
+    final floor = await _drafts.loadFloor(_restaurantId);
+    if (floor == null || !_freshEnough(floor.at)) return true;
+    final areaId = snapshot['area_id']?.toString() ?? _activeAreaId ?? '';
+    return floor.areas
+        .map(TableArea.fromJson)
+        .any((a) => a.id == areaId && a.surgeValue > 0);
+  }
+
+  /// Young enough to be trusted; no timestamp at all counts as stale.
+  /// [maxAge] defaults to the menu/tax/area cache rule.
+  static bool _freshEnough(
+    DateTime? at, {
+    Duration maxAge = MenuCacheService.defaultMaxAge,
+  }) {
+    if (at == null) return false;
+    final age = DateTime.now().difference(at);
+    return !age.isNegative && age < maxAge;
+  }
+
+  /// Any split-bill field at all: a share may already be paid, and only the
+  /// server knows what is left to charge.
+  static bool _hasSplit(Map<String, dynamic> cart) => cart.entries.any(
+    (e) => e.key.toLowerCase().contains('split') && _isSet(e.value),
+  );
+
+  static bool _isSet(Object? v) => switch (v) {
+    null || false => false,
+    num n => n != 0,
+    String s => s.isNotEmpty && s != '0' && s.toLowerCase() != 'false',
+    List l => l.isNotEmpty,
+    Map m => m.isNotEmpty,
+    _ => true,
+  };
 
   /// PRINTED is what unlocks Release — retry transport failures like admin.
   Future<void> _markPrintedWithRetry(String cid) async {

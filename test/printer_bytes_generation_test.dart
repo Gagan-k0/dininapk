@@ -74,4 +74,44 @@ void main() {
     final bytes = await service.generateBillBytes(bill: bill);
     expect(bytes, isNotEmpty);
   });
+
+  test('paper printed with no signal carries the OFFLINE marker', () async {
+    // The em dash is normalized for the printer's font, so look for what the
+    // guest actually reads on the paper.
+    final marker = ThermalPrinterService.offlineMarker.replaceAll('—', '-');
+    bool carries(List<int> bytes) =>
+        String.fromCharCodes(bytes).contains(marker);
+
+    final table = DineInTable(
+      id: 't1',
+      tableNumber: '10',
+      areaId: 'a1',
+      noOfPeople: 2,
+      tableStatus: 'RUNNING',
+      status: '1',
+      totalPrice: 0,
+      itemCount: 0,
+    );
+    expect(
+      carries(await service.generateKotBytes(
+          table: table, items: const [], restaurantName: 'THE FAT FOX', offline: true)),
+      isTrue,
+    );
+    expect(
+      carries(await service.generateKotBytes(
+          table: table, items: const [], restaurantName: 'THE FAT FOX')),
+      isFalse,
+    );
+
+    const bill = BillPrintData(
+      restaurantName: 'THE FAT FOX',
+      tableNumber: '10',
+      lines: [BillLine(name: 'Soup', quantity: 1, lineTotal: 90)],
+      subTotal: 90,
+      taxTotal: 4.5,
+      grandTotal: 94.5,
+    );
+    expect(carries(await service.generateBillBytes(bill: bill, offline: true)), isTrue);
+    expect(carries(await service.generateBillBytes(bill: bill)), isFalse);
+  });
 }

@@ -1,5 +1,6 @@
 import '../models/table_model.dart';
 import 'api_service.dart';
+import 'connectivity_service.dart';
 import 'thermal_printer_service.dart';
 
 /// Turns the live cart into [BillPrintData], the way the admin
@@ -25,11 +26,15 @@ class BillBuilder {
     if (cart == null) return null;
 
     Map<String, dynamic>? header;
-    try {
-      header = await _api.getBillView(tableId, fresh: true);
-    } on ApiException catch (e) {
-      if (e.isAuth) rethrow;
-      header = null; // bill still prints from the snapshot
+    // With no signal this request can only burn its timeout while the guest
+    // waits — and the caller's snapshot already carries what it would add.
+    if (ConnectivityService.instance.isOnline) {
+      try {
+        header = await _api.getBillView(tableId, fresh: true);
+      } on ApiException catch (e) {
+        if (e.isAuth) rethrow;
+        header = null; // bill still prints from the snapshot
+      }
     }
     final rest = _restaurantDoc(header);
 
