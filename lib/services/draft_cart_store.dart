@@ -170,6 +170,9 @@ class TableDraft {
   final String? lastError;
   final bool conflict;
 
+  /// Held because another device holds the table's claim ([lastError] says who).
+  final bool claimed;
+
   /// When the first item was added; kept across edits and sends.
   final DateTime createdAt;
 
@@ -182,6 +185,7 @@ class TableDraft {
     this.lines = const [],
     this.lastError,
     this.conflict = false,
+    this.claimed = false,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -211,6 +215,7 @@ class TableDraft {
     String? lastError,
     bool clearError = false,
     bool? conflict,
+    bool? claimed,
   }) => TableDraft(
     restaurantId: restaurantId,
     tableId: tableId,
@@ -222,6 +227,7 @@ class TableDraft {
     lines: lines ?? this.lines,
     lastError: clearError ? null : (lastError ?? this.lastError),
     conflict: conflict ?? this.conflict,
+    claimed: claimed ?? this.claimed,
     createdAt: createdAt,
   );
 
@@ -257,6 +263,7 @@ class TableDraft {
     'lines': lines.map((l) => l.toJson()).toList(),
     'lastError': lastError,
     'conflict': conflict,
+    'claimed': claimed,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -274,6 +281,9 @@ class TableDraft {
         .toList(),
     lastError: j['lastError']?.toString(),
     conflict: j['conflict'] == true,
+    // Drafts held before this field existed carry only the old claim text.
+    claimed: j['claimed'] == true ||
+        j['lastError'] == 'Another tablet is serving this table.',
     // Rows saved before this field existed read as "now" until next saved.
     createdAt: DateTime.tryParse(j['createdAt']?.toString() ?? ''),
   );

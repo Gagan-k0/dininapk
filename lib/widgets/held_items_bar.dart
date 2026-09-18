@@ -38,11 +38,12 @@ class HeldItemsBar extends StatelessWidget {
               onPressed: busy ? null : () => _discard(context),
               child: const Text('Discard'),
             ),
+            // A claim refusal repeats on every send until the claim is freed.
             FilledButton.tonal(
               onPressed: busy || !ConnectivityService.instance.isOnline
                   ? null
-                  : () => _send(context),
-              child: const Text('Send to current order'),
+                  : () => d.claimed ? _unlock(context) : _send(context),
+              child: Text(d.claimed ? 'Unlock & send' : 'Send to current order'),
             ),
           ],
         ),
@@ -76,7 +77,26 @@ class HeldItemsBar extends StatelessWidget {
       return;
     }
     final ok = await pos.resendDraft();
-    if (!context.mounted) return;
+    if (context.mounted) _toast(context, ok);
+  }
+
+  Future<void> _unlock(BuildContext context) async {
+    final table = pos.tableNumber;
+    if (!await _confirm(
+      context,
+      'Unlock table${table.isEmpty ? '' : ' $table'}?',
+      'The device holding this table will not be able to add items until it '
+          'sends again. Only unlock if that device is not in use. '
+          'The held items are then added to the order open on this table.',
+      'Unlock & send',
+    )) {
+      return;
+    }
+    final ok = await pos.unlockTableAndResend();
+    if (context.mounted) _toast(context, ok);
+  }
+
+  void _toast(BuildContext context, bool ok) {
     showPosToast(
       context,
       ok ? 'Held items sent' : (pos.errorMessage ?? 'Could not send'),
