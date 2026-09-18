@@ -10,11 +10,35 @@ import '../../utils/extra_addons.dart';
 import '../../utils/async_guard.dart';
 import '../../utils/menu_filter.dart';
 import '../../utils/menu_page_window.dart';
+import '../../utils/pos_toast.dart';
+import '../../widgets/cart_add_banner.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
 import '../../widgets/held_items_bar.dart';
 import '../../widgets/subscription_banner.dart';
 import '../../widgets/sync_status_chip.dart';
+
+class _CartAddDelta {
+  final String lineId;
+  final int qty;
+  final String name;
+  const _CartAddDelta({
+    required this.lineId,
+    required this.qty,
+    required this.name,
+  });
+}
+
+class _CartAddBannerState {
+  final String message;
+  final bool busy;
+  final bool canUndo;
+  const _CartAddBannerState({
+    required this.message,
+    required this.busy,
+    required this.canUndo,
+  });
+}
 
 class FoodCategoriesScreen extends StatefulWidget {
   const FoodCategoriesScreen({super.key});
@@ -24,6 +48,8 @@ class FoodCategoriesScreen extends StatefulWidget {
 }
 
 class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
+  static const int _cartSlideMs = 420;
+
   bool _initialized = false;
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _cartScrollController = ScrollController();
@@ -31,10 +57,20 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   final MenuPageWindow<MenuItem> _menuPage =
       MenuPageWindow<MenuItem>(pageSize: 80);
   Timer? _searchDebounce;
+  Timer? _cartToggleUnlock;
   bool _railCollapsed = false;
   bool _cartCollapsed = false;
+  bool _cartToggleLocked = false;
+  bool _phoneSheetScrollPending = false;
   final _itemTapGuard = AsyncGuard();
   final _customiseAddGuard = AsyncGuard();
+  final _addUndoGuard = AsyncGuard();
+
+  /// Coalesced "Added …" banner under the cart header (not a SnackBar stack).
+  final ValueNotifier<_CartAddBannerState?> _addBanner =
+      ValueNotifier<_CartAddBannerState?>(null);
+  final List<_CartAddDelta> _pendingAddDeltas = [];
+  Timer? _addBannerDismiss;
 
   @override
   void initState() {
@@ -73,12 +109,175 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _cartToggleUnlock?.cancel();
+    _addBannerDismiss?.cancel();
+    _addBanner.dispose();
     _menuScrollController.removeListener(_onMenuScroll);
     _menuScrollController.dispose();
     _searchController.dispose();
     _cartScrollController.dispose();
     super.dispose();
   }
+
+  Map<String, int> _lineQtySnapshot(PosProvider pos) {
+    final out = <String, int>{};
+    for (final line in pos.cartMenuItems) {
+      final id = line['_id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      out[id] = (line['quantity'] as num?)?.toInt() ?? 1;
+    }
+    return out;
+  }
+
+  String _lineDisplayName(Map<String, dynamic> line) {
+    final menuData = line['menuData'];
+    if (menuData is List && menuData.isNotEmpty) {
+      final name = (menuData[0]['displayname'] ?? menuData[0]['name'] ?? '')
+          .toString()
+          .trim();
+      if (name.isNotEmpty) return name;
+    }
+    final fallback = (line['menu_name'] ?? line['name'] ?? 'Item').toString();
+    return fallback.trim().isEmpty ? 'Item' : fallback.trim();
+  }
+
+  List<_CartAddDelta> _diffLineQtys(
+    PosProvider pos,
+    Map<String, int> before,
+    Map<String, int> after,
+  ) {
+    final byId = {
+      for (final line in pos.cartMenuItems)
+        if (line['_id'] != null) line['_id'].toString(): line,
+    };
+    final out = <_CartAddDelta>[];
+    for (final entry in after.entries) {
+      final prev = before[entry.key] ?? 0;
+      final delta = entry.value - prev;
+      if (delta <= 0) continue;
+      final line = byId[entry.key];
+      out.add(
+        _CartAddDelta(
+          lineId: entry.key,
+          qty: delta,
+          name: line != null ? _lineDisplayName(line) : 'Item',
+        ),
+      );
+    }
+    return out;
+  }
+
+  String _coalesceAddMessage(List<_CartAddDelta> deltas) {
+    final totalQty = deltas.fold<int>(0, (sum, d) => sum + d.qty);
+    if (totalQty <= 0) return 'Added';
+    final names = {for (final d in deltas) d.name};
+    if (totalQty == 1) return 'Added ${deltas.first.name}';
+    if (names.length == 1) return 'Added ${names.first} ×$totalQty';
+    return 'Added $totalQty items';
+  }
+
+  void _clearAddBanner() {
+    _addBannerDismiss?.cancel();
+    _addBannerDismiss = null;
+    _pendingAddDeltas.clear();
+    _addBanner.value = null;
+  }
+
+  void _scheduleAddBannerDismiss() {
+    _addBannerDismiss?.cancel();
+    _addBannerDismiss = Timer(const Duration(milliseconds: 2800), () {
+      if (!mounted) return;
+      _clearAddBanner();
+    });
+  }
+
+  void _noteSuccessfulAdds(PosProvider pos, List<_CartAddDelta> deltas) {
+    if (deltas.isEmpty) return;
+    ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
+    _pendingAddDeltas.addAll(deltas);
+    _addBanner.value = _CartAddBannerState(
+      message: _coalesceAddMessage(_pendingAddDeltas),
+      busy: false,
+      canUndo: _pendingAddDeltas.any((d) => d.lineId.isNotEmpty),
+    );
+    _scheduleAddBannerDismiss();
+    // Expand so `_scrollCartToNewest` can reach the list (no-op while collapsed).
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    if (wide && _cartCollapsed) _setCartCollapsed(false);
+  }
+
+  Future<void> _undoPendingAdds(PosProvider pos) async {
+    await _addUndoGuard.run(() async {
+      final deltas = List<_CartAddDelta>.from(_pendingAddDeltas);
+      if (deltas.isEmpty) return;
+      _addBannerDismiss?.cancel();
+      _addBanner.value = _CartAddBannerState(
+        message: _addBanner.value?.message ?? 'Undoing…',
+        busy: true,
+        canUndo: false,
+      );
+      // Newest first so merged qty lines unwind cleanly.
+      for (final delta in deltas.reversed) {
+        var current = 0;
+        for (final line in pos.cartMenuItems) {
+          if (line['_id']?.toString() == delta.lineId) {
+            current = (line['quantity'] as num?)?.toInt() ?? 0;
+            break;
+          }
+        }
+        final next = current - delta.qty;
+        final ok = await pos.updateItemQuantity(delta.lineId, next);
+        if (ok == null) continue; // write lock — skip silently
+        if (ok == false && mounted) {
+          showPosToast(
+            context,
+            pos.errorMessage ?? 'Could not undo',
+            error: true,
+          );
+          break;
+        }
+      }
+      if (!mounted) return;
+      _clearAddBanner();
+    });
+  }
+
+  /// New lines append under the sticky totals/KOT row — scroll them into view.
+  void _scrollCartToNewest() {
+    if (!mounted) return;
+    // Tablet drawer only: phone FAB sheet ignores collapse prefs.
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    if (wide && _cartCollapsed) return;
+    void attempt() {
+      if (!mounted || !_cartScrollController.hasClients) return;
+      final max = _cartScrollController.position.maxScrollExtent;
+      if (max <= 0) return;
+      _cartScrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+      );
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => attempt());
+    });
+  }
+
+  void _setCartCollapsed(bool collapsed) {
+    if (_cartToggleLocked || _cartCollapsed == collapsed) return;
+    final wasCollapsed = _cartCollapsed;
+    _cartToggleLocked = true;
+    setState(() => _cartCollapsed = collapsed);
+    PosUiPrefs.saveCartCollapsed(collapsed);
+    _cartToggleUnlock?.cancel();
+    _cartToggleUnlock = Timer(const Duration(milliseconds: _cartSlideMs), () {
+      _cartToggleLocked = false;
+    });
+    if (wasCollapsed && !collapsed) _scrollCartToNewest();
+  }
+
+  void _toggleCartCollapsed() => _setCartCollapsed(!_cartCollapsed);
 
   void _onMenuScroll() {
     if (!_menuScrollController.hasClients) return;
@@ -182,25 +381,13 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                           pos.selectCategory(id);
                           if (id == kExtraAddonsCategoryId) {
                             await pos.ensureExtraAddonsLoaded();
-                            if (!mounted) return;
+                            if (!context.mounted) return;
                             if (pos.errorMessage ==
                                 'Failed to load extra add-ons') {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(pos.errorMessage!),
-                                  backgroundColor: const Color(0xFFDC2626),
-                                  behavior: SnackBarBehavior.floating,
-                                  margin: const EdgeInsets.fromLTRB(
-                                    48,
-                                    0,
-                                    48,
-                                    16,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 8,
-                                  ),
-                                ),
+                              showPosToast(
+                                context,
+                                pos.errorMessage!,
+                                error: true,
                               );
                             }
                           }
@@ -222,73 +409,31 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                         thickness: 1,
                         color: Color(0xFFE2E8F0),
                       ),
-                      // Menu width stays fixed (always reserves 56px peek). Cart
-                      // slides over the menu — no GridView reflow on toggle.
-                      Expanded(
-                        child: ClipRect(
-                          child: Stack(
-                            children: [
-                              _buildMainContent(pos, tableStatus),
-                              if (wideCart)
-                                Positioned(
-                                  right: 0,
-                                  top: 0,
-                                  bottom: 0,
-                                  width: 340,
-                                  child: IgnorePointer(
-                                    ignoring: _cartCollapsed,
-                                    child: AnimatedSlide(
-                                      duration: const Duration(
-                                        milliseconds: 280,
-                                      ),
-                                      curve: Curves.easeOutCubic,
-                                      offset: _cartCollapsed
-                                          ? const Offset(1, 0)
-                                          : Offset.zero,
-                                      child: Material(
-                                        elevation: _cartCollapsed ? 0 : 6,
-                                        color: Colors.white,
-                                        child: DecoratedBox(
-                                          decoration: const BoxDecoration(
-                                            border: Border(
-                                              left: BorderSide(
-                                                color: Color(0xFFE2E8F0),
-                                              ),
-                                            ),
-                                          ),
-                                          child: _CartBottomSheet(
-                                            pos: pos,
-                                            embedded: true,
-                                            onToggleCollapsed: () {
-                                              setState(
-                                                () => _cartCollapsed =
-                                                    !_cartCollapsed,
-                                              );
-                                              PosUiPrefs.saveCartCollapsed(
-                                                _cartCollapsed,
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                      ),
-                                    ),
+                      // Sibling panel (not Stack overlay): grid shrinks so tiles
+                      // wrap instead of sitting under the cart.
+                      Expanded(child: _buildMainContent(pos, tableStatus)),
+                      if (wideCart)
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: _cartSlideMs),
+                          curve: Curves.easeInOutCubic,
+                          width: _cartCollapsed ? 56 : 340,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            border: Border(
+                              left: BorderSide(color: Color(0xFFE2E8F0)),
+                            ),
+                          ),
+                          child: ClipRect(
+                            child: _cartCollapsed
+                                ? _buildCollapsedCartStrip(pos)
+                                : _CartBottomSheet(
+                                    pos: pos,
+                                    embedded: true,
+                                    scrollController: _cartScrollController,
+                                    onToggleCollapsed: _toggleCartCollapsed,
                                   ),
-                                ),
-                            ],
                           ),
                         ),
-                      ),
-                      if (wideCart) ...[
-                        const VerticalDivider(
-                          width: 1,
-                          thickness: 1,
-                          color: Color(0xFFE2E8F0),
-                        ),
-                        SizedBox(
-                          width: 56,
-                          child: _buildCollapsedCartStrip(pos),
-                        ),
-                      ],
                     ],
                   ),
                 ),
@@ -470,6 +615,29 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
               ),
             ),
           ),
+          ValueListenableBuilder<_CartAddBannerState?>(
+            valueListenable: _addBanner,
+            builder: (context, state, _) {
+              if (state == null) return const SizedBox.shrink();
+              final width = MediaQuery.sizeOf(context).width;
+              final narrow = width < 600;
+              return Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: width >= 720 ? 220 : 140,
+                  ),
+                  child: CartAddBanner(
+                    message: state.message,
+                    busy: state.busy,
+                    compact: narrow,
+                    onUndo: state.canUndo ? () => _undoPendingAdds(pos) : null,
+                    onDismiss: _clearAddBanner,
+                  ),
+                ),
+              );
+            },
+          ),
         ],
       ),
       actions: [
@@ -643,12 +811,11 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     await _itemTapGuard.run(() async {
       if (pos.isLoading) return;
       if (pos.isBusy) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please wait — finishing the last action.'),
-            duration: Duration(milliseconds: 1200),
-            behavior: SnackBarBehavior.floating,
-          ),
+        showPosToast(
+          context,
+          'Please wait — finishing the last action.',
+          backgroundColor: const Color(0xFF64748B),
+          duration: const Duration(milliseconds: 1200),
         );
         return;
       }
@@ -693,24 +860,19 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       ),
     );
     if (amount == null || !mounted) return;
+    final before = _lineQtySnapshot(pos);
     final success = await pos.addExtraItem(name: item.label, price: amount);
     if (!mounted || success == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Added ${item.label} ₹${amount.toStringAsFixed(2)}'
-              : (pos.errorMessage ?? 'Failed to add'),
-        ),
-        duration: const Duration(milliseconds: 800),
-        backgroundColor:
-            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    );
+    if (success) {
+      _scrollCartToNewest();
+      _noteSuccessfulAdds(pos, _diffLineQtys(pos, before, _lineQtySnapshot(pos)));
+    } else {
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Failed to add',
+        error: true,
+      );
+    }
   }
 
   Future<void> _showCustomExtraDialog(PosProvider pos) async {
@@ -719,27 +881,22 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
       builder: (ctx) => const _CustomExtraDialog(),
     );
     if (result == null || !mounted) return;
+    final before = _lineQtySnapshot(pos);
     final success = await pos.addExtraItem(
       name: result.name,
       price: result.price,
     );
     if (!mounted || success == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Added ${result.name} ₹${result.price.toStringAsFixed(2)}'
-              : (pos.errorMessage ?? 'Failed to add'),
-        ),
-        duration: const Duration(milliseconds: 800),
-        backgroundColor:
-            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.fromLTRB(48, 0, 48, 16),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    );
+    if (success) {
+      _scrollCartToNewest();
+      _noteSuccessfulAdds(pos, _diffLineQtys(pos, before, _lineQtySnapshot(pos)));
+    } else {
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Failed to add',
+        error: true,
+      );
+    }
   }
 
   Future<void> _addItemAndShowResult(
@@ -748,6 +905,7 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     String? variantId,
     List<Map<String, dynamic>>? addons,
   }) async {
+    final before = _lineQtySnapshot(pos);
     final success = await pos.addItemToCart(
       item,
       variantId: variantId,
@@ -755,25 +913,30 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     );
     if (!mounted || success == null) return;
     if (success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Added ${item.displayName ?? item.name}'),
-          duration: const Duration(milliseconds: 800),
-          backgroundColor: const Color(0xFF16A34A),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-        ),
-      );
+      _scrollCartToNewest();
+      final deltas = _diffLineQtys(pos, before, _lineQtySnapshot(pos));
+      if (deltas.isEmpty) {
+        // Online first-open paints server lines without a stable local id yet.
+        ScaffoldMessenger.maybeOf(context)?.hideCurrentSnackBar();
+        _pendingAddDeltas.clear();
+        _addBanner.value = _CartAddBannerState(
+          message: 'Added ${item.displayName ?? item.name}',
+          busy: false,
+          canUndo: false,
+        );
+        _scheduleAddBannerDismiss();
+        // Expand so `_scrollCartToNewest` can reach the list (no-op while collapsed).
+        final wide = MediaQuery.sizeOf(context).width >= 720;
+        if (wide && _cartCollapsed) _setCartCollapsed(false);
+      } else {
+        _noteSuccessfulAdds(pos, deltas);
+      }
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pos.errorMessage ?? 'Failed to add item'),
-          duration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Failed to add item',
+        error: true,
+        duration: const Duration(seconds: 2),
       );
     }
   }
@@ -1111,18 +1274,12 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
           const SizedBox(height: 8),
           IconButton(
             tooltip: 'Expand cart',
-            onPressed: () {
-              setState(() => _cartCollapsed = false);
-              PosUiPrefs.saveCartCollapsed(false);
-            },
+            onPressed: () => _setCartCollapsed(false),
             icon: const Icon(Icons.menu, color: Color(0xFF475569)),
           ),
           const SizedBox(height: 4),
           InkWell(
-            onTap: () {
-              setState(() => _cartCollapsed = false);
-              PosUiPrefs.saveCartCollapsed(false);
-            },
+            onTap: () => _setCartCollapsed(false),
             child: Column(
               children: [
                 Badge(
@@ -1154,11 +1311,23 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
   }
 
   void _showCartBottomSheet(BuildContext context, PosProvider pos) {
+    _phoneSheetScrollPending = true;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _CartBottomSheet(pos: pos, embedded: false),
+      builder: (ctx) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_phoneSheetScrollPending) return;
+          _phoneSheetScrollPending = false;
+          _scrollCartToNewest();
+        });
+        return _CartBottomSheet(
+          pos: pos,
+          embedded: false,
+          scrollController: _cartScrollController,
+        );
+      },
     );
   }
 }
@@ -1196,15 +1365,7 @@ class _ExtraAmountDialogState extends State<_ExtraAmountDialog> {
       final v = double.tryParse(_controller.text.trim());
       if (v == null || v <= 0) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Enter an amount greater than 0'),
-            backgroundColor: Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          ),
-        );
+        showPosToast(context, 'Enter an amount greater than 0', error: true);
         return;
       }
       if (!mounted) return;
@@ -1279,14 +1440,10 @@ class _CustomExtraDialogState extends State<_CustomExtraDialog> {
       final price = double.tryParse(_priceCtrl.text.trim());
       if (name.isEmpty || price == null || price <= 0) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Enter a name and amount greater than 0'),
-            backgroundColor: Color(0xFFDC2626),
-            behavior: SnackBarBehavior.floating,
-            margin: EdgeInsets.fromLTRB(48, 0, 48, 16),
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          ),
+        showPosToast(
+          context,
+          'Enter a name and amount greater than 0',
+          error: true,
         );
         return;
       }
@@ -1351,10 +1508,12 @@ class _CustomExtraDialogState extends State<_CustomExtraDialog> {
 class _CartBottomSheet extends StatelessWidget {
   final PosProvider pos;
   final bool embedded;
+  final ScrollController? scrollController;
   final VoidCallback? onToggleCollapsed;
   const _CartBottomSheet({
     required this.pos,
     this.embedded = false,
+    this.scrollController,
     this.onToggleCollapsed,
   });
 
@@ -1433,6 +1592,7 @@ class _CartBottomSheet extends StatelessWidget {
               );
             }
             return ListView.separated(
+              controller: scrollController,
               padding: const EdgeInsets.symmetric(vertical: 4),
               itemCount: items.length,
               separatorBuilder: (_, _) => const Divider(
@@ -1480,6 +1640,7 @@ class _CartBottomSheet extends StatelessWidget {
             body = LayoutBuilder(
               builder: (context, constraints) {
                 return SingleChildScrollView(
+                  controller: scrollController,
                   child: ConstrainedBox(
                     constraints: BoxConstraints(
                       minHeight: constraints.maxHeight,
@@ -1816,12 +1977,10 @@ class _CartBottomSheet extends StatelessWidget {
     final ok = await write();
     if (ok == null || !context.mounted) return;
     if (!ok) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pos.errorMessage ?? 'Could not update the order'),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Could not update the order',
+        error: true,
       );
     }
   }
@@ -2228,22 +2387,14 @@ class _CartBottomSheet extends StatelessWidget {
     final success = await pos.settleAndPrintBill(paymentType: paymentType);
     if (!context.mounted || success == null) return;
     if (success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Table released ✓'),
-          backgroundColor: Color(0xFF16A34A),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      showPosToast(context, 'Table released ✓');
       // Cart no longer exists — back to the floor.
       Navigator.of(context).popUntil((r) => r.isFirst || r.settings.name == '/tables');
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(pos.errorMessage ?? 'Settle failed'),
-          backgroundColor: const Color(0xFFDC2626),
-          behavior: SnackBarBehavior.floating,
-        ),
+      showPosToast(
+        context,
+        pos.errorMessage ?? 'Settle failed',
+        error: true,
       );
     }
   }
@@ -2266,23 +2417,19 @@ class _CartBottomSheet extends StatelessWidget {
                             final success = await pos.sendKotOrder();
                             if (!context.mounted || success == null) return;
                             final printNote = pos.printError;
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  !success
-                                      ? (pos.errorMessage ?? 'KOT failed')
-                                      : printNote == null
-                                          ? 'KOT sent + printed ✓'
-                                          : 'KOT sent to kitchen. Print failed: $printNote',
-                                ),
-                                backgroundColor: !success
-                                    ? const Color(0xFFDC2626)
-                                    : printNote == null
-                                        ? const Color(0xFF16A34A)
-                                        : const Color(0xFFD97706),
-                                behavior: SnackBarBehavior.floating,
-                              ),
-                            );
+                            final Color bg;
+                            final String msg;
+                            if (!success) {
+                              bg = const Color(0xFFDC2626);
+                              msg = pos.errorMessage ?? 'KOT failed';
+                            } else if (printNote == null) {
+                              bg = const Color(0xFF16A34A);
+                              msg = 'KOT sent + printed ✓';
+                            } else {
+                              bg = const Color(0xFFD97706);
+                              msg = 'KOT sent. Print failed';
+                            }
+                            showPosToast(context, msg, backgroundColor: bg);
                           },
                     icon: const Icon(Icons.soup_kitchen, size: 18),
                     label: const Text(
@@ -2308,16 +2455,10 @@ class _CartBottomSheet extends StatelessWidget {
                             final result = await pos.printBill();
                             if (!context.mounted || result.skipped) return;
                             final err = result.error;
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  err == null ? 'Bill printed ✓' : err,
-                                ),
-                                backgroundColor: err == null
-                                    ? const Color(0xFF16A34A)
-                                    : const Color(0xFFDC2626),
-                                behavior: SnackBarBehavior.floating,
-                              ),
+                            showPosToast(
+                              context,
+                              err ?? 'Bill printed ✓',
+                              error: err != null,
                             );
                           },
                     icon: const Icon(Icons.print, size: 18),
@@ -2418,17 +2559,10 @@ class _CartBottomSheet extends StatelessWidget {
 
     final success = await pos.discardCart();
     if (!context.mounted || success == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          success
-              ? 'Cart discarded'
-              : (pos.errorMessage ?? 'Discard failed'),
-        ),
-        backgroundColor:
-            success ? const Color(0xFF16A34A) : const Color(0xFFDC2626),
-        behavior: SnackBarBehavior.floating,
-      ),
+    showPosToast(
+      context,
+      success ? 'Cart discarded' : (pos.errorMessage ?? 'Discard failed'),
+      error: !success,
     );
     if (success && context.mounted && !embedded) {
       Navigator.pop(context); // close cart sheet only (not POS when embedded)
