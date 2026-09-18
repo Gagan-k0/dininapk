@@ -1418,6 +1418,8 @@ class PosProvider with ChangeNotifier {
         await _saveDraft(d.copyWith(lastError: subscriptionWaitMessage));
         return false;
       }
+      // A claim refusal names the holding device and offers Unlock, so it is
+      // held apart from the "may already have landed" 409.
       if (e.isTableClaimed) {
         return await _markConflict(background, d, e.claimMessage, claimed: true);
       }
