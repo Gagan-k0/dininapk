@@ -2059,7 +2059,7 @@ class _CartBottomSheet extends StatelessWidget {
       color: const Color(0xFFFAFAFA),
       child: Column(
         children: [
-          _totalRow('Sub Total', '₹${subTotal.toStringAsFixed(2)}'),
+          // _totalRow('Sub Total', '₹${subTotal.toStringAsFixed(2)}'),
           if (discountPrice > 0)
             _totalRow(
               'Discount',
@@ -2209,10 +2209,10 @@ class _CartBottomSheet extends StatelessWidget {
                         ),
                         child: Column(
                           children: [
-                            _totalRow(
-                              'Sub Total',
-                              '₹${pos.subTotal.toStringAsFixed(2)}',
-                            ),
+                            // _totalRow(
+                            //   'Sub Total',
+                            //   '₹${pos.subTotal.toStringAsFixed(2)}',
+                            // ),
                             // if (pos.taxAmount > 0)
                             //   _totalRow(
                             //     'Tax',
