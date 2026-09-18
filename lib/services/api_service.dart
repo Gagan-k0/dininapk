@@ -501,6 +501,55 @@ class ApiService {
     );
   }
 
+  /// POST /restaurant/cart/offline-status — replays the status of a KOT or
+  /// bill that was printed offline. The live [setCartStatus] must NEVER be
+  /// used for that: only this route applies the status without re-firing the
+  /// kitchen display for food already served.
+  ///
+  /// Refuses 422 for a `captured_at` that is not genuinely in the past, and
+  /// for 'KOT' (the status that builds the kitchen notification).
+  Future<ApiEnvelope> offlineStatus({
+    required String cartId,
+    required String tableStatus,
+    required String idempotencyKey,
+    required DateTime capturedAt,
+    bool background = false,
+  }) {
+    return _client.post(
+      ApiConfig.offlineStatus,
+      body: {
+        'cartId': cartId,
+        'table_status': tableStatus,
+        'captured_at': capturedAt.toUtc().toIso8601String(),
+      },
+      extraHeaders: {'Idempotency-Key': idempotencyKey},
+      background: background,
+    );
+  }
+
+  /// POST /restaurant/cart/offline-settle — bills a sitting the tablet already
+  /// settled on paper, on the day it happened (`captured_at`, clamped server
+  /// side to a 30-day window). Same key twice answers `duplicate` with the
+  /// order it already made; the same key with different content is 409.
+  Future<ApiEnvelope> offlineSettle({
+    required String cartId,
+    required String paymentType,
+    required String idempotencyKey,
+    required DateTime capturedAt,
+    bool background = false,
+  }) {
+    return _client.post(
+      ApiConfig.offlineSettle,
+      body: {
+        'cartId': cartId,
+        'paymentType': normalizePaymentType(paymentType),
+        'captured_at': capturedAt.toUtc().toIso8601String(),
+      },
+      extraHeaders: {'Idempotency-Key': idempotencyKey},
+      background: background,
+    );
+  }
+
   /// POST /restaurant/cart/table-claim/release — data `{released: bool}`.
   /// Older servers answer 404.
   Future<ApiEnvelope> releaseTableClaim(String tableId) =>

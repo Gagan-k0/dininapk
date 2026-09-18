@@ -22,6 +22,7 @@ import 'package:dineinapk/services/api_client.dart';
 import 'package:dineinapk/services/api_service.dart';
 import 'package:dineinapk/services/auth_service.dart';
 import 'package:dineinapk/services/connectivity_service.dart';
+import 'package:dineinapk/services/device_id_service.dart';
 import 'package:dineinapk/services/draft_cart_store.dart';
 import 'package:dineinapk/services/menu_cache_service.dart';
 import 'package:dineinapk/widgets/held_items_bar.dart';
@@ -1019,6 +1020,12 @@ void main() {
       await pos.loadTableAndMenu(tableId, 'area1');
     }
 
+    /// This table's [at]-th settlement, oldest sitting first.
+    Future<OfflineSettlement?> settlement({int at = 0}) async {
+      final rows = await store.settlementsFor('r1', tableId);
+      return at < rows.length ? rows[at] : null;
+    }
+
     /// Adds one item, KOTs it with no signal, and bills the table offline.
     Future<String?> billOfflineAfterKot() async {
       await pos.addItemToCart(item);
@@ -1030,7 +1037,7 @@ void main() {
     List<http.Request> steps() => server.requests
         .where((r) =>
             r.url.path.endsWith('/offline-sync') ||
-            r.url.path.endsWith('/setcartstatus'))
+            r.url.path.endsWith('/offline-status'))
         .toList();
 
     test('offline KOT prints, seals the batch and queues only KOT_PRINT', () async {
@@ -1070,7 +1077,7 @@ void main() {
       // Sealed batch first, then its status, and only then the later item —
       // so the blanket KOT_PRINT can never mark that item printed.
       expect(steps().map((r) => r.url.path.split('/').last).toList(),
-          ['offline-sync', 'setcartstatus', 'offline-sync']);
+          ['offline-sync', 'offline-status', 'offline-sync']);
       expect(steps().first.headers['Idempotency-Key'], sealed.printedKey);
       expect(steps().last.headers['Idempotency-Key'], next.key);
       expect(jsonDecode(steps()[1].body)['table_status'], 'KOT_PRINT');
@@ -1086,7 +1093,7 @@ void main() {
       await pos.flushAllDrafts();
 
       final statuses = server.requests
-          .where((r) => r.url.path.endsWith('/setcartstatus'))
+          .where((r) => r.url.path.endsWith('/offline-status'))
           .map((r) => jsonDecode(r.body)['table_status'])
           .toList();
       expect(statuses, ['KOT_PRINT']);
@@ -1147,7 +1154,7 @@ void main() {
 
       // Signal is back, but the status call is the one that never lands.
       server.failOn = (r) =>
-          r.url.path.endsWith('/setcartstatus') ? const SocketException('drop') : null;
+          r.url.path.endsWith('/offline-status') ? const SocketException('drop') : null;
       net.clearSignal();
       expect(await pos.flushDraft(), isFalse);
       final d = (await store.load('r1', tableId))!;
@@ -1157,11 +1164,11 @@ void main() {
       expect(DraftCartStore.pendingTables.value, 0,
           reason: 'a waiting status is not a table with unsent items');
 
-      final tried = server.count('/setcartstatus');
+      final tried = server.count('/offline-status');
       goOnline();
       expect(await pos.flushDraft(), isTrue);
-      expect(server.count('/setcartstatus'), tried + 1, reason: 'sent again, and landed');
-      expect(jsonDecode(server.last('/setcartstatus').body)['table_status'], 'KOT_PRINT');
+      expect(server.count('/offline-status'), tried + 1, reason: 'sent again, and landed');
+      expect(jsonDecode(server.last('/offline-status').body)['table_status'], 'KOT_PRINT');
       expect(await store.load('r1', tableId), isNull);
     });
 
@@ -1191,37 +1198,49 @@ void main() {
       expect((await store.load('r1', tableId))!.pendingOps, ['PRINTED']);
     });
 
-    test('offline bill refuses a compounded tax the server alone can apply', () async {
+    test('a compounded tax is priced offline, not refused', () async {
       await cacheMenu(taxRows: [
         {'_id': 't1', 'name': 'Cess', 'tax_type': 'CALC_ON_TAX', 'value_type': 'PERCENTAGE', 'value_amount': 5},
       ]);
       pos = build();
       await openWithOrder();
-      expect(await billOfflineAfterKot(), contains('back online'));
-      expect(printer.bills, isEmpty);
+      expect(await billOfflineAfterKot(), isNull);
+      final bill = printer.bills.single;
+      expect(bill.taxTotal, closeTo(9, 0.001), reason: '5% compounded on 180');
+      expect(bill.grandTotal, 189);
+      expect(bill.taxBreakdown.single.key, 'Cess');
     });
 
-    test('offline bill refuses a table whose area charges a surge', () async {
+    test('an area surge is priced offline, per the cached area row', () async {
       await openWithOrder();
       await cacheFloor(surge: 10);
-      expect(await billOfflineAfterKot(), contains('back online'));
-      expect(printer.bills, isEmpty);
+      expect(await billOfflineAfterKot(), isNull);
+      final bill = printer.bills.single;
+      expect(bill.areaCharge, closeTo(18, 0.001), reason: '10% of 180');
+      expect(bill.taxTotal, closeTo(9.9, 0.001), reason: 'the surge is taxed');
+      expect(bill.grandTotal, 208, reason: '207.90 charged as 208');
     });
 
-    test('offline bill refuses a discounted cart', () async {
+    test('offline bill and settle both refuse a discounted cart', () async {
       await openWithOrder(
         cart: orderDoc(extra: {'discount_price': 20, 'discount_name': 'Loyalty'}),
       );
-      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(await billOfflineAfterKot(), contains('discount or coupon'));
       expect(printer.bills, isEmpty);
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(pos.errorMessage, contains('discount or coupon'));
+      expect(await settlement(), isNull);
     });
 
-    test('offline bill refuses a split bill', () async {
+    test('offline bill and settle both refuse a split bill', () async {
       await openWithOrder(
         cart: orderDoc(extra: {'split_payments': [{'amount': 50}]}),
       );
-      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(await billOfflineAfterKot(), contains('split'));
       expect(printer.bills, isEmpty);
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(pos.errorMessage, contains('split'));
+      expect(await settlement(), isNull);
     });
 
     test('offline bill refuses cached tax rows that are too old to trust', () async {
@@ -1454,9 +1473,9 @@ void main() {
 
       final bill = printer.bills.single;
       expect(bill.subTotal, closeTo(185.5, 0.001));
-      expect(bill.taxTotal, closeTo(9.275, 0.001));
-      expect(bill.grandTotal, 195, reason: '194.775 charged as 195, never 194');
-      expect(bill.roundOff, closeTo(0.225, 0.01));
+      expect(bill.taxTotal, closeTo(9.28, 0.001), reason: 'round2, as the server rounds it');
+      expect(bill.grandTotal, 195, reason: '194.78 charged as 195, never 194');
+      expect(bill.roundOff, closeTo(0.22, 0.01));
       expect(bill.grandTotal, greaterThanOrEqualTo(bill.subTotal + bill.taxTotal));
     });
 
@@ -1467,7 +1486,7 @@ void main() {
       expect((await pos.printBill()).error, isNull);
       expect((await store.load('r1', tableId))!.pendingOps, ['KOT_PRINT', 'PRINTED']);
 
-      server.failOn = (r) => r.url.path.endsWith('/setcartstatus') &&
+      server.failOn = (r) => r.url.path.endsWith('/offline-status') &&
               jsonDecode(r.body)['table_status'] == 'PRINTED'
           ? const SocketException('drop')
           : null;
@@ -1480,7 +1499,7 @@ void main() {
       expect(await pos.flushDraft(), isTrue);
       expect(
         server.requests
-            .where((r) => r.url.path.endsWith('/setcartstatus'))
+            .where((r) => r.url.path.endsWith('/offline-status'))
             .map((r) => jsonDecode(r.body)['table_status'])
             .toList(),
         ['KOT_PRINT', 'PRINTED', 'PRINTED'],
@@ -1488,15 +1507,19 @@ void main() {
       expect(await store.load('r1', tableId), isNull);
     });
 
-    test('Sync off keeps refusing to print', () async {
+    test('Sync off prints too — the paper is queued, not skipped', () async {
       await openWithOrder();
       await pos.addItemToCart(item);
       await net.setSyncOn(false);
-      expect(await pos.sendKotOrder(), isFalse);
-      expect(pos.errorMessage, contains('Sync is off'));
-      expect((await pos.printBill()).error, contains('Sync is off'));
-      expect(printer.kots, isEmpty);
-      expect(printer.bills, isEmpty);
+
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(printer.kots.single, hasLength(1));
+      expect((await pos.printBill()).error, isNull);
+      expect(printer.bills.single.grandTotal, 189);
+      expect(printer.offlineBill, isTrue, reason: 'the paper says it is not synced');
+      // Nothing left the tablet, and everything is queued for the reconnect.
+      expect(server.requests.where((r) => r.url.path.endsWith('/offline-status')), isEmpty);
+      expect((await store.load('r1', tableId))!.pendingOps, ['KOT_PRINT', 'PRINTED']);
     });
 
     test('a cart whose prices came back unread is never printed offline', () async {
@@ -1516,6 +1539,784 @@ void main() {
       expect((await pos.printBill()).error, contains('Cannot reach the server'));
       expect(printer.kots, isEmpty);
       expect(printer.bills, isEmpty);
+    });
+
+    // ── A table whose whole order only exists on this tablet ────────────────
+
+    /// Opens a table the server has no cart for, then captures one item on it
+    /// with no signal — the shape the bug was reported against.
+    Future<void> captureOfflineOnly() async {
+      server.cart = [];
+      await pos.loadTableAndMenu(tableId, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+      expect(await pos.sendKotOrder(), isTrue);
+    }
+
+    /// Every request the reconnect makes, in order, by endpoint.
+    List<String> replayed() => server.requests
+        .map((r) => r.url.path)
+        .where((p) =>
+            p.endsWith('/createcart') ||
+            p.endsWith('/offline-sync') ||
+            p.endsWith('/offline-status') ||
+            p.endsWith('/offline-settle'))
+        .map((p) => p.split('/').last)
+        .toList();
+
+    Map<String, dynamic> settleAnswer(Map<String, dynamic> data) => {
+      'status': {'code': 200, 'message': 'duplicate'},
+      'data': data,
+    };
+
+    test('a table with no server cart still bills offline', () async {
+      await captureOfflineOnly();
+      expect((await pos.printBill()).error, isNull);
+
+      final bill = printer.bills.single;
+      expect(pos.cartId, isEmpty, reason: 'there is no server cart to bill from');
+      expect(bill.lines, hasLength(1));
+      expect(bill.subTotal, 90);
+      expect(bill.taxTotal, closeTo(4.5, 0.001));
+      expect(bill.grandTotal, 95, reason: '94.50 charged as 95');
+      expect(bill.billNumber, startsWith('OFF-'));
+      expect(printer.offlineBill, isTrue);
+    });
+
+    test('settle offline prints, records the money and frees the table', () async {
+      await captureOfflineOnly();
+      expect(await pos.settleAndPrintBill(paymentType: 'cash'), isTrue);
+
+      expect(printer.bills.single.grandTotal, 95);
+      // Free means free: no server lines AND no draft lines left on screen.
+      expect(pos.cartMenuItems, isEmpty, reason: 'the settled guest is gone');
+      expect(pos.draft, isNull);
+      expect(await store.load('r1', tableId), isNull);
+      expect(pos.totalItemCount, 0);
+      expect(pos.hasKotItems, isFalse);
+      expect(pos.canRelease, isFalse);
+
+      final s = (await settlement())!;
+      expect(s.printedTotal, 95);
+      expect(s.paymentType, 'CASH');
+      expect(s.key, isNotEmpty);
+      expect(s.pending, isTrue);
+      expect(s.billNumber, printer.bills.single.billNumber);
+      expect(s.draft!.printedLines, hasLength(1),
+          reason: 'the settlement owns the sitting it billed');
+      expect(s.draft!.pendingOps, ['KOT_PRINT', 'PRINTED']);
+      expect(DraftCartStore.pendingSettlements.value, 1);
+
+      // The same sitting cannot be billed twice: there is nothing left on it.
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(pos.errorMessage, 'No items on this table yet');
+      expect(printer.bills, hasLength(1));
+      expect(await store.settlementsFor('r1', tableId), hasLength(1));
+    });
+
+    test('the reconnect replays cart, items, statuses, then the settlement', () async {
+      await captureOfflineOnly();
+      // A second line, so one item opens the order and the rest ride
+      // offline-sync — the full replay, not just the create.
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(await pos.settleAndPrintBill(), isTrue);
+      final s = (await settlement())!;
+
+      goOnline();
+      expect(await pos.flushAllDrafts(), 1);
+
+      expect(replayed(), [
+        'createcart',
+        'offline-sync',
+        'offline-status',
+        'offline-status',
+        'offline-settle',
+      ]);
+      final settle = server.last('/offline-settle');
+      expect(settle.headers['Idempotency-Key'], s.key);
+      final body = jsonDecode(settle.body) as Map<String, dynamic>;
+      expect(body['cartId'], cartA);
+      expect(body['paymentType'], 'CASH');
+      expect(
+        DateTime.parse(body['captured_at'].toString()).isBefore(DateTime.now().add(const Duration(seconds: 1))),
+        isTrue,
+        reason: 'the day the guest actually paid',
+      );
+      final synced = (await settlement())!;
+      expect(synced.synced, isTrue, reason: 'marked, never deleted');
+      expect(synced.pending, isFalse);
+      expect(DraftCartStore.pendingSettlements.value, 0);
+    });
+
+    test('a duplicate answer is the lost response, not a second bill', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? settleAnswer({'sync_result': 'duplicate', 'order_id': 'o1', 'order_no': '41'})
+          : null;
+
+      await pos.flushAllDrafts();
+      final s = (await settlement())!;
+      expect(s.synced, isTrue);
+      expect(s.orderNo, '41');
+
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 1, reason: 'never settled again');
+    });
+
+    test('a 409 is terminal: surfaced, never retried', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? {'status': {'code': 409, 'message': 'conflict'}}
+          : null;
+
+      await pos.flushDraft();
+      final s = (await settlement())!;
+      expect(s.conflict, isTrue);
+      expect(s.synced, isFalse);
+      expect(s.pending, isFalse);
+      expect(s.lastError, contains('conflict'));
+      expect(pos.errorMessage, contains('conflict'));
+
+      server.failOn = null;
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 1, reason: 'a refusal is not retried');
+    });
+
+    test('a lost signal keeps the settlement and tries again', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? const SocketException('drop')
+          : null;
+
+      await pos.flushAllDrafts();
+      var s = (await settlement())!;
+      expect(s.pending, isTrue, reason: 'money owed is never dropped');
+      expect(s.cartId, cartA, reason: 'retried against the same order');
+      expect(s.attempts, 0, reason: 'a lost signal costs no backoff');
+
+      goOnline();
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 2);
+      s = (await settlement())!;
+      expect(s.synced, isTrue);
+    });
+
+    test('a 422 waits out a backoff before trying again', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? {'status': {'code': 422, 'message': 'captured_at must be an ISO 8601 instant'}}
+          : null;
+
+      await pos.flushAllDrafts();
+      final s = (await settlement())!;
+      expect(s.pending, isTrue);
+      expect(s.attempts, 1);
+      expect(s.lastError, contains('captured_at'));
+
+      server.failOn = null;
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 1, reason: 'the backoff has not run out');
+
+      // Once it has run out the same row settles — a 422 defers, never drops.
+      await store.saveSettlement(
+        s.copyWith(lastTriedAt: DateTime.now().subtract(const Duration(minutes: 2))),
+      );
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 2);
+      expect((await settlement())!.synced, isTrue);
+    });
+
+    test('a total the server priced differently is surfaced', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? settleAnswer({'order_id': 'o2', 'order_no': '42', 'total_price': 120})
+          : null;
+
+      await pos.flushDraft();
+      final s = (await settlement())!;
+      expect(s.synced, isTrue);
+      expect(s.serverTotal, 120);
+      expect(s.mismatched, isTrue);
+      expect(pos.errorMessage, contains('server billed'));
+      expect(pos.errorMessage, contains('120.00'));
+    });
+
+    test('settle offline refuses a draft that is held', () async {
+      await captureOfflineOnly();
+      final held = (await store.load('r1', tableId))!;
+      await store.save(held.copyWith(conflict: true, lastError: 'Check the order.'));
+      pos = build();
+      goOffline();
+      await pos.loadTableAndMenu(tableId, 'area1');
+
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(pos.errorMessage, contains('Check the order.'));
+      expect(await settlement(), isNull);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('a second sitting settles offline as its own bill', () async {
+      await captureOfflineOnly();
+      expect(await pos.settleAndPrintBill(paymentType: 'CASH'), isTrue);
+
+      // The table turns over: a new party, on the same tablet, same outage.
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(await pos.settleAndPrintBill(paymentType: 'UPI'), isTrue);
+
+      final rows = await store.settlementsFor('r1', tableId);
+      expect(rows, hasLength(2), reason: 'neither bill overwrote the other');
+      expect(rows[0].printedTotal, 95, reason: 'Soup 90 + GST');
+      expect(rows[1].printedTotal, 63, reason: 'Rice 60 + GST, not both sittings');
+      expect(rows[0].paymentType, 'CASH');
+      expect(rows[1].paymentType, 'ONLINE', reason: 'UPI normalizes to ONLINE');
+      expect(rows[0].key, isNot(rows[1].key));
+      expect(rows[0].draft!.printedLines.single.name, 'Soup');
+      expect(rows[1].draft!.printedLines.single.name, 'Rice');
+      expect(DraftCartStore.pendingSettlements.value, 2);
+      expect(printer.bills.map((b) => b.grandTotal), [95, 63]);
+    });
+
+    test('two sittings sync as two orders, each with its own total', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill(paymentType: 'CASH');
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      await pos.sendKotOrder();
+      await pos.settleAndPrintBill(paymentType: 'UPI');
+      final rows = await store.settlementsFor('r1', tableId);
+
+      goOnline();
+      // Each settle empties the table again, the way the server does.
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-settle')) server.cart = [];
+        return null;
+      };
+      await pos.flushAllDrafts();
+
+      final settles = server.requests
+          .where((r) => r.url.path.endsWith('/offline-settle'))
+          .toList();
+      expect(settles, hasLength(2), reason: 'two sittings, two orders');
+      expect(settles.map((r) => r.headers['Idempotency-Key']),
+          [rows[0].key, rows[1].key], reason: 'oldest sitting first');
+      expect(settles.map((r) => jsonDecode(r.body)['paymentType']),
+          ['CASH', 'ONLINE']);
+      expect(
+        settles.map((r) => jsonDecode(r.body)['captured_at']).toSet(),
+        hasLength(2),
+        reason: 'each on the day and moment it was taken',
+      );
+      // One createcart per sitting: the second was never billed onto the first.
+      expect(server.count('/createcart'), 2);
+      final synced = await store.settlementsFor('r1', tableId);
+      expect(synced.every((s) => s.synced), isTrue);
+      expect(DraftCartStore.pendingSettlements.value, 0);
+    });
+
+    test('a sitting billed at the till meanwhile is terminal, not a retry loop', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      // Its items land, then the till bills and clears the cart before the
+      // settlement gets there.
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-status')) server.cart = [];
+        return null;
+      };
+
+      await pos.flushDraft();
+      expect(server.count('/offline-settle'), 0, reason: 'no cart to post against');
+      final s = (await settlement())!;
+      expect(s.conflict, isTrue);
+      expect(s.pending, isFalse);
+      expect(s.unsettled, isTrue, reason: 'a bill on no order still shows');
+      expect(pos.errorMessage, PosProvider.settlementLostCartMessage);
+      // Not "waiting for a sync" — waiting for a person, and it says so.
+      expect(DraftCartStore.pendingSettlements.value, 0);
+      final stuck = DraftCartStore.stuckSettlements.value.single;
+      expect(stuck.key, s.key);
+      expect(stuck.label, contains('Table 5'));
+      expect(stuck.label, contains(s.billNumber!));
+      expect(stuck.stuckReason, PosProvider.settlementLostCartMessage);
+      expect(stuck.printedTotal, 95);
+
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 0, reason: 'never retried blindly');
+    });
+
+    test('a refused settlement is never overwritten by the next sitting', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? {'status': {'code': 409, 'message': 'conflict'}}
+          : null;
+      await pos.flushDraft();
+      final refused = (await settlement())!;
+      expect(refused.conflict, isTrue);
+
+      // The till clears that order; the table turns over and is billed again.
+      server.failOn = null;
+      server.cart = [];
+      await pos.loadTableAndMenu(tableId, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(await pos.settleAndPrintBill(), isTrue, reason: pos.errorMessage ?? '');
+
+      final rows = await store.settlementsFor('r1', tableId);
+      expect(rows, hasLength(2), reason: 'cash already taken is still on record');
+      expect(rows.first.key, refused.key);
+      expect(rows.first.conflict, isTrue);
+    });
+
+    test('a restaurant with no areas can still bill offline', () async {
+      await store.saveFloor('r1', areas: const [], tables: const []);
+      pos = build();
+      await openWithOrder();
+      expect(await billOfflineAfterKot(), isNull,
+          reason: 'no areas configured is a surge of zero, not unknown');
+      final bill = printer.bills.single;
+      expect(bill.areaCharge, 0);
+      expect(bill.grandTotal, 189);
+    });
+
+    test('a stale floor is still refused — an unknown surge is not zero', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      final prefs = await SharedPreferences.getInstance();
+      final floor = jsonDecode(prefs.getString('waiter_cart_snap_floor_r1')!) as Map<String, dynamic>;
+      floor['at'] = DateTime.now().subtract(const Duration(hours: 9)).toIso8601String();
+      await prefs.setString('waiter_cart_snap_floor_r1', jsonEncode(floor));
+      goOffline();
+      pos = build();
+      await pos.loadTableAndMenu(tableId, 'area1');
+
+      expect(await pos.sendKotOrder(), isTrue);
+      expect((await pos.printBill()).error, contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('the container charge the cart carries is billed offline', () async {
+      await openWithOrder(cart: orderDoc(extra: {'container_price': 15}));
+      expect(await billOfflineAfterKot(), isNull);
+      final bill = printer.bills.single;
+      expect(bill.containerCharge, 15);
+      // Outside the GST base, exactly as the server adds it.
+      expect(bill.taxTotal, closeTo(9, 0.001));
+      expect(bill.grandTotal, 204, reason: '180 + 9 tax + 15 containers');
+    });
+
+    test('a cart-less sitting bills no containers, and neither will the server',
+        () async {
+      await captureOfflineOnly();
+      expect((await pos.printBill()).error, isNull);
+      expect(printer.bills.single.containerCharge, 0);
+      goOnline();
+      await pos.flushAllDrafts();
+      // The cart this app opens is created with container_price 0, so the
+      // settled order agrees with the paper.
+      expect(jsonDecode(server.last('/createcart').body)['container_price'], '0');
+    });
+
+    test('two tablets never mint the same provisional bill number', () async {
+      await OfflineBillNumbers.remember('r1', '40');
+      final mine = await OfflineBillNumbers.next('r1');
+
+      // A second tablet, same restaurant, same last number seen.
+      DeviceIdService.resetCache();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(DeviceIdService.storageKey, 'tablet-two-abcdef');
+      await OfflineBillNumbers.remember('r1', '40');
+      final theirs = await OfflineBillNumbers.next('r1');
+
+      expect(mine, isNot(theirs));
+      expect(mine, startsWith('OFF-'));
+      expect(theirs, startsWith('OFF-'));
+      expect(OfflineBillNumbers.isProvisional(mine), isTrue);
+      expect(RegExp(r'^\d+$').hasMatch(mine), isFalse,
+          reason: 'can never be read as a server order number');
+    });
+
+    /// Two sittings on one table, both settled during the same outage.
+    Future<List<OfflineSettlement>> twoSittings() async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill(paymentType: 'CASH');
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      await pos.sendKotOrder();
+      await pos.settleAndPrintBill(paymentType: 'CASH');
+      return store.settlementsFor('r1', tableId);
+    }
+
+    test('a sitting that cannot settle blocks the next one, never skips it', () async {
+      final rows = await twoSittings();
+      goOnline();
+      // The first bill is refused; its cart stays open on the table.
+      server.failOn = (r) => r.url.path.endsWith('/offline-settle')
+          ? {'status': {'code': 422, 'message': 'captured_at must be an ISO 8601 instant'}}
+          : null;
+      await pos.flushAllDrafts();
+
+      final after = await store.settlementsFor('r1', tableId);
+      expect(after.first.attempts, 1);
+      expect(after.first.synced, isFalse);
+      // The second sitting must not have been replayed onto sitting 1's cart.
+      final second = after[1];
+      expect(second.draft!.printedLines.single.name, 'Rice',
+          reason: 'its items are untouched');
+      expect(second.draft!.pendingOps, ['KOT_PRINT', 'PRINTED'],
+          reason: 'its queued statuses were not erased');
+      expect(second.draft!.conflict, isFalse);
+      expect(second.lastError, isNull);
+      expect(server.count('/offline-settle'), 1, reason: 'it never jumped the queue');
+
+      // Another pass while the first is still in backoff must change nothing:
+      // the second sitting waits behind it rather than replaying onto the cart
+      // the first left open.
+      final before = server.requests.length;
+      await pos.flushAllDrafts();
+      expect(server.requests.length, before, reason: 'nothing was sent past it');
+      final held = (await store.settlementsFor('r1', tableId))[1];
+      expect(held.draft!.printedLines.single.name, 'Rice');
+      expect(held.draft!.pendingOps, ['KOT_PRINT', 'PRINTED']);
+      expect(held.draft!.conflict, isFalse);
+      expect(held.lastError, isNull);
+
+      // The backoff runs out: both settle, oldest first.
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-settle')) server.cart = [];
+        return null;
+      };
+      await store.saveSettlement(after.first
+          .copyWith(lastTriedAt: DateTime.now().subtract(const Duration(minutes: 5))));
+      await pos.flushAllDrafts();
+
+      final settles = server.requests
+          .where((r) => r.url.path.endsWith('/offline-settle'))
+          .map((r) => r.headers['Idempotency-Key'])
+          .toList();
+      expect(settles, [rows[0].key, rows[0].key, rows[1].key]);
+      expect((await store.settlementsFor('r1', tableId)).every((s) => s.synced), isTrue);
+    });
+
+    test('replaying a settlement never touches the party sitting there now', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+
+      // The table turns over immediately; the new party is being served.
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      final liveBefore = pos.cartMenuItems;
+      expect(liveBefore.single['menu_name'], 'Rice');
+
+      goOnline();
+      // Sitting 1 goes up while its table is the one on screen.
+      await pos.flushAllDrafts();
+
+      expect(pos.cartData, isEmpty,
+          reason: "the replay must not paint sitting 1's cart onto this table");
+      expect(pos.cartMenuItems.single['menu_name'], 'Rice',
+          reason: 'the current party is still exactly what it was');
+      expect(pos.draft!.lines.single.name, 'Rice');
+      final rows = await store.settlementsFor('r1', tableId);
+      expect(rows.single.synced, isTrue);
+      expect(rows.single.draft, isNull, reason: 'its sitting is on the order');
+    });
+
+    test('a replay writes to its own row only, never the live table', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      // A new party is already on the table when the old bill goes up.
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      goOnline();
+
+      // The waiter taps again exactly while the old sitting is being placed.
+      Future<void>? tap;
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/createcart') && tap == null) {
+          tap = pos.addItemToCart(item);
+        }
+        return null;
+      };
+      await pos.flushAllDrafts();
+      await tap;
+
+      final rows = await store.settlementsFor('r1', tableId);
+      expect(rows.single.synced, isTrue);
+      expect(rows.single.draft, isNull,
+          reason: 'the settlement finished with its OWN sitting');
+      // Whatever the live table did, none of it landed on the money row.
+      expect(rows.single.printedTotal, 95);
+      expect(rows.single.billNumber, isNotNull);
+      final live = await store.load('r1', tableId);
+      if (live != null) {
+        expect(live.key, isNot(rows.single.key));
+      }
+    });
+
+    test('a live draft is still sent after the bill in front of it', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      // The next party's items, captured while still offline.
+      await pos.addItemToCart(
+        MenuItem.fromJson({'_id': '64d000000000000000000002', 'name': 'Rice', 'price': 60}),
+      );
+      expect(pos.draft!.lines, hasLength(1));
+
+      goOnline();
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-settle')) server.cart = [];
+        return null;
+      };
+      expect(await pos.flushDraft(), isTrue);
+
+      // flushDraft reads the draft only AFTER the settlement await, so the
+      // live sitting is sent rather than skipped or sent from a stale copy.
+      expect((await store.settlementsFor('r1', tableId)).single.synced, isTrue);
+      expect(await store.load('r1', tableId), isNull, reason: 'the next party went up too');
+      expect(server.count('/createcart'), 2, reason: 'one order each');
+    });
+
+    test('settle offline refuses while an item is still being sent', () async {
+      server.cart = [];
+      await pos.loadTableAndMenu(tableId, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+
+      // The signal returns, the createcart that opens the order is sent, and
+      // its answer never comes back: that line stays locked.
+      net.clearSignal();
+      server.failOn = (r) => r.url.path.endsWith('/createcart')
+          ? const SocketException('drop')
+          : null;
+      expect(await pos.flushDraft(), isFalse);
+      final stranded = (await store.load('r1', tableId))!;
+      expect(stranded.creatingLine, isNotNull);
+      expect(stranded.conflict, isFalse);
+
+      goOffline();
+      expect(await pos.settleAndPrintBill(), isFalse);
+      expect(pos.errorMessage, contains('still being sent'));
+      expect(await settlement(), isNull);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('a sitting whose cart was billed at the till never re-opens one', () async {
+      // Captured onto a real server cart, then settled offline.
+      await openWithOrder();
+      goOffline();
+      await pos.addItemToCart(item);
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(await pos.settleAndPrintBill(), isTrue);
+      expect((await settlement())!.draft!.baselineCartId, cartA);
+
+      // The till bills that cart while the tablet is away.
+      goOnline();
+      server.cart = [];
+      await pos.flushAllDrafts();
+
+      expect(server.count('/createcart'), 0,
+          reason: 'a second order for items already on a bill');
+      expect(server.count('/offline-settle'), 0);
+      final s = (await settlement())!;
+      expect(s.synced, isFalse);
+      expect(s.draft!.printedLines, hasLength(1), reason: 'nothing was thrown away');
+      expect(s.lastError, PosProvider.settlementCartGoneMessage);
+      final stuck = DraftCartStore.stuckSettlements.value.single;
+      expect(stuck.key, s.key);
+      expect(stuck.label, contains('Table 5'));
+      expect(DraftCartStore.pendingSettlements.value, 0,
+          reason: 'not waiting for a sync — waiting for a person');
+    });
+
+    test('a held bill is visible, names its table, and backs off', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      // The next party opens an order on the table before the bill goes up.
+      goOnline();
+      server.cart = [cartDoc(cartB, [
+        {'_id': 'lB', 'menu_id': soup, 'quantity': 1, 'kot_status': 1},
+      ])];
+
+      await pos.flushAllDrafts();
+      final held = (await settlement())!;
+      expect(held.synced, isFalse);
+      expect(held.draft!.printedLines, hasLength(1), reason: 'its items are kept');
+      expect(held.lastError, PosProvider.settlementHeldMessage);
+      expect(held.lastError, contains('open on its table now'));
+      expect(held.attempts, 1, reason: 'a hold is a failed attempt');
+      expect(held.dueNow, isFalse, reason: 'it backs off instead of spinning');
+
+      final stuck = DraftCartStore.stuckSettlements.value.single;
+      expect(stuck.label, contains('Table 5'));
+      expect(stuck.stuckReason, PosProvider.settlementHeldMessage);
+      expect(DraftCartStore.pendingSettlements.value, 0);
+
+      // The next pass must not re-run the whole replay for it.
+      final before = server.requests.length;
+      await pos.flushAllDrafts();
+      expect(server.requests.length, before, reason: 'no request while it waits');
+    });
+
+    test('a createcart the server refuses puts the line back', () async {
+      await captureOfflineOnly();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/createcart')
+          ? {'status': {'code': 422, 'message': 'menu_not_found'}}
+          : null;
+
+      await pos.flushAllDrafts();
+      final s = (await settlement())!;
+      expect(s.draft!.creatingLine, isNull, reason: 'never left locked');
+      expect(s.draft!.printedLines, hasLength(1), reason: 'the line is back');
+      expect(s.draft!.pendingOps, ['KOT_PRINT', 'PRINTED']);
+      expect(s.lastError, 'menu_not_found');
+
+      // The next pass places it, and the bill settles.
+      server.failOn = null;
+      await store.saveSettlement(
+        s.copyWith(lastTriedAt: DateTime.now().subtract(const Duration(minutes: 30))),
+      );
+      await pos.flushAllDrafts();
+      expect(server.count('/createcart'), 2);
+      expect((await settlement())!.synced, isTrue);
+      expect(DraftCartStore.stuckSettlements.value, isEmpty);
+    });
+
+    test('a replayed status goes to the replay route, never the live one', () async {
+      await captureOfflineOnly();
+      expect((await pos.printBill()).error, isNull);
+      goOnline();
+      expect(await pos.flushDraft(), isTrue);
+
+      expect(server.count('/setcartstatus'), 0,
+          reason: 'the live route re-fires the kitchen display');
+      final statuses = server.requests
+          .where((r) => r.url.path.endsWith('/offline-status'))
+          .toList();
+      expect(statuses.map((r) => jsonDecode(r.body)['table_status']),
+          ['KOT_PRINT', 'PRINTED']);
+      expect(statuses.map((r) => jsonDecode(r.body)['cartId']), [cartA, cartA]);
+      // One key per (sitting, status), so a repeat is the same replay.
+      final keys = statuses.map((r) => r.headers['Idempotency-Key']).toList();
+      expect(keys.toSet(), hasLength(2));
+      expect(keys.every((k) => k != null && k.isNotEmpty), isTrue);
+      for (final r in statuses) {
+        final at = DateTime.parse(jsonDecode(r.body)['captured_at'].toString());
+        expect(at.isBefore(DateTime.now()), isTrue,
+            reason: 'the server refuses a capture time that is not past');
+      }
+    });
+
+    test('a refused replay status is surfaced, and stays queued', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      expect(await pos.sendKotOrder(), isTrue);
+
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-status')
+          ? {'status': {'code': 422, 'message': 'captured_at_not_past'}}
+          : null;
+      await pos.flushDraft();
+
+      expect(pos.errorMessage, contains('captured_at_not_past'),
+          reason: 'the waiter is told, not left to guess');
+      final d = (await store.load('r1', tableId))!;
+      expect(d.pendingOps, ['KOT_PRINT'], reason: 'never silently dropped');
+
+      server.failOn = null;
+      expect(await pos.flushDraft(), isTrue);
+      expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('a bill whose order is gone stays stuck for good', () async {
+      await openWithOrder();
+      goOffline();
+      await pos.addItemToCart(item);
+      await pos.sendKotOrder();
+      expect(await pos.settleAndPrintBill(), isTrue);
+
+      goOnline();
+      server.cart = []; // billed at the till
+      for (var pass = 0; pass < 3; pass++) {
+        await store.saveSettlement((await settlement())!.copyWith(
+            lastTriedAt: DateTime.now().subtract(const Duration(hours: 1))));
+        await pos.flushAllDrafts();
+      }
+      expect(server.count('/createcart'), 0);
+      expect(server.count('/offline-settle'), 0);
+      final s = (await settlement())!;
+      expect(s.synced, isFalse);
+      expect(s.lastError, PosProvider.settlementCartGoneMessage,
+          reason: 'its condition can never resolve by itself');
+      expect(DraftCartStore.stuckSettlements.value, hasLength(1));
+    });
+
+    test('marking a stuck bill handled keeps it, and frees the table', () async {
+      // Sitting 1 can never settle: its cart was billed at the till.
+      await openWithOrder();
+      goOffline();
+      await pos.addItemToCart(item);
+      await pos.sendKotOrder();
+      await pos.settleAndPrintBill();
+      goOnline();
+      server.cart = [];
+      await pos.flushAllDrafts();
+      final stuck = DraftCartStore.stuckSettlements.value.single;
+
+      // Sitting 2 is captured and settled behind it.
+      goOffline();
+      await pos.loadTableAndMenu(tableId, 'area1');
+      await pos.addItemToCart(item);
+      await pos.sendKotOrder();
+      expect(await pos.settleAndPrintBill(), isTrue);
+      goOnline();
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 0,
+          reason: 'sitting 2 waits behind the bill in front of it');
+
+      // The manager reconciles bill 1 at the till; the waiter says so.
+      await pos.acknowledgeSettlement(stuck);
+
+      final rows = await store.settlementsFor('r1', tableId);
+      expect(rows, hasLength(2), reason: 'money history is never deleted');
+      expect(rows.first.key, stuck.key);
+      expect(rows.first.acknowledged, isTrue);
+      expect(rows.first.printedTotal, stuck.printedTotal);
+      expect(rows.first.billNumber, stuck.billNumber);
+      expect(DraftCartStore.stuckSettlements.value, isEmpty,
+          reason: 'a new stuck bill must not be lost among handled ones');
+
+      // And the table is released: the next bill goes up.
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-settle'), 1);
+      expect(server.last('/offline-settle').headers['Idempotency-Key'],
+          rows[1].key);
+      expect((await store.settlementsFor('r1', tableId))[1].synced, isTrue);
     });
 
     test('the floor list stays online-only, with a reason', () async {

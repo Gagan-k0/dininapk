@@ -10,6 +10,7 @@ import '../services/connectivity_service.dart';
 import '../services/device_id_service.dart';
 import '../services/draft_cart_store.dart';
 import '../services/menu_cache_service.dart';
+import '../services/offline_pricing.dart';
 import '../services/receipt_customization_service.dart';
 import '../services/thermal_printer_service.dart';
 import '../utils/extra_addons.dart';
@@ -856,6 +857,11 @@ class PosProvider with ChangeNotifier {
       _cartFromSnapshot = false;
       _cartAt = DateTime.now();
       await _saveSnapshot();
+      // The last number the server issued: offline paper continues from it.
+      await OfflineBillNumbers.remember(
+        _restaurantId,
+        cart?['order_no'] ?? cart?['qr_order_no'],
+      );
       debugPrint(
         '[Fatfox POS] Cart: ${cartMenuItems.length} lines, total ₹$grandTotal, '
         'status $tableStatus',
@@ -1248,6 +1254,14 @@ class PosProvider with ChangeNotifier {
   /// [TableDraft.conflict] and waits for the waiter. Pinned to the draft's own
   /// table, so leaving the screen mid-send cannot touch another table.
   Future<bool> flushDraft() async {
+    final tid = resolvedTableId;
+    // Bills already taken go up first: each owns the sitting it was printed
+    // for, and the live draft below is the NEXT sitting on the same table.
+    if (ConnectivityService.instance.isOnline) {
+      await _syncSettlementsFor(tid, background: false);
+    }
+    // Read only NOW: the waiter can add items while that runs, and a draft
+    // captured before it would send a copy from before those taps.
     final current = _openDraft;
     if (current == null) return true;
     return _flush(current, background: false);
@@ -1267,8 +1281,17 @@ class PosProvider with ChangeNotifier {
       _consolidatedTax = null;
       _draft = null;
     }
-    final tables = (await _drafts.all(rid)).map((d) => d.tableId).toList();
-    DraftCartStore.pendingTables.value = tables.length;
+    final draftTables = (await _drafts.all(rid)).map((d) => d.tableId).toList();
+    DraftCartStore.pendingTables.value = draftTables.length;
+    await _drafts.refreshPendingSettlements(rid);
+    // Tables that owe only a settlement have no draft row of their own.
+    final tables = [
+      ...draftTables,
+      ...(await _drafts.allSettlements(rid))
+          .where((s) => s.pending && !draftTables.contains(s.tableId))
+          .map((s) => s.tableId)
+          .toSet(),
+    ];
     if (!ConnectivityService.instance.isOnline) return 0;
     if (_sendingAll) {
       _sendAllAgain = true; // e.g. back online while a loop is running
@@ -1284,13 +1307,29 @@ class PosProvider with ChangeNotifier {
         _buildConsolidatedTax();
       }
     }
-    if (_consolidatedTax == null) return 0;
+    if (_consolidatedTax == null) {
+      // Items cannot be priced, but money already taken still has to go up.
+      var settled = 0;
+      for (final tid in tables) {
+        if (await _syncSettlementsFor(tid, background: true) > 0) settled++;
+      }
+      return settled;
+    }
 
     _sendingAll = true;
     _stopSendAll = false;
     var sent = 0;
+    // A table is one send, whether it owed a bill, items, or both.
+    final counted = <String>{};
     try {
       for (final tid in tables) {
+        // Bills taken on THIS table first, oldest sitting first: each carries
+        // its own items, and the live draft below is a later sitting that must
+        // never be uploaded onto one of them.
+        if (await _syncSettlementsFor(tid, background: true) > 0 &&
+            counted.add(tid)) {
+          sent++;
+        }
         // Re-read right before sending: the waiter may have added, sent,
         // parked or discarded this table's items since the loop started.
         final open = _draft;
@@ -1309,7 +1348,7 @@ class PosProvider with ChangeNotifier {
           await _saveDraft(d.copyWith(conflict: true, lastError: _staleDraftMessage));
           continue;
         }
-        if (await _flush(d, background: true)) sent++;
+        if (await _flush(d, background: true) && counted.add(tid)) sent++;
         if (_stopSendAll || !ConnectivityService.instance.isOnline) break;
       }
     } finally {
@@ -1671,11 +1710,29 @@ class PosProvider with ChangeNotifier {
     }
     for (final status in TableDraft.opOrder) {
       if (!d.pendingOps.contains(status)) continue;
-      await _apiService.setCartStatus(
-        cartId: cid,
-        tableStatus: status,
-        background: background,
-      );
+      // The replay route, never the live one: this print happened on paper
+      // while there was no signal, and the kitchen must not be fired again.
+      // A refusal (e.g. 422 on the capture time) throws out of here, so the
+      // status stays queued and the waiter is told — never silently dropped.
+      try {
+        await _apiService.offlineStatus(
+          cartId: cid,
+          tableStatus: status,
+          idempotencyKey: _statusKey(d, status),
+          capturedAt: d.createdAt,
+          background: background,
+        );
+      } on ApiException catch (e) {
+        if (e.isNetwork || e.isAuth) rethrow;
+        // A definite refusal (e.g. 422 on the capture time). The status is a
+        // print that really happened, so it stays queued for the next pass —
+        // and the reason is said out loud rather than swallowed.
+        if (!background) _errorMessage = e.message;
+        final held = d.copyWith(lastError: e.message);
+        onProgress(held);
+        await _saveDraft(held);
+        return;
+      }
       // One at a time: a refused PRINTED must not make the server re-live a
       // KOT_PRINT it already has.
       d = d.copyWith(pendingOps: [...d.pendingOps]..remove(status));
@@ -1683,6 +1740,11 @@ class PosProvider with ChangeNotifier {
       await _saveDraft(d);
     }
   }
+
+  /// One key per (sitting, status): a repeat is the same replay, never a
+  /// second application of the status.
+  static String _statusKey(TableDraft d, String status) =>
+      '${d.printedKey ?? d.key}:$status';
 
   Future<bool> _markConflict(
     bool background,
@@ -2010,11 +2072,6 @@ class PosProvider with ChangeNotifier {
   /// print failed afterwards. Returns `null` if another action is in flight.
   Future<bool?> sendKotOrder() async {
     if (_isBusy) return null;
-    if (ConnectivityService.instance.syncOff) {
-      _errorMessage = _syncOffPrint;
-      notifyListeners();
-      return false;
-    }
     final openTable = resolvedTableId;
     // Paper must match the server: send unsent items, then work only from a
     // cart read just now (a send already returns one). This also proves the
@@ -2178,11 +2235,11 @@ class PosProvider with ChangeNotifier {
 
   /// Records a print that only happened on paper: the lines just printed are
   /// sealed under their own key and [status] waits for the reconnect.
-  Future<void> _queuePrintStatus(String status) async {
+  Future<void> _queuePrintStatus(String status, {String? billNumber}) async {
     final tid = resolvedTableId;
     if (_restaurantId.isEmpty || tid.isEmpty) return;
     final d = _openDraft ?? TableDraft.start(_restaurantId, tid, cartId);
-    await _saveDraft(d.sealPrinted(status));
+    await _saveDraft(d.sealPrinted(status).copyWith(billNumber: billNumber));
   }
 
   // ============================================================
@@ -2317,17 +2374,13 @@ class PosProvider with ChangeNotifier {
     }
   }
 
-  /// KOT and bill both print from local state before the server hears about
-  /// it, so with Sync off they would hand out paper the server never recorded.
-  static const String _syncOffPrint =
-      'Sync is off. Turn Sync on to print KOT or bill.';
-
-  /// No signal: print from the tablet and replay the status later. Sync
-  /// switched off by hand is a deliberate "talk to nobody" — it keeps
-  /// refusing ([_syncOffPrint]), so no paper is handed out behind its back.
-  bool get _offlinePrint =>
-      !ConnectivityService.instance.isOnline &&
-      !ConnectivityService.instance.syncOff;
+  /// Not talking to the server — no signal, or Sync switched off by hand.
+  /// Both print from the tablet and replay what happened on the reconnect:
+  /// everything is queued, so the switch is not a reason to refuse paper. What
+  /// gates a print is whether the tablet's own copy is good
+  /// ([_offlinePrintBlocked]); anything that genuinely needs the network is
+  /// still refused.
+  bool get _offlinePrint => !ConnectivityService.instance.isOnline;
 
   /// How old the tablet's copy of a cart may be and still be put on paper.
   /// Far shorter than the menu's cache rule: a menu barely moves during a
@@ -2385,7 +2438,6 @@ class PosProvider with ChangeNotifier {
   /// [printBill] under the caller's lock; returns the error, or null.
   Future<String?> _printBillLocked(String? paymentMode) async {
     final tid = resolvedTableId;
-    if (ConnectivityService.instance.syncOff) return _syncOffPrint;
     // Items mid-send are not on the server cart yet (floor path included).
     // Returned, not set on _errorMessage: the floor path restores the open
     // table afterwards and must not leave this text on its screen.
@@ -2457,21 +2509,42 @@ class PosProvider with ChangeNotifier {
 
   /// No signal, but the guest is leaving: print the same bill from the cart
   /// this tablet holds, and queue PRINTED for the reconnect.
+  /// Works with no server cart at all: a table whose whole order was captured
+  /// on this tablet bills from its own lines.
   Future<String?> _printBillOffline(String tid, String? paymentMode) async {
-    if (tid.isEmpty || cartId.isEmpty) return 'No items on this table yet';
+    if (tid.isEmpty || cartMenuItems.isEmpty) return 'No items on this table yet';
     if (hasUnsentKotItems) return 'Send KOT to kitchen before printing the bill';
     final refusal = await _offlineBillRefusal();
     if (refusal != null) return refusal;
 
     final prefs = await ReceiptPrefs.load();
     final customization = await _receiptCustomization.loadCached();
+    final area = await _offlineArea();
+    // The same engine the server re-runs at settle, on the lines this tablet
+    // holds — never the server's figures, which were priced for a smaller cart.
+    final totals = OfflinePricing.compute(
+      foodSubtotal: _offlineFoodSubtotal,
+      totalQuantity: totalItemCount,
+      taxRows: _taxConfig,
+      area: area,
+      // The cart's own stored charge — the one the server bills from too
+      // (helpers/dineinBillTotal.js reads `cartDoc.container_price`; it is
+      // never recomputed from the menu). A sitting with no cart yet has none,
+      // and the cart this app opens is created with container_price 0, so the
+      // paper and the settled order agree at 0.
+      containerPrice: containerCharge,
+    );
+    final number = await _offlineBillNumber();
     try {
       final data = await BillBuilder(_apiService).build(
         tableId: tid,
         tableNumber: tableNumber,
         paymentMode: paymentMode,
-        cartSnapshot: _offlineCartSnapshot(prefs.header),
+        cartSnapshot: _offlineCartDoc(prefs.header),
         taxRows: _taxConfig,
+        areas: area == null ? const [] : [TableArea.fromJson(area)],
+        totals: totals,
+        billNumber: number,
       );
       if (data == null) return 'No active cart found for this table';
       final bytes = await _printer.generateBillBytes(
@@ -2489,68 +2562,85 @@ class PosProvider with ChangeNotifier {
       debugPrint('[Fatfox POS] Offline bill print error: $e');
       return 'Printer error: ${friendlyError(e)}';
     }
-    await _queuePrintStatus('PRINTED');
+    _lastOfflineTotal = totals.total;
+    await _queuePrintStatus('PRINTED', billNumber: number);
     markFloorDirty();
     return null;
   }
 
-  /// The open cart as this tablet knows it, with the unsent lines folded in.
-  /// The server's round-off goes (it was computed for a smaller total) and is
-  /// worked out again the way the server does it: the charged total is the
-  /// unrounded one rounded UP, so the till never collects less than the order.
-  Map<String, dynamic> _offlineCartSnapshot(String restaurantName) {
-    final base = {...?cart};
-    // No bill header offline, so the receipt's own name is the one on file.
-    if (restaurantName.isNotEmpty) base['restaurant_name'] = restaurantName;
-    if (_openDraft?.allLines.isEmpty ?? true) return base;
-    final unrounded = grandTotal - roundOff;
-    final total = unrounded.ceilToDouble();
-    return {
-      ...base,
-      'cartMenuData': cartMenuItems,
-      'food_subtotal': subTotal,
-      'tax_price': taxAmount,
-      'unrounded_total': unrounded,
-      'total_price': total,
-      'round_off': total - unrounded,
-    };
+  /// The pre-surge food base: every live line's own total, server and draft
+  /// alike. Never `menu_total` — the server folds a taxable area surge into
+  /// that field (helpers/areaSurge.js), and pricing from it would charge the
+  /// surge twice.
+  double get _offlineFoodSubtotal => cartMenuItems.fold(
+    0.0,
+    (sum, m) => sum + _num(m['price'] ?? m['individual_price']),
+  );
+
+  /// What the last offline bill put on paper — the amount the settlement
+  /// records, and the one checked against the server's own at sync.
+  double _lastOfflineTotal = 0;
+
+  /// The cart as this tablet knows it — its own lines, and the restaurant name
+  /// from the device's receipt settings (there is no bill header offline).
+  /// Money fields are deliberately absent: [OfflinePricing] supplies them.
+  Map<String, dynamic> _offlineCartDoc(String restaurantName) => {
+    ...?cart,
+    if (restaurantName.isNotEmpty) 'restaurant_name': restaurantName,
+    'cartMenuData': cartMenuItems,
+    'area_id': cart?['area_id'] ?? _activeAreaId,
+  };
+
+  /// This table's provisional bill number, minted once and reused by a
+  /// reprint (the draft keeps it until the settlement syncs).
+  Future<String?> _offlineBillNumber() async {
+    if (_restaurantId.isEmpty) return null;
+    final existing = _openDraft?.billNumber;
+    if (existing != null && existing.isNotEmpty) return existing;
+    return OfflineBillNumbers.next(_restaurantId);
   }
 
   static const String _offlineBillNotPriceable =
       'Send these items when back online before printing the bill.';
+  static const String _offlineBillDiscounted =
+      'A discount or coupon is on this bill. Only the server can price it — '
+      'print and settle it when back online.';
+  static const String _offlineBillSplit =
+      'Part of this bill is split. Print and settle it when back online.';
 
-  /// Offline the tablet prices the unsent lines itself, so it may print only
-  /// when nothing on this cart needs the server's pricing engine and the
-  /// cached rows it prices from are still fresh. A reprint of what the server
-  /// already priced is always allowed.
+  /// Offline the tablet prices the bill itself, so it may print only what it
+  /// can price and must not decide. A cart-level discount or coupon is the
+  /// server's to revalidate (it can drop it), a split may already be part
+  /// paid, and cached tax/area rows too old to trust are no basis for money.
+  /// Surge and compounded tax are computable now, so they are not refusals.
   Future<String?> _offlineBillRefusal() async {
-    if (_openDraft?.allLines.isEmpty ?? true) return null;
     final snapshot = cart ?? const <String, dynamic>{};
-    final compounded = _taxConfig.any(
-      (t) => t['tax_type']?.toString().toUpperCase() == 'CALC_ON_TAX',
-    );
-    if (compounded ||
-        discountAmount > 0 ||
-        (discountName?.isNotEmpty ?? false) ||
-        areaCharge > 0 ||
-        _hasSplit(snapshot) ||
-        !_freshEnough(_menuCachedAt) ||
-        await _areaBlocksOfflineBill(snapshot)) {
-      return _offlineBillNotPriceable;
+    if (discountAmount > 0 || (discountName?.isNotEmpty ?? false)) {
+      return _offlineBillDiscounted;
     }
+    if (_hasSplit(snapshot)) return _offlineBillSplit;
+    if (!_freshEnough(_menuCachedAt)) return _offlineBillNotPriceable;
+    // No area row (or one too old) means the surge cannot be priced at all.
+    if (await _offlineArea() == null) return _offlineBillNotPriceable;
     return null;
   }
 
-  /// True when the area's surge cannot be trusted: it charges one (per item,
-  /// which only the server prices), or the floor it would be read from is
-  /// missing or older than the app's cache rule.
-  Future<bool> _areaBlocksOfflineBill(Map<String, dynamic> snapshot) async {
+  /// The open table's area row from the cached floor, or null when the FLOOR
+  /// itself cannot be trusted (missing, or older than the cache rule) — that
+  /// is the only case where the surge is unknown.
+  ///
+  /// A fresh floor with no row for this table answers with the no-op surge:
+  /// restaurants that configure no areas at all, and tables whose area was
+  /// deleted, charge nothing — refusing them would make offline billing
+  /// impossible for a whole tenant.
+  Future<Map<String, dynamic>?> _offlineArea() async {
     final floor = await _drafts.loadFloor(_restaurantId);
-    if (floor == null || !_freshEnough(floor.at)) return true;
-    final areaId = snapshot['area_id']?.toString() ?? _activeAreaId ?? '';
-    return floor.areas
-        .map(TableArea.fromJson)
-        .any((a) => a.id == areaId && a.surgeValue > 0);
+    if (floor == null || !_freshEnough(floor.at)) return null;
+    final areaId = cart?['area_id']?.toString() ?? _activeAreaId ?? '';
+    for (final a in floor.areas) {
+      if (a['_id']?.toString() == areaId) return a;
+    }
+    return const <String, dynamic>{};
   }
 
   /// Young enough to be trusted; no timestamp at all counts as stale.
@@ -2643,6 +2733,9 @@ class PosProvider with ChangeNotifier {
   Future<bool?> settleAndPrintBill({String paymentType = 'CASH'}) async {
     if (_isBusy) return null;
     if (_refuseWhileSending(resolvedTableId)) return false;
+    if (_offlinePrint) {
+      return _settleOffline(ApiService.normalizePaymentType(paymentType));
+    }
     final cid = cartId;
     if (cid.isEmpty) {
       _errorMessage = 'No active cart for this table';
@@ -2679,6 +2772,473 @@ class PosProvider with ChangeNotifier {
     notifyListeners();
     return false;
   }
+
+  /// No signal, and the guest is paying: hand them the bill, record the
+  /// settlement on this tablet and free the table here. The sale reaches the
+  /// server on the reconnect ([_syncSettlementsFor]) carrying `captured_at`,
+  /// which is what puts the revenue on the day it was actually taken.
+  ///
+  /// The settlement TAKES the sitting with it — the table's draft moves onto
+  /// the row and the table starts empty — so the next party is billed as its
+  /// own order, and a table can be settled as many times as it turns over.
+  ///
+  /// Refused for everything the tablet must not decide — the same rules as the
+  /// bill itself ([_offlineBillRefusal]) — and for a draft that is held.
+  Future<bool> _settleOffline(String mode) async {
+    final tid = resolvedTableId;
+    if (tid.isEmpty || _restaurantId.isEmpty || cartMenuItems.isEmpty) {
+      return _sayNo('No items on this table yet');
+    }
+    final held = _openDraft;
+    if (held != null && held.conflict) {
+      return _sayNo(
+        held.lastError ?? 'Unsent items on this table need attention.',
+      );
+    }
+    if (held?.creatingLine != null) {
+      // That item opened the order on a send whose answer never came back. It
+      // is uploaded when the sitting replays but is NOT on the bill this
+      // tablet prices, so settling now would bill less than the order holds.
+      return _sayNo(
+        'An item on this table is still being sent. Settle it when back online.',
+      );
+    }
+    final blocked = _offlinePrintBlocked;
+    if (blocked != null) return _sayNo(blocked);
+    if (hasUnsentKotItems) {
+      return _sayNo('Send KOT to kitchen before printing the bill');
+    }
+    final refusal = await _offlineBillRefusal();
+    if (refusal != null) return _sayNo(refusal);
+    // A sitting already settled left the table empty, so the guard above is
+    // what stops the same one being billed twice.
+
+    _isBusy = true;
+    _errorMessage = null;
+    printError = null;
+    notifyListeners();
+    try {
+      final failure = await _printBillOffline(tid, mode);
+      if (failure != null) return _sayNo(failure);
+      // Only after the paper is in the guest's hand: money taken is recorded,
+      // and it takes this sitting's unsent items and print statuses with it.
+      final sitting = _openDraft;
+      await _drafts.saveSettlement(
+        OfflineSettlement(
+          restaurantId: _restaurantId,
+          tableId: tid,
+          key: DeviceIdService.randomHex(),
+          paymentType: mode,
+          printedTotal: _lastOfflineTotal,
+          capturedAt: DateTime.now(),
+          tableNumber: tableNumber,
+          billNumber: sitting?.billNumber,
+          cartId: cartId.isEmpty ? null : cartId,
+          draft: sitting,
+        ),
+      );
+      // The table is free on the tablet: no server lines, and no draft — the
+      // settlement owns those now. The next party starts from nothing.
+      _draft = null;
+      await _drafts.delete(_restaurantId, tid);
+      _cartData = [];
+      await _saveSnapshot();
+      markFloorDirty();
+      return true;
+    } finally {
+      _isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  bool _sayNo(String why) {
+    _errorMessage = why;
+    notifyListeners();
+    return false;
+  }
+
+  /// This table's settlements, oldest sitting first (a busy table can hold
+  /// several from one outage).
+  Future<List<OfflineSettlement>> settlementsFor(String tableId) =>
+      _drafts.settlementsFor(_restaurantId, tableId);
+
+  /// The waiter says this bill was dealt with elsewhere (reconciled at the
+  /// till). The row is KEPT — it is money history — but stops asking to be
+  /// sent, which also releases the table: a settlement that can never resolve
+  /// would otherwise hold every later sitting on it behind itself.
+  ///
+  /// Only ever called from a confirmation that names the table, the bill and
+  /// the amount: it is an assertion about cash, not a dismissal.
+  Future<void> acknowledgeSettlement(OfflineSettlement s) async {
+    await _drafts.saveSettlement(
+      s.copyWith(acknowledged: true, synced: true, clearError: true),
+    );
+    notifyListeners();
+  }
+
+  /// Tables whose settlements are being sent — one at a time per table, so a
+  /// foreground flush and the background loop cannot send the same bill twice.
+  final Set<String> _settling = {};
+
+  static const String settlementLostCartMessage =
+      'A bill settled offline has no open order to settle against — it was '
+      'billed or cleared elsewhere. Check the order before billing it again.';
+
+  /// Sends every bill this table settled offline, oldest sitting first. Each
+  /// carries its own items: they are put on the order (create cart, upload,
+  /// replay the print statuses — all [_flush]'s job, writing back onto the
+  /// settlement row) and only THEN is the bill settled. A later sitting waits
+  /// behind the one before it, or its items would join that bill.
+  /// Returns how many bills it managed to settle.
+  Future<int> _syncSettlementsFor(
+    String tid, {
+    required bool background,
+  }) async {
+    if (tid.isEmpty || _restaurantId.isEmpty) return 0;
+    // Sync off is a deliberate "talk to nobody": a refusal from the request
+    // layer must never be written onto a money row as its last error.
+    if (!ConnectivityService.instance.isOnline) return 0;
+    if (!_settling.add(tid)) return 0;
+    var settled = 0;
+    try {
+      for (final s in await _drafts.settlementsFor(_restaurantId, tid)) {
+        if (s.synced) continue;
+        // STOP at the oldest row that is not settled. A later sitting replayed
+        // over an open cart the earlier one left behind would take that cart
+        // for its own, be refused, and lose the items it was billed for.
+        // Waiting is always recoverable; skipping ahead is not.
+        if (!s.pending || !s.dueNow) break;
+        if (!await _syncSettlement(s, background: background)) break;
+        settled++;
+        if (_stopSendAll || !ConnectivityService.instance.isOnline) break;
+      }
+    } finally {
+      _settling.remove(tid);
+    }
+    return settled;
+  }
+
+  static const String settlementHeldMessage =
+      'This bill is waiting on the order that is open on its table now. '
+      'Close or clear that order and it will go up.';
+
+  static const String settlementCartGoneMessage =
+      'The order this bill was taken for was billed or cleared elsewhere. '
+      'Check it before billing this table again.';
+
+  /// Puts ONE settled sitting's items and print statuses on the server.
+  ///
+  /// Deliberately isolated from the live table machinery: it reads no
+  /// `_openDraft`, writes no `_draft`, `_cartData`, `_cartAt` or snapshot, and
+  /// redirects nothing global. Its only inputs are [row] and its owned draft;
+  /// its only output is [onProgress], which persists the remaining work back
+  /// onto the settlement row (null = nothing left) so a crash resumes exactly
+  /// where it stopped. That is what keeps a replay from touching the party
+  /// sitting at that table right now.
+  ///
+  /// Same request order as a live send — create the cart, the printed batch,
+  /// its statuses, then anything added after the print.
+  /// False = not placed: retry later, or wait for the waiter ([lastError]).
+  Future<bool> _placeSitting(
+    OfflineSettlement row, {
+    required bool background,
+    required Future<void> Function(TableDraft?, {String? error}) onProgress,
+  }) async {
+    final tid = row.tableId;
+    var d = row.draft!;
+    // The live send holds the same per-table lock, so a replay and a send can
+    // never interleave requests for one table.
+    if (_sending.contains(tid)) return false;
+    _sending.add(tid);
+    try {
+      final live = await _apiService.getCartItemsByTableId(
+        tid,
+        background: background,
+        fresh: true,
+      );
+      var liveId = _cartIdOf(live);
+      // Read before this replay's own writes.
+      final liveStatus =
+          live.isEmpty ? '' : (live.first['table_status']?.toString() ?? '');
+
+      if (liveId.isEmpty) {
+        if (d.baselineCartId != null) {
+          // This sitting was captured onto a cart that is gone: it was billed
+          // or cleared at the till during the outage. Opening a fresh cart
+          // here would make a SECOND order for items already on a bill.
+          await _holdSettlement(onProgress, d, why: settlementCartGoneMessage);
+          return false;
+        }
+        final pending = d.creatingLine;
+        if (pending != null) {
+          // An earlier createcart never answered and there is no order now: it
+          // may have reached one that has been billed since. Only the waiter
+          // can tell, so it is never re-created automatically.
+          await _holdSettlement(onProgress, d);
+          return false;
+        }
+        // The oldest batch opens the order: a printed line if there is one.
+        final fromPrinted = d.printedLines.isNotEmpty;
+        final first = fromPrinted ? d.printedLines.first : d.lines.first;
+        // Persisted before sending, so a lost answer is recognised next time.
+        d = d.copyWith(
+          creatingLine: first,
+          lines: fromPrinted ? d.lines : d.lines.sublist(1),
+          printedLines: fromPrinted ? d.printedLines.sublist(1) : d.printedLines,
+        );
+        await onProgress(d);
+        try {
+          await _createCartLine(tid, first, background: background);
+        } on ApiException catch (e) {
+          // A refusal is a definite "not added": put the line back so a later
+          // pass can place it. Only a lost answer keeps it locked.
+          if (!e.isNetwork) {
+            d = d.copyWith(
+              clearCreating: true,
+              lines: fromPrinted ? d.lines : [first, ...d.lines],
+              printedLines:
+                  fromPrinted ? [first, ...d.printedLines] : d.printedLines,
+            );
+            await onProgress(d);
+          }
+          rethrow;
+        }
+        liveId = _cartIdOf(
+          await _apiService.getCartItemsByTableId(tid, background: background, fresh: true),
+        );
+        if (liveId.isEmpty) return false; // answered, but no order: try again
+        d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+        await onProgress(d);
+      } else if (d.creatingLine != null) {
+        if (!_cartHasLine(live, d.creatingLine!)) {
+          await _holdSettlement(onProgress, d);
+          return false;
+        }
+        d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+        await onProgress(d);
+      } else if (d.baselineCartId != liveId) {
+        // An order is open on this table that is not the one this sitting was
+        // billed for — the table turned over, or a bill in front of this one
+        // has not settled yet. Its items must never join that order.
+        await _holdSettlement(onProgress, d);
+        return false;
+      }
+
+      // Order matters: the printed batch, then its status, then whatever was
+      // added after the print (which that status must not touch).
+      if (d.printedLines.isNotEmpty) {
+        await _apiService.offlineSync(
+          tableId: tid,
+          idempotencyKey: d.printedKey ?? d.key,
+          lines: d.printedLines.map((l) => l.toSyncJson()).toList(),
+          capturedAt: d.createdAt,
+          background: background,
+        );
+        d = d.copyWith(printedLines: const []);
+        await onProgress(d);
+      }
+
+      // A status the order has already moved past is dropped, never forced —
+      // the settle below is what this row is really for.
+      final movedOn = liveStatus == 'PRINTED' || liveStatus == 'PAID';
+      for (final status in TableDraft.opOrder) {
+        if (!d.pendingOps.contains(status)) continue;
+        if (!movedOn) {
+          await _apiService.offlineStatus(
+            cartId: d.baselineCartId ?? liveId,
+            tableStatus: status,
+            idempotencyKey: _statusKey(d, status),
+            capturedAt: d.createdAt,
+            background: background,
+          );
+        }
+        // One at a time: a refused PRINTED must not make the server re-live a
+        // KOT_PRINT it already has.
+        d = d.copyWith(pendingOps: [...d.pendingOps]..remove(status));
+        await onProgress(d);
+      }
+
+      if (d.lines.isNotEmpty) {
+        await _apiService.offlineSync(
+          tableId: tid,
+          idempotencyKey: d.key,
+          lines: d.lines.map((l) => l.toSyncJson()).toList(),
+          capturedAt: d.createdAt,
+          background: background,
+        );
+        d = d.copyWith(lines: const []);
+      }
+      // Everything is on the order; the row keeps only the bill from here.
+      await onProgress(null);
+      return true;
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        _sessionExpired = true;
+        _stopSendAll = true;
+      }
+      if (e.isNetwork || e.isSubscriptionLocked || e.code >= 500 ||
+          e.code == 408 || e.code == 429) {
+        return false; // worth retrying, and nothing to tell the waiter yet
+      }
+      await _holdSettlement(onProgress, d, why: e.message);
+      return false;
+    } catch (e) {
+      debugPrint('[Fatfox POS] settlement replay error: $e');
+      return false;
+    } finally {
+      _sending.remove(tid);
+    }
+  }
+
+  /// The sitting cannot be placed by the tablet alone. The row keeps every
+  /// item it still owes (nothing is cleared) and says why.
+  Future<void> _holdSettlement(
+    Future<void> Function(TableDraft?, {String? error}) onProgress,
+    TableDraft d, {
+    String? why,
+  }) async => onProgress(d, error: why ?? settlementHeldMessage);
+
+  /// Puts one settlement's sitting on the server and bills it. False when the
+  /// next settlement on this table must wait (its order is not complete).
+  ///
+  /// 200 applied / 200 duplicate both mark the row synced (a duplicate is the
+  /// answer to a lost response, never a second bill). 409 is terminal and is
+  /// said out loud. Everything else waits for the next pass.
+  Future<bool> _syncSettlement(
+    OfflineSettlement s, {
+    bool background = false,
+  }) async {
+    final rid = _restaurantId;
+    final tid = s.tableId;
+    var row = s;
+
+    // The sitting's own items and statuses, put on the server by the ISOLATED
+    // replay: it reads and writes nothing but this settlement row.
+    final owned = row.draft;
+    if (owned != null && !owned.isEmpty) {
+      final placed = await _placeSitting(
+        row,
+        background: background,
+        onProgress: (d, {String? error}) async {
+          row = row.copyWith(
+            draft: d,
+            clearDraft: d == null,
+            lastError: error,
+            clearError: error == null,
+            // A hold is a failed attempt like any other: without the backoff
+            // every pass would re-run the whole replay for a bill that cannot
+            // move, and the C1 rule would hold every later sitting behind it.
+            attempts: error == null ? null : row.attempts + 1,
+            lastTriedAt: error == null ? null : DateTime.now(),
+          );
+          await _drafts.saveSettlement(row);
+        },
+      );
+      // Held, refused or unreachable: an order billed short is worse than one
+      // billed late, so this settlement and every later one wait.
+      if (!placed) {
+        if (row.lastError != null && !background) {
+          _errorMessage = row.lastError;
+          notifyListeners();
+        }
+        return false;
+      }
+    }
+
+    try {
+      // Re-read EVERY attempt: between attempts the sitting may have been
+      // billed at the till, and a stale id would post against a dead cart.
+      var cid = _cartIdOf(
+        await _apiService.getCartItemsByTableId(tid, background: background, fresh: true),
+      );
+      if (cid.isEmpty) {
+        // Nothing open. If this row was never sent there is nothing the server
+        // could answer for it — terminal, and said out loud. If it WAS sent,
+        // the cart may be gone because that send worked, so the same key is
+        // posted once more to collect the duplicate answer.
+        if (row.cartId == null) {
+          await _failSettlement(
+            row.copyWith(conflict: true, lastError: settlementLostCartMessage),
+            background,
+          );
+          return false;
+        }
+        cid = row.cartId!;
+      }
+      if (row.cartId != cid) {
+        // Stored before the send, so a lost answer retries the same order.
+        row = row.copyWith(cartId: cid);
+        await _drafts.saveSettlement(row);
+      }
+
+      final env = await _apiService.offlineSettle(
+        cartId: cid,
+        paymentType: row.paymentType,
+        idempotencyKey: row.key,
+        capturedAt: row.capturedAt,
+        background: background,
+      );
+      final data = env.map ?? const <String, dynamic>{};
+      final serverTotal = _num(
+        data['total_price'] ?? data['total'] ?? data['order_total'],
+      );
+      await OfflineBillNumbers.remember(rid, data['order_no']);
+      final settled = row.copyWith(
+        synced: true,
+        clearError: true,
+        orderId: data['order_id']?.toString(),
+        orderNo: data['order_no']?.toString(),
+        serverTotal: serverTotal > 0 ? serverTotal : null,
+      );
+      await _drafts.saveSettlement(settled);
+      if (settled.mismatched && !background) {
+        _errorMessage = totalMismatchMessage(settled);
+        notifyListeners();
+      }
+      return true;
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        _sessionExpired = true;
+        _stopSendAll = true;
+      }
+      // 409: the server has already answered this key with something else.
+      // Retrying cannot change that, and a second bill must never be made.
+      await _failSettlement(
+        row.copyWith(
+          conflict: e.code == 409,
+          // A lost signal is the ordinary offline case, not something the
+          // waiter must act on: it leaves no reason on the row, so the row
+          // stays "waiting for the next sync" rather than "needs attention".
+          clearError: e.isNetwork,
+          lastError: e.code == 409
+              ? 'The server refused this offline settlement (conflict). '
+                  'Check the order before billing it again.'
+              : (e.isNetwork ? null : e.message),
+          // A lost signal is not the settlement's fault: no backoff, the next
+          // pass (the connectivity probe drives it) tries again straight away.
+          attempts: e.isNetwork ? row.attempts : row.attempts + 1,
+          lastTriedAt: DateTime.now(),
+        ),
+        background,
+      );
+      return false;
+    }
+  }
+
+  Future<void> _failSettlement(OfflineSettlement s, bool background) async {
+    await _drafts.saveSettlement(s);
+    if (s.conflict && !background) {
+      _errorMessage = s.lastError;
+      notifyListeners();
+    }
+  }
+
+  /// The server re-prices at settle and ignores the printed total, so a
+  /// difference is the waiter's to reconcile with the guest.
+  static String totalMismatchMessage(OfflineSettlement s) =>
+      'Bill ${s.billNumber ?? ''} printed ₹${s.printedTotal.toStringAsFixed(2)} '
+      'but the server billed ₹${(s.serverTotal ?? 0).toStringAsFixed(2)}. '
+      'The order is correct; the paper is not.';
 
   void clearCart() {
     _cartData = [];
