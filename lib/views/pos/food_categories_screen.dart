@@ -13,6 +13,7 @@ import '../../utils/menu_page_window.dart';
 import '../../widgets/pos_category_rail.dart';
 import '../../widgets/pos_menu_tile.dart';
 import '../../widgets/held_items_bar.dart';
+import '../../widgets/subscription_banner.dart';
 import '../../widgets/sync_status_chip.dart';
 
 class FoodCategoriesScreen extends StatefulWidget {
@@ -139,7 +140,11 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: _buildAppBar(pos, tableNum),
-      body: loadFailed
+      body: Column(
+        children: [
+          const SubscriptionBanner(),
+          Expanded(
+            child: loadFailed
           ? _buildLoadError(pos)
           : pos.isLoading && pos.categories.isEmpty
           ? const Center(
@@ -289,6 +294,9 @@ class _FoodCategoriesScreenState extends State<FoodCategoriesScreen> {
                 ),
               ],
             ),
+          ),
+        ],
+      ),
       // Phone / narrow: cart via bottom sheet. Wide: persistent right panel.
       floatingActionButton: (!wideCart && pos.cartMenuItems.isNotEmpty)
           ? FloatingActionButton.extended(
