@@ -171,6 +171,10 @@ class BillPrintData {
   final String? phone;
   final String? gstin;
   final String tableNumber;
+
+  /// Provisional number for a bill printed with no signal (`OFF-…`); null on
+  /// paper the server priced.
+  final String? billNumber;
   final String? paymentMode;
   final String? customerName;
   final String? customerMobile;
@@ -193,6 +197,7 @@ class BillPrintData {
     this.phone,
     this.gstin,
     required this.tableNumber,
+    this.billNumber,
     this.paymentMode,
     this.customerName,
     this.customerMobile,
@@ -717,6 +722,14 @@ class ThermalPrinterService {
       if (customization.billShowTableOrOrderNo) {
         bytes += generator.text(
           _safe('Table No : ${bill.tableNumber}'),
+          styles: const PosStyles(bold: true),
+        );
+      }
+      // Always shown when set: it is the only handle the waiter has on a bill
+      // the server has not numbered yet.
+      if (bill.billNumber != null && bill.billNumber!.isNotEmpty) {
+        bytes += generator.text(
+          _safe('Bill No : ${bill.billNumber} (provisional)'),
           styles: const PosStyles(bold: true),
         );
       }

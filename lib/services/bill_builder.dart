@@ -1,6 +1,7 @@
 import '../models/table_model.dart';
 import 'api_service.dart';
 import 'connectivity_service.dart';
+import 'offline_pricing.dart';
 import 'thermal_printer_service.dart';
 
 /// Turns the live cart into [BillPrintData], the way the admin
@@ -14,6 +15,9 @@ class BillBuilder {
   final ApiService _api;
   BillBuilder(this._api);
 
+  /// [totals] replaces every money field with the tablet's own pricing
+  /// ([OfflinePricing]) — the offline path prices what it holds instead of
+  /// reading figures the server computed for a smaller cart.
   Future<BillPrintData?> build({
     required String tableId,
     required String tableNumber,
@@ -21,6 +25,8 @@ class BillBuilder {
     String? paymentMode,
     Map<String, dynamic>? cartSnapshot,
     List<Map<String, dynamic>>? taxRows,
+    OfflineTotals? totals,
+    String? billNumber,
   }) async {
     final cart = cartSnapshot ?? await _firstCart(tableId);
     if (cart == null) return null;
@@ -42,15 +48,19 @@ class BillBuilder {
     final merged = {...cart, ...?header};
 
     final lines = cartLinesToBillLines(cart);
-    final foodSubtotal = _num(merged['food_subtotal']) > 0
-        ? _num(merged['food_subtotal'])
-        : lines.where((l) => !l.cancelled).fold(0.0, (s, l) => s + l.lineTotal);
-    final taxTotal = _num(merged['tax_price']);
-    final total = _num(merged['total_price']);
+    final foodSubtotal = totals?.foodSubtotal ??
+        (_num(merged['food_subtotal']) > 0
+            ? _num(merged['food_subtotal'])
+            : lines
+                .where((l) => !l.cancelled)
+                .fold<double>(0.0, (s, l) => s + l.lineTotal));
+    final taxTotal = totals?.taxTotal ?? _num(merged['tax_price']);
+    final total = totals?.total ?? _num(merged['total_price']);
     final unrounded = _num(merged['unrounded_total']);
-    final roundOff = merged['round_off'] != null
-        ? _num(merged['round_off'])
-        : (unrounded > 0 ? total - unrounded : 0.0);
+    final roundOff = totals?.roundOff ??
+        (merged['round_off'] != null
+            ? _num(merged['round_off'])
+            : (unrounded > 0 ? total - unrounded : 0.0));
 
     return BillPrintData(
       restaurantName: (rest?['name'] ?? merged['restaurant_name'] ?? 'THE FAT FOX').toString(),
@@ -58,17 +68,18 @@ class BillBuilder {
       phone: (rest?['mobile'] ?? merged['restaurant_mobile'])?.toString(),
       gstin: rest?['gstin']?.toString(),
       tableNumber: tableNumber,
+      billNumber: billNumber,
       paymentMode: paymentMode,
       customerName: merged['customer_name']?.toString(),
       customerMobile: merged['customer_mobileno']?.toString(),
       lines: lines,
       subTotal: foodSubtotal,
-      discount: _num(merged['discount_price']),
+      discount: totals?.discount ?? _num(merged['discount_price']),
       discountName: merged['discount_name']?.toString(),
-      containerCharge: _num(merged['container_price']),
-      areaCharge: _num(merged['area_charge']),
+      containerCharge: totals?.containerPrice ?? _num(merged['container_price']),
+      areaCharge: totals?.areaCharge ?? _num(merged['area_charge']),
       areaChargeLabel: _surgeLabel(cart, areas),
-      taxBreakdown: splitTax(taxTotal, rows),
+      taxBreakdown: totals?.taxBreakdown ?? splitTax(taxTotal, rows),
       taxTotal: taxTotal,
       roundOff: double.parse(roundOff.toStringAsFixed(2)),
       grandTotal: total,

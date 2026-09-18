@@ -46,16 +46,27 @@ class SyncStatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final net = ConnectivityService.instance;
     return ListenableBuilder(
-      listenable: Listenable.merge([net, DraftCartStore.pendingTables]),
+      listenable: Listenable.merge([
+        net,
+        DraftCartStore.pendingTables,
+        DraftCartStore.pendingSettlements,
+        DraftCartStore.stuckSettlements,
+      ]),
       builder: (context, _) {
         final l = look(net.state);
-        final pending = DraftCartStore.pendingTables.value;
+        // Bills settled offline are money waiting to go up: they count too.
+        final stuck = DraftCartStore.stuckSettlements.value.length;
+        final pending = DraftCartStore.pendingTables.value +
+            DraftCartStore.pendingSettlements.value +
+            stuck;
         // Phones: the POS search field needs the width, so show the icon only.
         if (MediaQuery.sizeOf(context).width < 600) {
           return IconButton(
             tooltip: 'Sync: ${l.label}',
             icon: Badge(
               isLabelVisible: pending > 0,
+              // A bill on no order needs a person, not another sync.
+              backgroundColor: stuck > 0 ? Colors.red.shade700 : null,
               label: Text('$pending'),
               child: Icon(l.icon, color: l.color),
             ),
@@ -88,6 +99,41 @@ class SyncStatusChip extends StatelessWidget {
     );
   }
 
+  /// Asks before writing off a bill the tablet could not send. The text names
+  /// the table, the bill and the amount, because the waiter is asserting that
+  /// this cash was accounted for somewhere else — the row is kept either way.
+  Future<void> _confirmHandled(
+    BuildContext context,
+    OfflineSettlement s,
+  ) async {
+    final where = s.label.isEmpty ? 'This bill' : s.label;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Mark this bill as handled?'),
+        content: Text(
+          '$where — ₹${s.printedTotal.toStringAsFixed(2)}.\n\n'
+          'Only do this once the bill has been entered or reconciled at the '
+          'till. It stops the tablet trying to send it, and lets this table '
+          'be settled again. The record is kept.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Mark as handled'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    await Provider.of<PosProvider>(context, listen: false)
+        .acknowledgeSettlement(s);
+  }
+
   void _openSheet(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
@@ -96,10 +142,14 @@ class SyncStatusChip extends StatelessWidget {
         listenable: Listenable.merge([
           ConnectivityService.instance,
           DraftCartStore.pendingTables,
+          DraftCartStore.pendingSettlements,
+          DraftCartStore.stuckSettlements,
         ]),
         builder: (sheetContext, _) {
           final net = ConnectivityService.instance;
           final pending = DraftCartStore.pendingTables.value;
+          final settled = DraftCartStore.pendingSettlements.value;
+          final stuck = DraftCartStore.stuckSettlements.value;
           final noSignal = net.state == SyncState.offlineNoSignal;
           final updated = menuUpdatedAt;
           return SafeArea(
@@ -112,7 +162,8 @@ class SyncStatusChip extends StatelessWidget {
                     title: const Text('Sync with server'),
                     subtitle: Text(
                       net.syncOff
-                          ? 'Off — nothing is sent. KOT, bill and settle need Sync on.'
+                          ? 'Off — nothing is sent. KOT, bill and settle still '
+                                'print, and go up when Sync is back on.'
                           : noSignal
                           ? 'On — server unreachable, retrying every 20s.'
                           : 'On — connected.',
@@ -137,6 +188,38 @@ class SyncStatusChip extends StatelessWidget {
                               ).flushAllDrafts()
                             : null,
                         child: const Text('Send now'),
+                      ),
+                    ),
+                  if (settled > 0)
+                    ListTile(
+                      leading: const Icon(Icons.receipt_long_outlined),
+                      title: Text(
+                        '$settled bill${settled == 1 ? '' : 's'} settled offline',
+                      ),
+                      subtitle: const Text(
+                        'Sent on the next sync, on the day they were taken.',
+                      ),
+                    ),
+                  // Never folded into the line above: these are NOT waiting
+                  // for a sync, they are waiting for a person.
+                  for (final s in stuck)
+                    ListTile(
+                      leading: Icon(
+                        Icons.report_gmailerrorred_outlined,
+                        color: Theme.of(sheetContext).colorScheme.error,
+                      ),
+                      title: Text(
+                        s.label.isEmpty
+                            ? 'A bill settled offline needs attention'
+                            : '${s.label} needs attention',
+                      ),
+                      subtitle: Text(
+                        '₹${s.printedTotal.toStringAsFixed(2)} printed. '
+                        '${s.stuckReason}',
+                      ),
+                      trailing: TextButton(
+                        onPressed: () => _confirmHandled(sheetContext, s),
+                        child: const Text('Mark as handled'),
                       ),
                     ),
                   if (onSyncMenu != null)

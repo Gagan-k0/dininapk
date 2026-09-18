@@ -82,6 +82,14 @@ class ApiConfig {
   static String updateCartQty = '/restaurant/cart/updatecartmenuquantity';
   /// Batch of unsent draft lines, keyed by `Idempotency-Key`.
   static String offlineSync = '/restaurant/cart/offline-sync';
+  /// Bills a sitting that was captured offline, backdated to `captured_at` so
+  /// the revenue lands on the day it was taken. Keyed by `Idempotency-Key`.
+  static String offlineSettle = '/restaurant/cart/offline-settle';
+  /// Applies a KOT/bill status for a print that ALREADY happened on paper.
+  /// Unlike [setCartStatus] it never fires the kitchen display or a push —
+  /// the food was cooked from that ticket hours ago. Keyed by
+  /// `Idempotency-Key`; `captured_at` must be genuinely in the past.
+  static String offlineStatus = '/restaurant/cart/offline-status';
   /// Frees this table's device claim so this tablet can send (waiter-confirmed).
   static String releaseTableClaim = '/restaurant/cart/table-claim/release';
   static String deleteCartMenu =
