@@ -9,8 +9,14 @@ import 'package:http/testing.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:esc_pos_utils/esc_pos_utils.dart' show PaperSize;
+
+import 'package:dineinapk/models/cart_model.dart';
 import 'package:dineinapk/models/menu_model.dart';
+import 'package:dineinapk/models/receipt_customization.dart';
+import 'package:dineinapk/models/table_model.dart';
 import 'package:dineinapk/providers/pos_provider.dart';
+import 'package:dineinapk/services/thermal_printer_service.dart';
 import 'package:dineinapk/providers/table_provider.dart';
 import 'package:dineinapk/services/api_client.dart';
 import 'package:dineinapk/services/api_service.dart';
@@ -69,6 +75,44 @@ class FakeServer {
   });
 }
 
+/// A printer that keeps the paper instead of printing it.
+class FakePrinter extends ThermalPrinterService {
+  final kots = <List<CartLineItem>>[];
+  final bills = <BillPrintData>[];
+  bool offlineKot = false;
+  bool offlineBill = false;
+
+  @override
+  Future<List<int>> generateKotBytes({
+    required DineInTable table,
+    required List<CartLineItem> items,
+    required String restaurantName,
+    PaperSize paperSize = PaperSize.mm80,
+    String? department,
+    ReceiptCustomization customization = ReceiptCustomization.defaults,
+    bool offline = false,
+  }) async {
+    kots.add(items);
+    offlineKot = offline;
+    return const [1];
+  }
+
+  @override
+  Future<List<int>> generateBillBytes({
+    required BillPrintData bill,
+    PaperSize paperSize = PaperSize.mm80,
+    ReceiptCustomization customization = ReceiptCustomization.defaults,
+    bool offline = false,
+  }) async {
+    bills.add(bill);
+    offlineBill = offline;
+    return const [1];
+  }
+
+  @override
+  Future<void> printBytes(List<int> bytes, {PrinterRole role = PrinterRole.bill}) async {}
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -125,6 +169,7 @@ void main() {
 
   group('POS cart', () {
     late FakeServer server;
+    late FakePrinter printer;
     late PosProvider pos;
     final item = MenuItem.fromJson({'_id': soup, 'name': 'Soup', 'price': 90});
 
@@ -140,10 +185,12 @@ void main() {
         taxRows: [{'_id': 't1', 'name': 'GST', 'value_type': 'percentage', 'value_amount': 5}],
       );
       server = FakeServer();
+      printer = FakePrinter();
       final auth = AuthService();
       pos = PosProvider(
         api: ApiService(auth: auth, client: ApiClient(auth: auth, httpClient: server.client)),
         auth: auth,
+        printer: printer,
       );
     });
 
@@ -665,13 +712,24 @@ void main() {
       expect((await DraftCartStore().load('r1', t2))!.conflict, isTrue);
     });
 
-    test('no signal: KOT prints nothing when the server cannot be reached', () async {
-      server.cart = [cartDoc(cartA, [{'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1}])];
+    test('no signal: KOT prints from the tablet and the server is told nothing', () async {
+      server.cart = [cartDoc(cartA, [
+        {'_id': 'l0', 'menu_id': soup, 'quantity': 1, 'kot_status': 1, 'kotprint_status': 1},
+      ])];
       await open();
+      await pos.addItemToCart(item);
       server.failOn = (r) => const SocketException('down');
-      expect(await pos.sendKotOrder(), isFalse);
+
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(printer.kots.single, hasLength(1), reason: 'only the new item');
+      expect(printer.offlineKot, isTrue, reason: 'the paper says it is not synced');
+      expect(pos.printError, isNull);
       expect(server.count('/setcartstatus'), 0);
-      expect(pos.printError, isNull, reason: 'never reached the printer');
+      final held = (await DraftCartStore().load('r1', tableId))!;
+      expect(held.pendingOps, ['KOT_PRINT'],
+          reason: 'KOT would re-fire the kitchen for food already cooked');
+      expect(held.printedLines, hasLength(1));
+      expect(pos.hasUnsentKotItems, isFalse, reason: 'the batch is sealed as printed');
     });
 
     test('a table opened offline re-reads the server before a bill', () async {
@@ -862,6 +920,610 @@ void main() {
       final held = await DraftCartStore().load('r1', otherTable);
       expect(held!.conflict, isTrue);
       expect(held.lastError, contains('6 hours'));
+    });
+  });
+
+  group('offline printing', () {
+    late FakeServer server;
+    late FakePrinter printer;
+    late DraftCartStore store;
+    late PosProvider pos;
+    final net = ConnectivityService.instance;
+    final item = MenuItem.fromJson({'_id': soup, 'name': 'Soup', 'price': 90});
+
+    /// One KOT'd, printed server line of ₹90 — plus GST and a round-off the
+    /// server computed for that total alone.
+    Map<String, dynamic> orderDoc({
+      String id = cartA,
+      String status = 'RUNNING',
+      Map<String, dynamic> extra = const {},
+    }) => {
+      '_id': id,
+      'table_status': status,
+      'area_id': 'area1',
+      'cartMenuData': [
+        {
+          '_id': 'l0',
+          'menu_id': soup,
+          'menu_name': 'Soup',
+          'quantity': 1,
+          'individual_price': 90,
+          'price': 90,
+          'kot_status': 1,
+          'kotprint_status': 1,
+        },
+      ],
+      'food_subtotal': 90,
+      'tax_price': 4.5,
+      'round_off': 0.5,
+      'total_price': 95,
+      ...extra,
+    };
+
+    Future<void> cacheMenu({List<Map<String, dynamic>>? taxRows}) =>
+        MenuCacheService().save(
+          restaurantId: 'r1',
+          categories: [{'_id': 'c1', 'category_name': 'Soups'}],
+          items: [{'_id': soup, 'name': 'Soup', 'price': 90}],
+          taxRows: taxRows ??
+              [{'_id': 't1', 'name': 'GST', 'value_type': 'PERCENTAGE', 'value_amount': 5}],
+        );
+
+    Future<void> cacheFloor({double surge = 0}) => store.saveFloor(
+      'r1',
+      areas: [
+        {'_id': 'area1', 'name': 'Main', 'price_surge_type': 'percentage', 'price_surge_value': surge},
+      ],
+      tables: [{'_id': tableId, 'table_number': '5', 'area_id': 'area1'}],
+    );
+
+    PosProvider build() {
+      final auth = AuthService();
+      return PosProvider(
+        api: ApiService(auth: auth, client: ApiClient(auth: auth, httpClient: server.client)),
+        auth: auth,
+        printer: printer,
+      );
+    }
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({});
+      await AuthService().saveSession(token: 'tok', restaurantId: 'r1');
+      await net.load();
+      net.clearSignal();
+      store = DraftCartStore();
+      server = FakeServer();
+      printer = FakePrinter();
+      await cacheMenu();
+      await cacheFloor();
+      pos = build();
+    });
+
+    tearDown(() async {
+      await net.setSyncOn(true);
+      net.clearSignal();
+    });
+
+    void goOffline() {
+      server.failOn = (r) => const SocketException('down');
+      net.reportNetworkFailure();
+    }
+
+    void goOnline() {
+      server.failOn = null;
+      net.clearSignal();
+    }
+
+    Future<void> openWithOrder({Map<String, dynamic>? cart}) async {
+      server.cart = [cart ?? orderDoc()];
+      await pos.loadTableAndMenu(tableId, 'area1');
+    }
+
+    /// Adds one item, KOTs it with no signal, and bills the table offline.
+    Future<String?> billOfflineAfterKot() async {
+      await pos.addItemToCart(item);
+      goOffline();
+      expect(await pos.sendKotOrder(), isTrue);
+      return (await pos.printBill()).error;
+    }
+
+    List<http.Request> steps() => server.requests
+        .where((r) =>
+            r.url.path.endsWith('/offline-sync') ||
+            r.url.path.endsWith('/setcartstatus'))
+        .toList();
+
+    test('offline KOT prints, seals the batch and queues only KOT_PRINT', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(printer.kots.single, hasLength(1));
+      expect(printer.offlineKot, isTrue);
+      expect(server.count('/setcartstatus'), 0);
+      final d = (await store.load('r1', tableId))!;
+      expect(d.pendingOps, ['KOT_PRINT']);
+      expect(d.printedLines, hasLength(1));
+      expect(d.lines, isEmpty);
+      expect(pos.hasUnsentKotItems, isFalse);
+      expect(pos.hasUnprintedItems, isFalse);
+    });
+
+    test('items added after an offline KOT ride a new batch the replay cannot reach', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      final sealed = (await store.load('r1', tableId))!;
+
+      await pos.addItemToCart(item); // after the ticket was handed over
+      final next = (await store.load('r1', tableId))!;
+      expect(next.key, isNot(sealed.printedKey), reason: 'a new batch of its own');
+      expect(next.printedKey, sealed.printedKey);
+      expect(next.lines, hasLength(1));
+      expect(next.printedLines, hasLength(1));
+      expect(pos.hasUnsentKotItems, isTrue, reason: 'the later item is not printed');
+
+      goOnline();
+      expect(await pos.flushAllDrafts(), 1);
+      // Sealed batch first, then its status, and only then the later item —
+      // so the blanket KOT_PRINT can never mark that item printed.
+      expect(steps().map((r) => r.url.path.split('/').last).toList(),
+          ['offline-sync', 'setcartstatus', 'offline-sync']);
+      expect(steps().first.headers['Idempotency-Key'], sealed.printedKey);
+      expect(steps().last.headers['Idempotency-Key'], next.key);
+      expect(jsonDecode(steps()[1].body)['table_status'], 'KOT_PRINT');
+      expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('the replay never queues KOT: the kitchen is not fired twice', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      goOnline();
+      await pos.flushAllDrafts();
+
+      final statuses = server.requests
+          .where((r) => r.url.path.endsWith('/setcartstatus'))
+          .map((r) => jsonDecode(r.body)['table_status'])
+          .toList();
+      expect(statuses, ['KOT_PRINT']);
+    });
+
+    test('a status printed offline is dropped when the order changed', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      server.cart = [orderDoc(id: cartB)]; // billed and re-seated meanwhile
+      goOnline();
+
+      expect(await pos.flushDraft(), isFalse);
+      expect(server.count('/setcartstatus'), 0);
+      final held = (await store.load('r1', tableId))!;
+      expect(held.conflict, isTrue);
+      expect(held.pendingOps, isEmpty);
+      expect(pos.errorMessage, contains('printed offline'));
+    });
+
+    test('a parked draft never replays its print status', () async {
+      await openWithOrder();
+      goOffline();
+      expect(await pos.sendKotOrder(), isTrue); // a reprint: only a status waits
+      final d = (await store.load('r1', tableId))!;
+      expect(d.hasItems, isFalse);
+      expect(d.pendingOps, ['KOT_PRINT']);
+      await store.save(d.copyWith(conflict: true, lastError: 'held'));
+
+      goOnline();
+      await pos.loadTableAndMenu(tableId, 'area1');
+      expect(await pos.flushDraft(), isFalse);
+      expect(server.count('/setcartstatus'), 0);
+      expect(await store.load('r1', tableId), isNull, reason: 'nothing left to hold');
+    });
+
+    test('a table already PRINTED or PAID is never walked backwards', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      server.cart = [orderDoc(status: 'PAID')];
+      goOnline();
+
+      expect(await pos.flushDraft(), isTrue);
+      expect(server.count('/offline-sync'), 1, reason: 'the items still reach the order');
+      expect(server.count('/setcartstatus'), 0);
+      expect(pos.errorMessage, contains('printed offline'));
+      expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('the queued status outlives the send that empties the draft, and is retried', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+
+      // Signal is back, but the status call is the one that never lands.
+      server.failOn = (r) =>
+          r.url.path.endsWith('/setcartstatus') ? const SocketException('drop') : null;
+      net.clearSignal();
+      expect(await pos.flushDraft(), isFalse);
+      final d = (await store.load('r1', tableId))!;
+      expect(d.printedLines, isEmpty, reason: 'the items landed');
+      expect(d.lines, isEmpty);
+      expect(d.pendingOps, ['KOT_PRINT'], reason: 'the server never heard it');
+      expect(DraftCartStore.pendingTables.value, 0,
+          reason: 'a waiting status is not a table with unsent items');
+
+      final tried = server.count('/setcartstatus');
+      goOnline();
+      expect(await pos.flushDraft(), isTrue);
+      expect(server.count('/setcartstatus'), tried + 1, reason: 'sent again, and landed');
+      expect(jsonDecode(server.last('/setcartstatus').body)['table_status'], 'KOT_PRINT');
+      expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('offline bill prints when the tablet can price the unsent lines exactly', () async {
+      await openWithOrder();
+      expect(await billOfflineAfterKot(), isNull);
+
+      final bill = printer.bills.single;
+      expect(printer.offlineBill, isTrue);
+      expect(bill.lines, hasLength(2), reason: 'the server line and the offline one');
+      expect(bill.subTotal, 180);
+      expect(bill.taxTotal, closeTo(9, 0.001));
+      expect(bill.roundOff, 0, reason: 'the server round-off was for a smaller total');
+      expect(bill.grandTotal, closeTo(189, 0.001), reason: 'lines + tax = total');
+      expect(bill.restaurantName, 'THE FAT FOX');
+      expect(server.count('/setcartstatus'), 0);
+      expect((await store.load('r1', tableId))!.pendingOps, ['KOT_PRINT', 'PRINTED']);
+    });
+
+    test('a bill with nothing unsent is a plain reprint of the server cart', () async {
+      await openWithOrder();
+      goOffline();
+      expect((await pos.printBill()).error, isNull);
+      final bill = printer.bills.single;
+      expect(bill.roundOff, 0.5, reason: 'the server priced this one');
+      expect(bill.grandTotal, 95);
+      expect((await store.load('r1', tableId))!.pendingOps, ['PRINTED']);
+    });
+
+    test('offline bill refuses a compounded tax the server alone can apply', () async {
+      await cacheMenu(taxRows: [
+        {'_id': 't1', 'name': 'Cess', 'tax_type': 'CALC_ON_TAX', 'value_type': 'PERCENTAGE', 'value_amount': 5},
+      ]);
+      pos = build();
+      await openWithOrder();
+      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses a table whose area charges a surge', () async {
+      await openWithOrder();
+      await cacheFloor(surge: 10);
+      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses a discounted cart', () async {
+      await openWithOrder(
+        cart: orderDoc(extra: {'discount_price': 20, 'discount_name': 'Loyalty'}),
+      );
+      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses a split bill', () async {
+      await openWithOrder(
+        cart: orderDoc(extra: {'split_payments': [{'amount': 50}]}),
+      );
+      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses cached tax rows that are too old to trust', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      // The tablet was restarted with no signal, hours after its last sync.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('waiter_dinein_cache_at_v2_r1',
+          DateTime.now().subtract(const Duration(hours: 7)).millisecondsSinceEpoch);
+      goOffline();
+      pos = build();
+      await pos.loadTableAndMenu(tableId, 'area1');
+
+      expect(await pos.sendKotOrder(), isTrue, reason: 'the kitchen still gets its ticket');
+      expect((await pos.printBill()).error, contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses a cache that cannot say how old it is', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('waiter_dinein_cache_at_v2_r1'); // a half-written cache
+      goOffline();
+      pos = build();
+      await pos.loadTableAndMenu(tableId, 'area1');
+
+      expect(await pos.sendKotOrder(), isTrue);
+      expect((await pos.printBill()).error, contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('offline bill refuses when the floor it reads the area from is missing', () async {
+      SharedPreferences.setMockInitialValues({});
+      await AuthService().saveSession(token: 'tok', restaurantId: 'r1');
+      await cacheMenu();
+      pos = build();
+      await openWithOrder();
+      expect(await billOfflineAfterKot(), contains('back online'));
+      expect(printer.bills, isEmpty);
+    });
+
+    test('a table sent in the background never prints the copy from before', () async {
+      const other = '64b000000000000000000007';
+      server.cart = [orderDoc()];
+      await pos.loadTableAndMenu(other, 'area1'); // seen online, copy stored
+      goOffline();
+      await pos.addItemToCart(item);
+
+      // The waiter has moved on; the signal returns and table 7 goes up on
+      // its own, the way the server would answer afterwards.
+      goOnline();
+      server.failOn = (r) {
+        if (!r.url.path.endsWith('/offline-sync')) return null;
+        server.cart = [
+          {
+            ...orderDoc(),
+            'cartMenuData': [
+              ...(orderDoc()['cartMenuData'] as List),
+              {'_id': 'l1', 'menu_id': soup, 'menu_name': 'Soup', 'quantity': 1,
+               'individual_price': 90, 'price': 90, 'kot_status': 0, 'kotprint_status': 0},
+            ],
+          },
+        ];
+        return null;
+      };
+      await openWithOrder(); // another table is the open one
+      expect(await pos.flushAllDrafts(), 1);
+
+      pos = build();
+      goOffline();
+      await pos.loadTableAndMenu(other, 'area1');
+      expect(pos.cartMenuItems, hasLength(2),
+          reason: 'the stored copy knows the items that went up');
+      expect(await pos.sendKotOrder(), isTrue);
+      expect(printer.kots.single, hasLength(1), reason: 'the item that went up');
+    });
+
+    test('a copy an upload left behind is never printed from', () async {
+      const other = '64b000000000000000000007';
+      server.cart = [orderDoc()];
+      await pos.loadTableAndMenu(other, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+
+      // Signal enough for the items to land, not enough to read back what the
+      // order looks like now.
+      var synced = false;
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-sync')) synced = true;
+        if (synced && r.url.path.endsWith('/listallcartmenus')) {
+          return const SocketException('drop');
+        }
+        return null;
+      };
+      net.clearSignal();
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-sync'), 1);
+
+      pos = build();
+      goOffline();
+      await pos.loadTableAndMenu(other, 'area1');
+      expect(await pos.sendKotOrder(), isFalse);
+      expect((await pos.printBill()).error, isNotNull);
+      expect(printer.kots, isEmpty);
+      expect(printer.bills, isEmpty);
+    });
+
+    /// Backdates the stored copy of the open table, as an hour of no signal
+    /// (or a restart) would.
+    Future<void> ageStoredCart(Duration by) async {
+      final prefs = await SharedPreferences.getInstance();
+      const key = 'waiter_cart_snap_r1_$tableId';
+      final snap = jsonDecode(prefs.getString(key)!) as Map<String, dynamic>;
+      snap['at'] = DateTime.now().subtract(by).toIso8601String();
+      await prefs.setString(key, jsonEncode(snap));
+    }
+
+    test('a lost createcart answer also leaves the copy unprintable', () async {
+      const other = '64b000000000000000000007';
+      server.cart = []; // the table has no order yet
+      await pos.loadTableAndMenu(other, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+
+      // Signal enough to open the order, not enough to read back what it holds.
+      var created = false;
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/createcart')) created = true;
+        if (created && r.url.path.endsWith('/listallcartmenus')) {
+          return const SocketException('drop');
+        }
+        return null;
+      };
+      net.clearSignal();
+      await pos.flushAllDrafts();
+      expect(server.count('/createcart'), 1);
+
+      pos = build();
+      goOffline();
+      await pos.loadTableAndMenu(other, 'area1');
+      expect(await pos.sendKotOrder(), isFalse);
+      expect(printer.kots, isEmpty);
+    });
+
+    test('a reprint refuses a cart copy older than the print rule', () async {
+      await openWithOrder();
+      // Well inside the 6h menu rule, well past what a cart may be trusted for.
+      await ageStoredCart(const Duration(minutes: 45));
+      expect(PosProvider.offlinePrintMaxCartAge, const Duration(minutes: 30));
+      goOffline();
+      pos = build();
+      await pos.loadTableAndMenu(tableId, 'area1');
+
+      expect(await pos.sendKotOrder(), isFalse);
+      expect(pos.errorMessage, contains('too long ago'));
+      expect((await pos.printBill()).error, contains('too long ago'));
+      expect(printer.kots, isEmpty);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('a floor bill for another table never freshens this one\'s copy', () async {
+      await openWithOrder();
+      await ageStoredCart(const Duration(hours: 2));
+      goOffline();
+      pos = build();
+      await pos.loadTableAndMenu(tableId, 'area1');
+      expect((await pos.printBill()).error, contains('too long ago'));
+
+      // The signal returns just long enough to bill another table from the
+      // floor list, which reads THAT table's cart.
+      goOnline();
+      const other = '64b000000000000000000009';
+      final floor = await pos.printBillForFloorTable(tableId: other, areaId: 'area1');
+      expect(floor.error, isNull);
+      printer.bills.clear();
+
+      goOffline();
+      expect((await pos.printBill()).error, contains('too long ago'),
+          reason: 'the open table\'s copy is still hours old');
+      expect(printer.bills, isEmpty);
+    });
+
+    final refusals = <String, Object>{
+      'a table claim': {
+        'status': {'code': 'table_claimed_by_another_device', 'message': 'claimed'},
+        'data': {'held_by': 'dev-2'},
+      },
+      'a subscription lock': http.Response(
+        jsonEncode({
+          'status': {'code': 'subscription_locked', 'message': 'Subscription expired'},
+          'data': {'state': 'locked', 'enforcement': 'on'},
+        }),
+        403,
+      ),
+      'an expired session': {'status': {'code': 401, 'message': 'Invalid Token'}},
+      'an edited-since 409': {'status': {'code': 409, 'message': 'conflict'}},
+      'a paid split': {'status': {'code': 422, 'message': 'cart_locked_by_paid_split'}},
+    };
+    for (final refusal in refusals.entries) {
+      test('${refusal.key} is an answer, not a lost signal: nothing prints', () async {
+        await openWithOrder();
+        await pos.addItemToCart(item);
+        server.failOn = (r) =>
+            r.url.path.endsWith('/offline-sync') ? refusal.value : null;
+
+        expect(await pos.sendKotOrder(), isFalse);
+        expect(printer.kots, isEmpty, reason: 'the server answered — it is reachable');
+        expect(pos.errorMessage, isNotNull);
+        expect((await DraftCartStore().load('r1', tableId))!.pendingOps, isEmpty);
+      });
+    }
+
+    test('a refused cart read is an answer too: the bill does not print', () async {
+      await openWithOrder();
+      server.failOn = (r) => r.url.path.endsWith('/listallcartmenus')
+          ? {'status': {'code': 500, 'message': 'internal_server_error'}}
+          : null;
+      expect((await pos.printBill()).error, isNotNull);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('an offline total is rounded UP, the way the server rounds it', () async {
+      await openWithOrder();
+      final odd = MenuItem.fromJson({'_id': soup, 'name': 'Soup', 'price': 95.5});
+      await pos.addItemToCart(odd);
+      goOffline();
+      expect(await pos.sendKotOrder(), isTrue);
+      expect((await pos.printBill()).error, isNull);
+
+      final bill = printer.bills.single;
+      expect(bill.subTotal, closeTo(185.5, 0.001));
+      expect(bill.taxTotal, closeTo(9.275, 0.001));
+      expect(bill.grandTotal, 195, reason: '194.775 charged as 195, never 194');
+      expect(bill.roundOff, closeTo(0.225, 0.01));
+      expect(bill.grandTotal, greaterThanOrEqualTo(bill.subTotal + bill.taxTotal));
+    });
+
+    test('a refused PRINTED never makes the server re-live KOT_PRINT', () async {
+      await openWithOrder();
+      goOffline();
+      expect(await pos.sendKotOrder(), isTrue);
+      expect((await pos.printBill()).error, isNull);
+      expect((await store.load('r1', tableId))!.pendingOps, ['KOT_PRINT', 'PRINTED']);
+
+      server.failOn = (r) => r.url.path.endsWith('/setcartstatus') &&
+              jsonDecode(r.body)['table_status'] == 'PRINTED'
+          ? const SocketException('drop')
+          : null;
+      net.clearSignal();
+      await pos.flushDraft();
+      expect((await store.load('r1', tableId))!.pendingOps, ['PRINTED'],
+          reason: 'KOT_PRINT landed and is not queued again');
+
+      goOnline();
+      expect(await pos.flushDraft(), isTrue);
+      expect(
+        server.requests
+            .where((r) => r.url.path.endsWith('/setcartstatus'))
+            .map((r) => jsonDecode(r.body)['table_status'])
+            .toList(),
+        ['KOT_PRINT', 'PRINTED', 'PRINTED'],
+      );
+      expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('Sync off keeps refusing to print', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      await net.setSyncOn(false);
+      expect(await pos.sendKotOrder(), isFalse);
+      expect(pos.errorMessage, contains('Sync is off'));
+      expect((await pos.printBill()).error, contains('Sync is off'));
+      expect(printer.kots, isEmpty);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('a cart whose prices came back unread is never printed offline', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      var synced = false;
+      server.failOn = (r) {
+        if (r.url.path.endsWith('/offline-sync')) synced = true;
+        if (synced && r.url.path.endsWith('/listallcartmenus')) {
+          return const SocketException('drop');
+        }
+        return null;
+      };
+      expect(await pos.flushDraft(), isFalse);
+
+      expect(await pos.sendKotOrder(), isFalse);
+      expect((await pos.printBill()).error, contains('Cannot reach the server'));
+      expect(printer.kots, isEmpty);
+      expect(printer.bills, isEmpty);
+    });
+
+    test('the floor list stays online-only, with a reason', () async {
+      await openWithOrder();
+      goOffline();
+      final result = await pos.printBillForFloorTable(tableId: tableId, areaId: 'area1');
+      expect(result.error, contains('Open the table'));
+      expect(printer.bills, isEmpty);
     });
   });
 }

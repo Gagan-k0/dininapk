@@ -600,8 +600,9 @@ class ApiService {
   Future<ApiEnvelope> setCartStatus({
     required String cartId,
     required String tableStatus,
+    bool background = false,
   }) {
-    return _client.post(ApiConfig.setCartStatus, body: {
+    return _client.post(ApiConfig.setCartStatus, background: background, body: {
       'cartId': cartId,
       'table_status': tableStatus,
     });

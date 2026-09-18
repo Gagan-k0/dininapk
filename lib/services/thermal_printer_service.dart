@@ -543,6 +543,7 @@ class ThermalPrinterService {
     PaperSize paperSize = PaperSize.mm80,
     String? department,
     ReceiptCustomization customization = ReceiptCustomization.defaults,
+    bool offline = false,
   }) async {
     final profile = await _capabilityProfile;
     final generator = Generator(paperSize, profile);
@@ -561,6 +562,8 @@ class ThermalPrinterService {
         bold: true,
       ),
     );
+
+    if (offline) bytes += _offlineNotice(generator);
 
     if (department != null &&
         department.isNotEmpty &&
@@ -644,10 +647,20 @@ class ThermalPrinterService {
   /// Customer bill — same rows as the admin printed bill: items at BASE price,
   /// then Subtotal → Discount → Container → AC/Area charge → tax rows →
   /// Round Off → Grand Total.
+  /// Printed on paper the server has not seen yet, so nobody mistakes it for
+  /// a recorded KOT or bill.
+  static const String offlineMarker = 'OFFLINE — NOT SYNCED';
+
+  List<int> _offlineNotice(Generator generator) => generator.text(
+    _safe(offlineMarker),
+    styles: const PosStyles(align: PosAlign.center, bold: true),
+  );
+
   Future<List<int>> generateBillBytes({
     required BillPrintData bill,
     PaperSize paperSize = PaperSize.mm80,
     ReceiptCustomization customization = ReceiptCustomization.defaults,
+    bool offline = false,
   }) async {
     final profile = await _capabilityProfile;
     final generator = Generator(paperSize, profile);
@@ -697,6 +710,7 @@ class ThermalPrinterService {
         bytes += generator.text(_safe('GSTIN: ${bill.gstin}'), styles: const PosStyles(align: PosAlign.center));
       }
       bytes += generator.hr();
+      if (offline) bytes += _offlineNotice(generator);
       if (customization.billShowDate) {
         bytes += generator.text('Date: ${_formatDateTime(DateTime.now(), customization)}');
       }
