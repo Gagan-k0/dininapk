@@ -196,6 +196,7 @@ class PosProvider with ChangeNotifier {
       );
     }
     if (_selectedCategoryId == kExtraAddonsCategoryId) {
+      if (_extraAddonRestaurantId != _restaurantId) return const [];
       final groups = _extraAddonRawGroups;
       if (groups == null) return const [];
       return mapExtraAddonCards(groups, search: _searchQuery);
@@ -378,23 +379,41 @@ class PosProvider with ChangeNotifier {
   /// Concurrent callers share one in-flight Future so enrich never expands
   /// against a null cache while Extra-rail load is mid-flight.
   Future<void> ensureExtraAddonsLoaded({bool force = false}) async {
-    if (!force && _extraAddonRawGroups != null) return;
+    if (!force &&
+        _extraAddonRawGroups != null &&
+        _extraAddonRestaurantId == _restaurantId) {
+      return;
+    }
     if (_extraAddonsLoad != null) {
       await _extraAddonsLoad;
-      if (!force || _extraAddonRawGroups != null) return;
+      if (!force ||
+          (_extraAddonRawGroups != null &&
+              _extraAddonRestaurantId == _restaurantId)) {
+        return;
+      }
     }
     final load = () async {
       _extraAddonsLoading = true;
       notifyListeners();
       try {
-        _extraAddonRawGroups = await _apiService.getAllAvailableAddons();
+        final rid = _restaurantId;
+        final groups = await _apiService.getAllAvailableAddons();
+        _extraAddonRawGroups = groups;
+        _extraAddonRestaurantId = rid;
         if (_errorMessage == 'Failed to load extra add-ons') {
           _errorMessage = null;
         }
       } catch (e) {
         debugPrint('[Fatfox POS] Extra add-ons load failed: $e');
-        _extraAddonRawGroups = null; // allow retry on re-select
-        _errorMessage = 'Failed to load extra add-ons';
+        final cached = await _menuCache.load(_restaurantId);
+        if (cached != null && cached.extraAddons.isNotEmpty) {
+          _extraAddonRawGroups = cached.extraAddons;
+          _extraAddonRestaurantId = _restaurantId;
+        } else {
+          _extraAddonRawGroups = null; // allow retry on re-select
+          _extraAddonRestaurantId = null;
+          _errorMessage = 'Failed to load extra add-ons';
+        }
       } finally {
         _extraAddonsLoading = false;
         _extraAddonsLoad = null;
@@ -785,6 +804,10 @@ class PosProvider with ChangeNotifier {
       // dine-in menu per table open is what made opening a table feel slow.
       // "Sync menu" (forceMenuRefresh) is the waiter's override.
       if (cached != null && cached.isSkippable && cached.isFresh && !forceMenuRefresh) {
+        if (cached.extraAddons.isNotEmpty) {
+          _extraAddonRawGroups = cached.extraAddons;
+          _extraAddonRestaurantId = restaurantId;
+        }
         _applyCatalogExtras(
           taxRows: cached.taxRows,
           variantMaps: cached.variants,
@@ -802,6 +825,7 @@ class PosProvider with ChangeNotifier {
           _bestEffortTax(),
           _bestEffortVariantCatalog(),
           _bestEffortKitchenDepartments(),
+          _bestEffortExtraAddons(),
         ]);
         _tableDetails = results[0] as Map<String, dynamic>?;
         final catMaps = results[1] as List<Map<String, dynamic>>;
@@ -811,11 +835,16 @@ class PosProvider with ChangeNotifier {
         final taxRows = results[3] as List<Map<String, dynamic>>;
         final variantMaps = results[4] as List<Map<String, dynamic>>;
         final deptMaps = results[5] as List<Map<String, dynamic>>;
+        final extraAddonMaps = results[6] as List<Map<String, dynamic>>;
         _applyCatalogExtras(
           taxRows: taxRows,
           variantMaps: variantMaps,
           deptMaps: deptMaps,
         );
+        if (extraAddonMaps.isNotEmpty) {
+          _extraAddonRawGroups = extraAddonMaps;
+          _extraAddonRestaurantId = restaurantId;
+        }
 
         await _menuCache.save(
           restaurantId: restaurantId,
@@ -824,6 +853,7 @@ class PosProvider with ChangeNotifier {
           taxRows: taxRows,
           variants: variantMaps,
           departments: deptMaps,
+          extraAddons: extraAddonMaps,
         );
         _menuCachedAt = DateTime.now();
         // Warm the enriched item cache for customizable items (variants & add-ons)
@@ -939,6 +969,13 @@ class PosProvider with ChangeNotifier {
 
     _allItems = enrichedList;
     _menuCachedAt = cached.savedAt;
+    if (cached.extraAddons.isNotEmpty) {
+      _extraAddonRawGroups = cached.extraAddons;
+      _extraAddonRestaurantId = _restaurantId;
+    } else {
+      _extraAddonRawGroups = null;
+      _extraAddonRestaurantId = null;
+    }
     _applyCatalogExtras(
       taxRows: cached.taxRows,
       variantMaps: cached.variants,
@@ -1031,6 +1068,17 @@ class PosProvider with ChangeNotifier {
   Future<List<Map<String, dynamic>>> _bestEffortKitchenDepartments() async {
     try {
       return await _apiService.getKitchenDepartments();
+    } on ApiException catch (e) {
+      if (e.isAuth) rethrow;
+      return const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _bestEffortExtraAddons() async {
+    try {
+      return await _apiService.getAllAvailableAddons();
     } on ApiException catch (e) {
       if (e.isAuth) rethrow;
       return const [];
@@ -1511,6 +1559,9 @@ class PosProvider with ChangeNotifier {
       _taxConfig = [];
       _consolidatedTax = null;
       _draft = null;
+      _extraAddonRawGroups = null;
+      _extraAddonRestaurantId = null;
+      _enrichedItemMemoryCache.clear();
     }
     final draftTables = (await _drafts.all(rid)).map((d) => d.tableId).toList();
     DraftCartStore.pendingTables.value = draftTables.length;
