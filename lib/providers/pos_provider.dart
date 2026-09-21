@@ -672,14 +672,17 @@ class PosProvider with ChangeNotifier {
       if (addonId.isEmpty) continue;
       final cat = catalogById[addonId];
       if (cat == null) continue;
-      final values = cat['value'];
+      final values = cat['value'] ??
+          cat['values'] ??
+          cat['addon_values'] ??
+          cat['addonValues'];
       if (values is! List) continue;
       final groupName =
           (cat['displayname'] ?? cat['name'] ?? cat['title'] ?? '').toString();
       for (final v in values) {
         if (v is! Map) continue;
-        final status = v['status'];
-        if (status != 1 && status != '1') continue;
+        final status = v['status'] ?? v['active'];
+        if (status != null && status != 1 && status != '1' && status != true && status != 'true') continue;
         final valMap = Map<String, dynamic>.from(v);
         out.add(
           MenuAddon.fromJson({
@@ -688,7 +691,9 @@ class PosProvider with ChangeNotifier {
             'group_name': groupName,
             'valuename': valMap['valuename'] ??
                 valMap['value_name'] ??
+                valMap['option_name'] ??
                 valMap['name'] ??
+                valMap['title'] ??
                 valMap['displayname'],
           }),
         );
