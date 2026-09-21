@@ -496,19 +496,7 @@ class PosProvider with ChangeNotifier {
       }
 
       // Fallback offline: build joined item from current _allItems & catalog
-      var fallbackVariants = _joinVariantNames(item.variants);
-      if (fallbackVariants.isEmpty &&
-          (item.customisable || item.hasVariants) &&
-          _variantNameById.isNotEmpty) {
-        fallbackVariants = [
-          for (final entry in _variantNameById.entries)
-            MenuVariant(
-              id: entry.key,
-              name: entry.value,
-              price: item.price,
-            ),
-        ];
-      }
+      final fallbackVariants = _joinVariantNames(item.variants);
       final fallbackAddons = _expandAddonsFromCatalog({}, item.addons);
       final fallbackItem = MenuItem(
         id: item.id,
@@ -523,7 +511,7 @@ class PosProvider with ChangeNotifier {
         image: item.image,
         variants: fallbackVariants,
         addons: fallbackAddons,
-        customisable: item.customisable || fallbackVariants.isNotEmpty,
+        customisable: item.customisable || fallbackVariants.isNotEmpty || fallbackAddons.isNotEmpty,
         isFavorite: item.isFavorite,
       );
       _enrichedItemMemoryCache[item.id] = fallbackItem;
@@ -651,13 +639,36 @@ class PosProvider with ChangeNotifier {
       if (id.isNotEmpty) catalogById[id] = g;
     }
 
-    final stubList = raw['addOns'] ?? raw['addons'];
-    if (stubList is! List) return alreadyParsed;
+    final stubList = <dynamic>[];
+    for (final key in [
+      'addons',
+      'addOns',
+      'addon',
+      'addonData',
+      'addon_data',
+      'addon_ids',
+      'addon_groups',
+      'addonGroups',
+      'customisation',
+      'customisations',
+      'customization',
+      'customizations',
+      'item_addons',
+    ]) {
+      if (raw[key] is List) {
+        stubList.addAll(raw[key] as List);
+      }
+    }
+
+    if (stubList.isEmpty) return alreadyParsed;
 
     final out = <MenuAddon>[];
     for (final entry in stubList) {
       if (entry is! Map) continue;
-      final addonId = entry['addon_id']?.toString() ?? '';
+      final addonId = entry['addon_id']?.toString() ??
+          entry['_id']?.toString() ??
+          entry['id']?.toString() ??
+          '';
       if (addonId.isEmpty) continue;
       final cat = catalogById[addonId];
       if (cat == null) continue;
@@ -889,7 +900,7 @@ class PosProvider with ChangeNotifier {
   /// Background warming of item variant/addon details for offline support.
   Future<void> _warmCustomisableItemsCache(List<MenuItem> items) async {
     final customisableItems =
-        items.where((i) => i.customisable || i.hasVariants).toList();
+        items.where((i) => i.needsCustomisation).toList();
     for (final item in customisableItems) {
       if (item.id.isEmpty) continue;
       try {
@@ -926,44 +937,6 @@ class PosProvider with ChangeNotifier {
         }
       }
 
-      // If item is customizable but variants array is still empty, populate from catalog variants
-      if (workingItem.variants.isEmpty &&
-          (workingItem.customisable || workingItem.hasVariants) &&
-          cached.variants.isNotEmpty) {
-        final catalogVariants = <MenuVariant>[];
-        for (final vMap in cached.variants) {
-          final vid = (vMap['_id'] ?? vMap['id'] ?? vMap['variant_id'])?.toString() ?? '';
-          if (vid.isEmpty) continue;
-          final vName = (vMap['name'] ?? vMap['valuename'] ?? vMap['displayname'] ?? vMap['variant_name'])?.toString().trim() ?? '';
-          final vPrice = double.tryParse((vMap['price'] ?? vMap['variant_price'] ?? '0').toString()) ?? workingItem.price;
-          catalogVariants.add(MenuVariant(
-            id: vid,
-            name: vName.isNotEmpty ? vName : 'Option',
-            price: vPrice > 0 ? vPrice : workingItem.price,
-          ));
-        }
-        if (catalogVariants.isNotEmpty) {
-          workingItem = MenuItem(
-            id: workingItem.id,
-            categoryId: workingItem.categoryId,
-            categoryNames: workingItem.categoryNames,
-            categoryIds: workingItem.categoryIds,
-            name: workingItem.name,
-            displayName: workingItem.displayName,
-            shortCode: workingItem.shortCode,
-            attribute: workingItem.attribute,
-            price: workingItem.price,
-            image: workingItem.image,
-            variants: catalogVariants,
-            addons: workingItem.addons,
-            customisable: true,
-            isFavorite: workingItem.isFavorite,
-            isExtraAddon: workingItem.isExtraAddon,
-            isCustomAddonTrigger: workingItem.isCustomAddonTrigger,
-            departments: workingItem.departments,
-          );
-        }
-      }
       enrichedList.add(workingItem);
     }
 
