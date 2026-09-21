@@ -114,6 +114,10 @@ class ApiConfig {
   /// Staff accept/reject first QR dine-in order awaiting approval.
   static String qrApproval = '/restaurant/cart/qr-approval';
 
+  // Orders (settled) — for transaction reports / CSV export
+  static String orderList = '/restaurant/order';
+  static String orderView = '/restaurant/order/vieworder';
+
   static Map<String, String> headers(
     String? token,
     String? restaurantId, {

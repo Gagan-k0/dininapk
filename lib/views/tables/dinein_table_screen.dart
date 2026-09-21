@@ -11,6 +11,7 @@ import '../../widgets/subscription_banner.dart';
 import '../../widgets/sync_status_chip.dart';
 import '../../services/connectivity_service.dart';
 import '../../utils/async_guard.dart';
+import '../reports/transaction_report_screen.dart';
 
 class DineInTableScreen extends StatefulWidget {
   const DineInTableScreen({super.key});
@@ -69,6 +70,21 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
         ),
         actions: [
           const SyncStatusChip(),
+          IconButton(
+            icon: const Icon(Icons.assessment_rounded, color: Color(0xFFF97316)),
+            tooltip: 'Transaction Report',
+            onPressed: () {
+              final pos = Provider.of<PosProvider>(context, listen: false);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => TransactionReportScreen(
+                    posProvider: pos,
+                  ),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: Color(0xFF64748B)),
             onPressed: () => tableProv.loadDashboardData(),
@@ -144,6 +160,22 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
                 messenger.showSnackBar(
                   const SnackBar(
                     content: Text('Open a table from the floor to take orders'),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.assessment_rounded, color: Color(0xFFF97316)),
+              title: const Text('Transaction Report'),
+              onTap: () {
+                Navigator.pop(context);
+                final pos = Provider.of<PosProvider>(context, listen: false);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => TransactionReportScreen(
+                      posProvider: pos,
+                    ),
                   ),
                 );
               },

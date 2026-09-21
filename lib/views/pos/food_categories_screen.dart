@@ -1565,6 +1565,36 @@ class _CartBottomSheet extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (items.any((i) => i['is_draft'] == true))
+                  IconButton(
+                    icon: pos.isBusy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFFF97316),
+                            ),
+                          )
+                        : const Icon(Icons.sync, color: Color(0xFFF97316)),
+                    tooltip: 'Sync items to server (no print)',
+                    onPressed: pos.isBusy
+                        ? null
+                        : () async {
+                            final success = await pos.flushDraft();
+                            if (!context.mounted) return;
+                            final Color bg;
+                            final String msg;
+                            if (!success) {
+                              bg = const Color(0xFFDC2626);
+                              msg = pos.errorMessage ?? 'Sync failed';
+                            } else {
+                              bg = const Color(0xFF16A34A);
+                              msg = 'Synced ✓';
+                            }
+                            showPosToast(context, msg, backgroundColor: bg);
+                          },
+                  ),
                 if (onToggleCollapsed != null)
                   IconButton(
                     tooltip: 'Collapse cart',
