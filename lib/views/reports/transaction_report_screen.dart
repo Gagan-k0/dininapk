@@ -2,11 +2,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../providers/pos_provider.dart';
 import '../../services/auth_service.dart';
 import '../../services/csv_export_service.dart';
 import '../../services/draft_cart_store.dart';
+import 'csv_preview_screen.dart';
 
 /// Transaction report screen — fetches settled orders from the server AND
 /// offline settlements from the draft store, showing summary cards and an
@@ -203,19 +205,14 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
     }
     setState(() => _exporting = true);
     try {
-      final csv = CsvExportService.buildCsv(_orders);
-      final file = await CsvExportService.saveCsv(csv);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('CSV saved to ${_shortPath(file)}'),
-          duration: const Duration(seconds: 4),
-          action: SnackBarAction(
-            label: 'OK',
-            onPressed: () {},
-          ),
-        ),
+      final rows = CsvExportService.buildRows(_orders);
+      final file = await CsvExportService.saveCsv(
+        CsvExportService.encode(rows),
+        from: _from,
+        to: _to,
       );
+      if (!mounted) return;
+      await _showSaved(file, rows);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -226,10 +223,71 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
     }
   }
 
-  static String _shortPath(File f) {
-    final p = f.path;
-    final idx = p.indexOf('Download');
-    return idx >= 0 ? p.substring(idx) : p;
+  /// Says exactly where the file is — the folder the waiter opens in the
+  /// Files app and the file name — and offers to view or share it (Share is
+  /// also how it is sent to WhatsApp / email / Drive or saved elsewhere).
+  Future<void> _showSaved(File file, List<List<String>> rows) {
+    final name = file.uri.pathSegments.last;
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Color(0xFF16A34A)),
+            SizedBox(width: 8),
+            Text('CSV saved'),
+          ],
+        ),
+        content: SelectableText.rich(
+          TextSpan(
+            style: const TextStyle(fontSize: 13, height: 1.4),
+            children: [
+              const TextSpan(text: 'Folder\n', style: TextStyle(color: Colors.grey)),
+              TextSpan(
+                text: '${CsvExportService.folder}\n\n',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const TextSpan(text: 'File\n', style: TextStyle(color: Colors.grey)),
+              TextSpan(
+                text: '$name\n\n',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              TextSpan(
+                text: 'Find it in the Files app under '
+                    '${CsvExportService.folder.replaceAll('/', ' › ')}.',
+                style: TextStyle(color: Colors.grey.shade700),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          TextButton.icon(
+            icon: const Icon(Icons.table_view, size: 18),
+            label: const Text('View'),
+            onPressed: () => Navigator.push(
+              ctx,
+              MaterialPageRoute(
+                builder: (_) => CsvPreviewScreen(fileName: name, rows: rows),
+              ),
+            ),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.share, size: 18),
+            label: const Text('Share'),
+            onPressed: () => SharePlus.instance.share(
+              ShareParams(
+                files: [XFile(file.path, mimeType: 'text/csv')],
+                subject: name,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ── date range presets ──────────────────────────────────────

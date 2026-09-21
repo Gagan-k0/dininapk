@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show DateUtils, debugPrint;
 import 'package:intl/intl.dart';
 
 /// Generates a CSV file from settled order data and saves it to the device.
@@ -15,10 +15,19 @@ class CsvExportService {
   /// Build a CSV string from [orders] (the raw JSON maps returned by
   /// `GET /restaurant/order`).  Each **line item** inside an order becomes
   /// its own row so the user can sort/filter in a spreadsheet.
-  static String buildCsv(List<Map<String, dynamic>> orders) {
-    final buf = StringBuffer();
+  static String buildCsv(List<Map<String, dynamic>> orders) =>
+      encode(buildRows(orders));
+
+  /// [rows] as RFC 4180 CSV text.
+  static String encode(List<List<String>> rows) =>
+      '${rows.map(_row).join('\n')}\n';
+
+  /// The same table as [buildCsv], unescaped — header first. The in-app
+  /// viewer shows exactly what the file holds without re-parsing it.
+  static List<List<String>> buildRows(List<Map<String, dynamic>> orders) {
+    final rows = <List<String>>[];
     // Header
-    buf.writeln(_row([
+    rows.add([
       'Order Date',
       'Order Time',
       'Bill No.',
@@ -35,7 +44,7 @@ class CsvExportService {
       'Grand Total',
       'Payment',
       'Sync Status',
-    ]));
+    ]);
 
     for (final o in orders) {
       final dt = _parseDate(o['createdAt'] ?? o['created_at']);
@@ -61,7 +70,7 @@ class CsvExportService {
       final lines = _extractLines(o);
       if (lines.isEmpty) {
         // Order with no line-item detail — still emit a summary row.
-        buf.writeln(_row([
+        rows.add([
           date,
           time,
           billNo,
@@ -78,10 +87,10 @@ class CsvExportService {
           grand,
           payment,
           sync,
-        ]));
+        ]);
       } else {
         for (final l in lines) {
-          buf.writeln(_row([
+          rows.add([
             date,
             time,
             billNo,
@@ -98,36 +107,42 @@ class CsvExportService {
             grand,
             payment,
             sync,
-          ]));
+          ]);
         }
       }
     }
-    return buf.toString();
+    return rows;
   }
 
-  /// Write [csv] to the device's Downloads folder and return the [File].
-  ///
-  /// On Android 10+ (API 29+) the app-specific external directory is
-  /// world-readable so a file manager can find it.  For older devices the
-  /// same path works without needing WRITE_EXTERNAL_STORAGE because
-  /// `getExternalStorageDirectory()` is scoped.
-  static Future<File> saveCsv(String csv, {String? fileName}) async {
-    final name = fileName ??
-        'fatfox_transactions_${DateFormat('yyyy-MM-dd_HHmm').format(DateTime.now())}.csv';
+  /// Where reports are saved, relative to shared storage — also what the
+  /// waiter is told to look for in the Files app.
+  static const String folder = 'Download/FatFox/Transactions';
 
-    // Try the shared Downloads folder first (visible in file managers).
-    final downloadsDir = Directory('/storage/emulated/0/Download');
-    final dir = await downloadsDir.exists()
-        ? downloadsDir
-        : Directory('/storage/emulated/0/Documents');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-
-    final file = File('${dir.path}/$name');
+  /// Writes [csv] to [folder] and returns the file. The name carries the
+  /// report's date range and the save time, e.g.
+  /// `FatFox_Transactions_21-Sep-2026_to_22-Sep-2026_saved_17-43-05.csv`
+  /// (one date when the range is a single day), so reports sort and are
+  /// found by the day they cover, and a second save never overwrites one.
+  static Future<File> saveCsv(
+    String csv, {
+    required DateTime from,
+    required DateTime to,
+  }) async {
+    final dir = Directory('/storage/emulated/0/$folder');
+    await dir.create(recursive: true);
+    final file = File('${dir.path}/${fileName(from, to, DateTime.now())}');
     await file.writeAsString(csv, flush: true);
     debugPrint('[Fatfox CSV] Saved ${file.path} (${csv.length} bytes)');
     return file;
+  }
+
+  static String fileName(DateTime from, DateTime to, DateTime savedAt) {
+    final day = DateFormat('dd-MMM-yyyy');
+    final range = DateUtils.isSameDay(from, to)
+        ? day.format(from)
+        : '${day.format(from)}_to_${day.format(to)}';
+    return 'FatFox_Transactions_${range}_saved_'
+        '${DateFormat('HH-mm-ss').format(savedAt)}.csv';
   }
 
   // ── CSV escaping ────────────────────────────────────────────

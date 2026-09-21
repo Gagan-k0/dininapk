@@ -155,4 +155,16 @@ void main() {
     expect(cells[11], '4.50');
     expect(cells.last.trim(), 'Online');
   });
+
+  test('file name carries the report range and save time', () {
+    final saved = DateTime(2026, 9, 21, 17, 43, 5);
+    expect(
+      CsvExportService.fileName(from, to, saved),
+      'FatFox_Transactions_21-Sep-2026_saved_17-43-05.csv',
+    );
+    expect(
+      CsvExportService.fileName(DateTime(2026, 9, 15), to, saved),
+      'FatFox_Transactions_15-Sep-2026_to_21-Sep-2026_saved_17-43-05.csv',
+    );
+  });
 }
