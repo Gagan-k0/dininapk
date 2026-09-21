@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../../providers/pos_provider.dart';
 import '../../services/auth_service.dart';
 import '../../services/csv_export_service.dart';
+import '../../services/draft_cart_store.dart';
 
 /// Transaction report screen — fetches settled orders from the server AND
 /// offline settlements from the draft store, showing summary cards and an
@@ -18,6 +19,98 @@ class TransactionReportScreen extends StatefulWidget {
   @override
   State<TransactionReportScreen> createState() =>
       _TransactionReportScreenState();
+
+  /// [online] is null when the server could not be reached. It may span more
+  /// than [from]..[to] (the server's day filter is UTC), so it is trimmed to
+  /// the local range here, like the offline bills. A synced offline bill is
+  /// hidden only when its server order is actually in the list.
+  @visibleForTesting
+  static List<Map<String, dynamic>> mergeOrders({
+    required List<Map<String, dynamic>>? online,
+    required List<OfflineSettlement> settlements,
+    required DateTime from,
+    required DateTime to,
+  }) {
+    bool inRange(DateTime t) => !t.isBefore(from) && !t.isAfter(to);
+    final kept = [
+      for (final o in online ?? const <Map<String, dynamic>>[])
+        if (inRange(_dateOf(o).toLocal())) o,
+    ];
+    final ids = <String>{
+      for (final o in kept) ...[
+        if (o['_id'] != null) o['_id'].toString(),
+        if (o['order_no'] != null) o['order_no'].toString(),
+      ],
+    };
+    final all = <Map<String, dynamic>>[...kept];
+    for (final s in settlements) {
+      if (!inRange(s.capturedAt)) continue;
+      final onServer = s.synced &&
+          (ids.contains(s.orderId) || ids.contains(s.orderNo));
+      if (!onServer) all.add(offlineRow(s));
+    }
+    all.sort((a, b) => _dateOf(b).compareTo(_dateOf(a)));
+    return all;
+  }
+
+  static DateTime _dateOf(Map<String, dynamic> o) =>
+      DateTime.tryParse((o['createdAt'] ?? o['created_at'] ?? '').toString()) ??
+      DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// An offline settlement in the `GET /restaurant/order` row shape.
+  ///
+  /// Its draft holds only the items the server had not received, and the
+  /// sync drains it, so the lines are the whole bill only while the sitting
+  /// never had a server cart and was never tried. Otherwise subtotal is left
+  /// unset rather than guessed. Tax is never derived: the printed total also
+  /// carries container charges and round-off.
+  @visibleForTesting
+  static Map<String, dynamic> offlineRow(OfflineSettlement s) {
+    final draft = s.draft;
+    final complete = draft != null &&
+        !s.synced &&
+        s.cartId == null &&
+        s.lastTriedAt == null;
+    final lines = [
+      for (final l in draft?.printedLines ?? const <DraftLine>[])
+        l.toCartLineMap(printed: true),
+      for (final l in draft?.unprintedLines ?? const <DraftLine>[])
+        l.toCartLineMap(),
+    ];
+    return {
+      'createdAt': s.capturedAt.toIso8601String(),
+      'order_no': s.billNumber ?? s.orderNo ?? '',
+      'table_number': s.tableNumber,
+      if (complete) 'food_subtotal': draft.subtotal,
+      'total_price': s.printedTotal,
+      'payment_type': s.paymentType,
+      'cartMenuData': lines,
+      '_isOffline': true,
+      // Rung up at the till as its own order: listed, never counted twice.
+      if (s.acknowledged) '_reconciled': true,
+      '_syncStatus': _syncStatus(s, partialLines: !complete && lines.isNotEmpty),
+    };
+  }
+
+  static String _syncStatus(OfflineSettlement s, {required bool partialLines}) {
+    final String status;
+    if (s.acknowledged) {
+      status = 'Offline - reconciled at till';
+    } else if (s.synced) {
+      status = [
+        'Offline - synced as ${s.orderNo ?? s.orderId ?? '?'}',
+        if (s.mismatched)
+          'server total ${s.serverTotal!.toStringAsFixed(2)}',
+      ].join('; ');
+    } else if (s.conflict || s.lastError != null) {
+      status = 'Offline - needs attention: ${s.stuckReason}';
+    } else {
+      status = 'Offline - pending sync';
+    }
+    return partialLines
+        ? '$status; items listed are only those not yet on the server'
+        : status;
+  }
 }
 
 class _TransactionReportScreenState extends State<TransactionReportScreen> {
@@ -25,6 +118,10 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
   List<Map<String, dynamic>> _orders = [];
   bool _loading = true;
   String? _error;
+  // A source that failed while the other still has rows — shown as a banner.
+  String? _onlineError;
+  // Only the latest fetch may paint; an older, slower one is dropped.
+  int _fetchSeq = 0;
   bool _exporting = false;
 
   // Date filter — defaults to today.
@@ -43,77 +140,56 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
 
   // ── data ────────────────────────────────────────────────────
 
+  /// Server orders and this tablet's offline settlements, fetched apart: a
+  /// failed server call must never hide the bills saved on the device —
+  /// offline they are the only record, and the CSV is how staff reconcile.
   Future<void> _fetchOrders() async {
+    final seq = ++_fetchSeq;
     setState(() {
       _loading = true;
       _error = null;
+      _onlineError = null;
     });
+    // The server's days are UTC: ask one day wider each side and trim to the
+    // local range in mergeOrders.
+    final fmt = DateFormat('yyyy-MM-dd');
+    List<Map<String, dynamic>>? online;
+    String? onlineError;
     try {
-      final fmt = DateFormat('yyyy-MM-dd');
-      final onlineOrders = await widget.posProvider.apiService.getOrders(
-        from: fmt.format(_from),
-        to: fmt.format(_to),
+      online = await widget.posProvider.apiService.getOrders(
+        from: fmt.format(_from.subtract(const Duration(days: 1))),
+        to: fmt.format(_to.add(const Duration(days: 1))),
       );
-      
-      // Fetch offline settlements and convert them into the identical map schema
-      // so they merge seamlessly into the UI and the CSV export.
-      final auth = AuthService();
-      final rid = await auth.getRestaurantId();
-      final List<Map<String, dynamic>> allOrders = List.from(onlineOrders);
-      
-      if (rid != null) {
-        final offlineSettlements = await widget.posProvider.drafts.allSettlements(rid);
-        // Filter by date range (from _from to _to inclusive)
-        final fromStart = DateTime(_from.year, _from.month, _from.day);
-        final toEnd = DateTime(_to.year, _to.month, _to.day, 23, 59, 59);
-
-        for (final settlement in offlineSettlements) {
-          if (settlement.capturedAt.isBefore(fromStart) ||
-              settlement.capturedAt.isAfter(toEnd)) {
-            continue;
-          }
-          
-          final draft = settlement.draft;
-          final lines = <Map<String, dynamic>>[];
-          if (draft != null) {
-            lines.addAll(draft.printedLines.map((l) => l.toCartLineMap(printed: true)));
-            lines.addAll(draft.unprintedLines.map((l) => l.toCartLineMap(printed: false)));
-          }
-
-          allOrders.add({
-            'createdAt': settlement.capturedAt.toIso8601String(),
-            'order_no': settlement.billNumber ?? settlement.orderNo ?? '',
-            'table_number': settlement.tableNumber,
-            'food_subtotal': draft?.subtotal ?? 0.0,
-            'tax_price': (settlement.printedTotal) - (draft?.subtotal ?? 0.0),
-            'discount_price': 0.0,
-            'total_price': settlement.printedTotal,
-            'payment_type': settlement.paymentType,
-            'cartMenuData': lines,
-            '_isOffline': true,
-          });
-        }
-      }
-
-      // Sort combined orders by date descending
-      allOrders.sort((a, b) {
-        final da = DateTime.tryParse(a['createdAt'] ?? a['created_at'] ?? '') ?? DateTime.now();
-        final db = DateTime.tryParse(b['createdAt'] ?? b['created_at'] ?? '') ?? DateTime.now();
-        return db.compareTo(da);
-      });
-
-      if (!mounted) return;
-      setState(() {
-        _orders = allOrders;
-        _loading = false;
-      });
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString().replaceAll('Exception: ', '');
-        _loading = false;
-      });
+      onlineError = 'Server orders not loaded - showing bills saved on this '
+          'tablet. ${e.toString().replaceAll('Exception: ', '')}';
     }
+
+    var settlements = const <OfflineSettlement>[];
+    try {
+      final rid = await AuthService().getRestaurantId() ?? '';
+      settlements = await widget.posProvider.drafts.allSettlements(rid);
+    } catch (e) {
+      onlineError = [
+        ?onlineError,
+        'Bills saved on this tablet could not be read: $e',
+      ].join('\n');
+    }
+
+    final all = TransactionReportScreen.mergeOrders(
+      online: online,
+      settlements: settlements,
+      from: DateTime(_from.year, _from.month, _from.day),
+      to: DateTime(_to.year, _to.month, _to.day, 23, 59, 59),
+    );
+    if (!mounted || seq != _fetchSeq) return;
+    setState(() {
+      _orders = all;
+      // Only a full-screen error when there is nothing at all to show.
+      _error = all.isEmpty ? onlineError : null;
+      _onlineError = all.isEmpty ? null : onlineError;
+      _loading = false;
+    });
   }
 
   // ── CSV export ──────────────────────────────────────────────
@@ -222,11 +298,13 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
 
   // ── summary computation ─────────────────────────────────────
 
-  int get _totalOrders => _orders.length;
+  // Bills reconciled at the till are listed but counted by their till order.
+  int get _totalOrders => _orders.where((o) => o['_reconciled'] != true).length;
 
   double get _totalRevenue {
     var sum = 0.0;
     for (final o in _orders) {
+      if (o['_reconciled'] == true) continue;
       sum += _num(o['total_price']);
     }
     return sum;
@@ -279,6 +357,24 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
           _buildDateBar(),
           // Summary cards
           _buildSummaryCards(),
+          if (_onlineError != null)
+            Container(
+              width: double.infinity,
+              color: Colors.orange.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.cloud_off, size: 16, color: Colors.orange.shade800),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _onlineError!,
+                      style: TextStyle(fontSize: 12, color: Colors.orange.shade900),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           // Order list
           Expanded(child: _buildBody()),
         ],
@@ -467,7 +563,7 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
 
   Widget _orderTile(Map<String, dynamic> o) {
     final dt = DateTime.tryParse(
-        (o['createdAt'] ?? o['created_at'] ?? '').toString());
+        (o['createdAt'] ?? o['created_at'] ?? '').toString())?.toLocal();
     final time = dt != null ? DateFormat('HH:mm').format(dt) : '';
     final table =
         (o['table_number'] ?? o['table_no'] ?? o['table_name'] ?? '')

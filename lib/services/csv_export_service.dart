@@ -34,6 +34,7 @@ class CsvExportService {
       'Discount',
       'Grand Total',
       'Payment',
+      'Sync Status',
     ]));
 
     for (final o in orders) {
@@ -47,10 +48,13 @@ class CsvExportService {
               o['table_name'] ??
               '')
           .toString();
-      final subtotal = _num(o['food_subtotal']);
-      final tax = _num(o['tax_price']);
-      final discount = _num(o['discount_price']);
-      final grand = _num(o['total_price']);
+      // The order list projects `menu_total`, not `food_subtotal`. An amount
+      // the row does not carry stays blank rather than reading as 0.00.
+      final subtotal = _cell(o['food_subtotal'] ?? o['menu_total']);
+      final tax = _cell(o['tax_price']);
+      final discount = _cell(o['discount_price']);
+      final grand = _money(_num(o['total_price']));
+      final sync = (o['_syncStatus'] ?? 'Online').toString();
       final payment =
           (o['payment_type'] ?? o['paymentType'] ?? '').toString();
 
@@ -68,11 +72,12 @@ class CsvExportService {
           '',
           '',
           '',
-          _money(subtotal),
-          _money(tax),
-          _money(discount),
-          _money(grand),
+          subtotal,
+          tax,
+          discount,
+          grand,
           payment,
+          sync,
         ]));
       } else {
         for (final l in lines) {
@@ -87,11 +92,12 @@ class CsvExportService {
             l.qty.toString(),
             _money(l.unitPrice),
             _money(l.lineTotal),
-            _money(subtotal),
-            _money(tax),
-            _money(discount),
-            _money(grand),
+            subtotal,
+            tax,
+            discount,
+            grand,
             payment,
+            sync,
           ]));
         }
       }
@@ -204,7 +210,7 @@ class CsvExportService {
         variant: variant,
         addons: addonBuf.join('; '),
         qty: int.tryParse(m['quantity']?.toString() ?? '1') ?? 1,
-        unitPrice: _num(m['menu_price']),
+        unitPrice: _num(m['menu_price'] ?? m['individual_price']),
         lineTotal: _num(m['price']),
       ));
     }
@@ -220,10 +226,13 @@ class CsvExportService {
 
   static String _money(double v) => v.toStringAsFixed(2);
 
+  static String _cell(dynamic v) => v == null ? '' : _money(_num(v));
+
   static DateTime? _parseDate(dynamic v) {
     if (v == null) return null;
-    if (v is DateTime) return v;
-    return DateTime.tryParse(v.toString());
+    // Server timestamps are UTC; the sheet shows the restaurant's local day.
+    if (v is DateTime) return v.toLocal();
+    return DateTime.tryParse(v.toString())?.toLocal();
   }
 }
 
