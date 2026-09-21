@@ -29,6 +29,7 @@ class MenuCacheService {
     List<Map<String, dynamic>> taxRows = const [],
     List<Map<String, dynamic>> variants = const [],
     List<Map<String, dynamic>> departments = const [],
+    List<Map<String, dynamic>> extraAddons = const [],
   }) async {
     if (restaurantId.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
@@ -51,6 +52,7 @@ class MenuCacheService {
         'tax': keep(taxRows, previous?.taxRows ?? const []),
         'variants': keep(variants, previous?.variants ?? const []),
         'departments': keep(departments, previous?.departments ?? const []),
+        'extraAddons': keep(extraAddons, previous?.extraAddons ?? const []),
       }),
     );
     // v1 held a full menu JSON per restaurant; nothing reads it now.
@@ -106,6 +108,7 @@ class MenuCacheService {
         taxRows: rows('tax'),
         variants: rows('variants'),
         departments: rows('departments'),
+        extraAddons: rows('extraAddons'),
         savedAt: atMs == null
             ? null
             : DateTime.fromMillisecondsSinceEpoch(atMs),
@@ -113,6 +116,39 @@ class MenuCacheService {
     } catch (_) {
       return null;
     }
+  }
+
+  static const _enrichedPrefix = 'waiter_dinein_enriched_v1_';
+
+  Future<void> saveEnrichedItem(
+    String restaurantId,
+    String itemId,
+    Map<String, dynamic> rawJson,
+  ) async {
+    if (restaurantId.isEmpty || itemId.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        '$_enrichedPrefix${restaurantId}_$itemId',
+        jsonEncode(rawJson),
+      );
+    } catch (_) {}
+  }
+
+  Future<Map<String, dynamic>?> loadEnrichedItem(
+    String restaurantId,
+    String itemId,
+  ) async {
+    if (restaurantId.isEmpty || itemId.isEmpty) return null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('$_enrichedPrefix${restaurantId}_$itemId');
+      if (raw == null) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
   }
 }
 
@@ -123,6 +159,7 @@ class CachedMenuSnapshot {
     this.taxRows = const [],
     this.variants = const [],
     this.departments = const [],
+    this.extraAddons = const [],
     this.savedAt,
   });
 
@@ -131,6 +168,7 @@ class CachedMenuSnapshot {
   final List<Map<String, dynamic>> taxRows;
   final List<Map<String, dynamic>> variants;
   final List<Map<String, dynamic>> departments;
+  final List<Map<String, dynamic>> extraAddons;
   final DateTime? savedAt;
 
   /// Young enough to open a table without re-fetching the catalog. A snapshot

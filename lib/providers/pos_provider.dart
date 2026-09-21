@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../models/table_model.dart';
@@ -68,6 +70,7 @@ class PosProvider with ChangeNotifier {
   List<MenuItem> _allItems = [];
   String? _selectedCategoryId; // null = 'ALL'; favorites/extra = sentinels
   List<Map<String, dynamic>>? _extraAddonRawGroups; // null = not loaded / failed
+  String? _extraAddonRestaurantId; // restaurant_id owner of _extraAddonRawGroups
   bool _extraAddonsLoading = false;
   Future<void>? _extraAddonsLoad;
   /// variant_id → display name from GET /restaurant/variant/all (admin join).
@@ -156,7 +159,13 @@ class PosProvider with ChangeNotifier {
     return dirty;
   }
 
-  void clearFloorDirty() => _floorDirty = false;
+  void clearFloorDirty() {
+    _floorDirty = false;
+    _extraAddonRawGroups = null;
+    _extraAddonRestaurantId = null;
+    _enrichedItemMemoryCache.clear();
+    _selectedCategoryId = null;
+  }
 
   String get tableNumber =>
       _tableDetails?['table_number']?.toString() ??
@@ -301,16 +310,23 @@ class PosProvider with ChangeNotifier {
 
   String get cartId => cart?['_id']?.toString() ?? '';
 
+  /// Whether the customer bill has been printed for this table (online status or offline pending ops).
+  bool get isBillPrinted {
+    final s = tableStatus;
+    if (s == 'PRINTED' || s == 'PAID') return true;
+    return _openDraft?.pendingOps.contains('PRINTED') ?? false;
+  }
+
   /// Phase 1 safety rule: Release only after the bill status is durable,
   /// unless device pref `kot_enable_release_table` matches admin exception.
   bool get canRelease {
     if (_cartStale) return false;
     if (cartId.isEmpty || cartMenuItems.isEmpty) return false;
     if (hasUnsentKotItems || hasUnprintedItems) return false;
-    final s = tableStatus;
-    if (s == 'PRINTED' || s == 'PAID') return true;
+    if (isBillPrinted) return true;
     final allowKotRelease = _receiptPrefs?.kotEnableReleaseTable ?? false;
     if (!allowKotRelease) return false;
+    final s = tableStatus;
     return s == 'KOT_PRINT' || s == 'KOT' || s == 'RUNNING';
   }
 
@@ -405,16 +421,124 @@ class PosProvider with ChangeNotifier {
   }
 
   /// Admin loads full variant/addon values via `viewMenubyId` when customisable.
+  final Map<String, MenuItem> _enrichedItemMemoryCache = {};
+
   /// getmenu returns `{ variant_id, price }` / `{ addon_id }` without names —
   /// join variant catalog + AllAvailableAddons like admin.
+  /// Works offline by serving disk-cached item details or catalog-joined stubs.
   Future<MenuItem?> enrichMenuItem(MenuItem item) async {
-    // Offline the list copy is all there is; don't wait out a timeout.
-    if (item.id.isEmpty || !ConnectivityService.instance.isOnline) return null;
+    if (item.id.isEmpty) return item;
+
+    // 1. Check in-memory cache first
+    if (_enrichedItemMemoryCache.containsKey(item.id)) {
+      return _enrichedItemMemoryCache[item.id];
+    }
+
+    // 2. Offline flow: check persistent disk cache or build catalog-joined item
+    if (!ConnectivityService.instance.isOnline) {
+      try {
+        final cachedRaw = await _menuCache.loadEnrichedItem(_restaurantId, item.id);
+        if (cachedRaw != null) {
+          final enriched = MenuItem.fromJson(cachedRaw);
+          final variants = _joinVariantNames(
+            enriched.variants.isNotEmpty ? enriched.variants : item.variants,
+          );
+          final addons = _expandAddonsFromCatalog(
+            cachedRaw,
+            enriched.addons.isNotEmpty ? enriched.addons : item.addons,
+          );
+          final result = MenuItem(
+            id: enriched.id.isNotEmpty ? enriched.id : item.id,
+            categoryId: enriched.categoryId.isNotEmpty
+                ? enriched.categoryId
+                : item.categoryId,
+            categoryNames: enriched.categoryNames.isNotEmpty
+                ? enriched.categoryNames
+                : item.categoryNames,
+            categoryIds: enriched.categoryIds.isNotEmpty
+                ? enriched.categoryIds
+                : item.categoryIds,
+            name: enriched.name,
+            displayName: enriched.displayName ?? item.displayName,
+            shortCode: enriched.shortCode ?? item.shortCode,
+            attribute: enriched.attribute,
+            price: enriched.price > 0 ? enriched.price : item.price,
+            image: enriched.image ?? item.image,
+            variants: variants,
+            addons: addons,
+            customisable: enriched.customisable || item.customisable,
+            isFavorite: enriched.isFavorite || item.isFavorite,
+          );
+          _enrichedItemMemoryCache[item.id] = result;
+          return result;
+        }
+      } catch (e) {
+        debugPrint('[Fatfox POS] Offline loadEnrichedItem error: $e');
+      }
+
+      // Fallback offline: build joined item from current _allItems & catalog
+      var fallbackVariants = _joinVariantNames(item.variants);
+      if (fallbackVariants.isEmpty &&
+          (item.customisable || item.hasVariants) &&
+          _variantNameById.isNotEmpty) {
+        fallbackVariants = [
+          for (final entry in _variantNameById.entries)
+            MenuVariant(
+              id: entry.key,
+              name: entry.value,
+              price: item.price,
+            ),
+        ];
+      }
+      final fallbackAddons = _expandAddonsFromCatalog({}, item.addons);
+      final fallbackItem = MenuItem(
+        id: item.id,
+        categoryId: item.categoryId,
+        categoryNames: item.categoryNames,
+        categoryIds: item.categoryIds,
+        name: item.name,
+        displayName: item.displayName,
+        shortCode: item.shortCode,
+        attribute: item.attribute,
+        price: item.price,
+        image: item.image,
+        variants: fallbackVariants,
+        addons: fallbackAddons,
+        customisable: item.customisable || fallbackVariants.isNotEmpty,
+        isFavorite: item.isFavorite,
+      );
+      _enrichedItemMemoryCache[item.id] = fallbackItem;
+      return fallbackItem;
+    }
+
+    // 3. Online flow: fetch fresh details from API and update disk/memory caches
     try {
       await _ensureVariantCatalog();
       await ensureExtraAddonsLoaded();
       final raw = await _apiService.getMenuById(item.id);
-      if (raw == null) return null;
+      if (raw == null) {
+        final fallback = MenuItem(
+          id: item.id,
+          categoryId: item.categoryId,
+          categoryNames: item.categoryNames,
+          categoryIds: item.categoryIds,
+          name: item.name,
+          displayName: item.displayName,
+          shortCode: item.shortCode,
+          attribute: item.attribute,
+          price: item.price,
+          image: item.image,
+          variants: _joinVariantNames(item.variants),
+          addons: _expandAddonsFromCatalog({}, item.addons),
+          customisable: item.customisable,
+          isFavorite: item.isFavorite,
+        );
+        return fallback;
+      }
+
+      // Persist raw detail to disk cache for future offline use
+      unawaited(_menuCache.saveEnrichedItem(_restaurantId, item.id, raw));
+
       final enriched = MenuItem.fromJson(raw);
       final variants = _joinVariantNames(
         enriched.variants.isNotEmpty ? enriched.variants : item.variants,
@@ -423,8 +547,7 @@ class PosProvider with ChangeNotifier {
         raw,
         enriched.addons.isNotEmpty ? enriched.addons : item.addons,
       );
-      // Keep list-derived category names (detail doc may omit nested category).
-      return MenuItem(
+      final result = MenuItem(
         id: enriched.id.isNotEmpty ? enriched.id : item.id,
         categoryId: enriched.categoryId.isNotEmpty
             ? enriched.categoryId
@@ -446,16 +569,48 @@ class PosProvider with ChangeNotifier {
         customisable: enriched.customisable || item.customisable,
         isFavorite: enriched.isFavorite || item.isFavorite,
       );
+      _enrichedItemMemoryCache[item.id] = result;
+      return result;
     } on ApiException catch (e) {
       if (e.isAuth) {
         _sessionExpired = true;
         _errorMessage = e.message;
         notifyListeners();
       }
-      return null;
+      return MenuItem(
+        id: item.id,
+        categoryId: item.categoryId,
+        categoryNames: item.categoryNames,
+        categoryIds: item.categoryIds,
+        name: item.name,
+        displayName: item.displayName,
+        shortCode: item.shortCode,
+        attribute: item.attribute,
+        price: item.price,
+        image: item.image,
+        variants: _joinVariantNames(item.variants),
+        addons: _expandAddonsFromCatalog({}, item.addons),
+        customisable: item.customisable,
+        isFavorite: item.isFavorite,
+      );
     } catch (e) {
       debugPrint('[Fatfox POS] enrichMenuItem failed: $e');
-      return null;
+      return MenuItem(
+        id: item.id,
+        categoryId: item.categoryId,
+        categoryNames: item.categoryNames,
+        categoryIds: item.categoryIds,
+        name: item.name,
+        displayName: item.displayName,
+        shortCode: item.shortCode,
+        attribute: item.attribute,
+        price: item.price,
+        image: item.image,
+        variants: _joinVariantNames(item.variants),
+        addons: _expandAddonsFromCatalog({}, item.addons),
+        customisable: item.customisable,
+        isFavorite: item.isFavorite,
+      );
     }
   }
 
@@ -671,6 +826,8 @@ class PosProvider with ChangeNotifier {
           departments: deptMaps,
         );
         _menuCachedAt = DateTime.now();
+        // Warm the enriched item cache for customizable items (variants & add-ons)
+        unawaited(_warmCustomisableItemsCache(_allItems));
       }
 
       if (_tableDetails == null ||
@@ -699,6 +856,25 @@ class PosProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Background warming of item variant/addon details for offline support.
+  Future<void> _warmCustomisableItemsCache(List<MenuItem> items) async {
+    final customisableItems =
+        items.where((i) => i.customisable || i.hasVariants).toList();
+    for (final item in customisableItems) {
+      if (item.id.isEmpty) continue;
+      try {
+        final raw = await _apiService.getMenuById(item.id);
+        if (raw != null) {
+          await _menuCache.saveEnrichedItem(_restaurantId, item.id, raw);
+          final enriched = MenuItem.fromJson(raw);
+          _enrichedItemMemoryCache[item.id] = enriched;
+        }
+      } catch (e) {
+        debugPrint('[Fatfox POS] Warm cache failed for item ${item.id}: $e');
+      }
+    }
+  }
+
   /// No server: open the table from the cached menu and the last cart this
   /// tablet saw, so the waiter can keep adding items. False when there is no
   /// cached menu to show.
@@ -706,7 +882,62 @@ class PosProvider with ChangeNotifier {
     if (cached == null || !cached.hasCatalog) return false;
     // A cold start has nothing in memory yet.
     _categories = cached.categories;
-    _allItems = cached.items;
+
+    // Load full enriched variant/addon details from disk cache if available
+    final enrichedList = <MenuItem>[];
+    for (final item in cached.items) {
+      var workingItem = item;
+      if (item.id.isNotEmpty &&
+          (item.customisable || item.hasVariants || item.variants.isEmpty)) {
+        final cachedRaw =
+            await _menuCache.loadEnrichedItem(_restaurantId, item.id);
+        if (cachedRaw != null) {
+          workingItem = MenuItem.fromJson(cachedRaw);
+        }
+      }
+
+      // If item is customizable but variants array is still empty, populate from catalog variants
+      if (workingItem.variants.isEmpty &&
+          (workingItem.customisable || workingItem.hasVariants) &&
+          cached.variants.isNotEmpty) {
+        final catalogVariants = <MenuVariant>[];
+        for (final vMap in cached.variants) {
+          final vid = (vMap['_id'] ?? vMap['id'] ?? vMap['variant_id'])?.toString() ?? '';
+          if (vid.isEmpty) continue;
+          final vName = (vMap['name'] ?? vMap['valuename'] ?? vMap['displayname'] ?? vMap['variant_name'])?.toString().trim() ?? '';
+          final vPrice = double.tryParse((vMap['price'] ?? vMap['variant_price'] ?? '0').toString()) ?? workingItem.price;
+          catalogVariants.add(MenuVariant(
+            id: vid,
+            name: vName.isNotEmpty ? vName : 'Option',
+            price: vPrice > 0 ? vPrice : workingItem.price,
+          ));
+        }
+        if (catalogVariants.isNotEmpty) {
+          workingItem = MenuItem(
+            id: workingItem.id,
+            categoryId: workingItem.categoryId,
+            categoryNames: workingItem.categoryNames,
+            categoryIds: workingItem.categoryIds,
+            name: workingItem.name,
+            displayName: workingItem.displayName,
+            shortCode: workingItem.shortCode,
+            attribute: workingItem.attribute,
+            price: workingItem.price,
+            image: workingItem.image,
+            variants: catalogVariants,
+            addons: workingItem.addons,
+            customisable: true,
+            isFavorite: workingItem.isFavorite,
+            isExtraAddon: workingItem.isExtraAddon,
+            isCustomAddonTrigger: workingItem.isCustomAddonTrigger,
+            departments: workingItem.departments,
+          );
+        }
+      }
+      enrichedList.add(workingItem);
+    }
+
+    _allItems = enrichedList;
     _menuCachedAt = cached.savedAt;
     _applyCatalogExtras(
       taxRows: cached.taxRows,
@@ -1916,7 +2147,7 @@ class PosProvider with ChangeNotifier {
           variantMap?['name']?.toString() ??
           m['variant_name']?.toString();
       final addons = <MenuAddon>[];
-      final addonRaw = m['addon'] ?? m['addonData'];
+      final addonRaw = m['addon'] ?? m['addonData'] ?? m['addons'];
       if (addonRaw is List) {
         for (final a in addonRaw) {
           if (a is Map) {
@@ -2110,7 +2341,7 @@ class PosProvider with ChangeNotifier {
       if (_offlinePrint && _offlinePrintBlocked == _offlineCopyTooOld) {
         _errorMessage = _offlineCopyTooOld;
       }
-      return false;
+      return false; 
     }
     final tid = resolvedTableId;
     final cid = cartId;
@@ -2818,8 +3049,20 @@ class PosProvider with ChangeNotifier {
     printError = null;
     notifyListeners();
     try {
-      final failure = await _printBillOffline(tid, mode);
-      if (failure != null) return _sayNo(failure);
+      if (!isBillPrinted) {
+        final failure = await _printBillOffline(tid, mode);
+        if (failure != null) return _sayNo(failure);
+      } else if (_lastOfflineTotal <= 0) {
+        final area = await _offlineArea();
+        final totals = OfflinePricing.compute(
+          foodSubtotal: _offlineFoodSubtotal,
+          totalQuantity: totalItemCount,
+          taxRows: _taxConfig,
+          area: area,
+          containerPrice: containerCharge,
+        );
+        _lastOfflineTotal = totals.total;
+      }
       // Only after the paper is in the guest's hand: money taken is recorded,
       // and it takes this sitting's unsent items and print statuses with it.
       final sitting = _openDraft;

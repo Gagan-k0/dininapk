@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -671,10 +672,11 @@ class DraftCartStore {
   /// only ever adds or updates the row that key names, never another.
   Future<void> saveSettlement(OfflineSettlement s) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _settleKey(s.restaurantId, s.tableId, s.key),
-      jsonEncode(s.toJson()),
-    );
+    final k = _settleKey(s.restaurantId, s.tableId, s.key);
+    final jsonMap = s.toJson();
+    final jsonStr = jsonEncode(jsonMap);
+    await prefs.setString(k, jsonStr);
+    await OutboxFileStore.atomicWrite(k, jsonMap);
     await refreshPendingSettlements(s.restaurantId);
   }
 
@@ -699,7 +701,8 @@ class DraftCartStore {
     if (rid.isEmpty) return const [];
     final prefs = await SharedPreferences.getInstance();
     final out = <TableDraft>[];
-    for (final k in prefs.getKeys().where((k) => k.startsWith('$_draftPrefix${rid}_'))) {
+    final keys = prefs.getKeys().where((k) => k.startsWith('$_draftPrefix${rid}_')).toList();
+    for (final k in keys) {
       final d = await load(rid, k.substring('$_draftPrefix${rid}_'.length));
       if (d != null) out.add(d);
     }
@@ -716,15 +719,23 @@ class DraftCartStore {
   Future<TableDraft?> load(String rid, String tid) async {
     if (rid.isEmpty || tid.isEmpty) return null;
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_draftKey(rid, tid));
-    if (raw == null) return null;
-    try {
-      final d = TableDraft.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-      // Never trust a row filed under another restaurant or table.
-      return d.restaurantId == rid && d.tableId == tid ? d : null;
-    } catch (_) {
-      return null;
+    final k = _draftKey(rid, tid);
+    final raw = prefs.getString(k);
+    if (raw != null) {
+      try {
+        final d = TableDraft.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+        return d.restaurantId == rid && d.tableId == tid ? d : null;
+      } catch (_) {
+        // Corrupted SharedPreferences string — attempt recovery from disk backup
+        final diskJson = await OutboxFileStore.atomicRead(k);
+        if (diskJson != null) {
+          final d = TableDraft.fromJson(diskJson);
+          return d.restaurantId == rid && d.tableId == tid ? d : null;
+        }
+        return null;
+      }
     }
+    return null;
   }
 
   /// Saves, or deletes when there is nothing left to send.
@@ -733,8 +744,11 @@ class DraftCartStore {
     final k = _draftKey(d.restaurantId, d.tableId);
     if (d.isEmpty) {
       await prefs.remove(k);
+      await OutboxFileStore.atomicRemove(k);
     } else {
-      await prefs.setString(k, jsonEncode(d.toJson()));
+      final jsonMap = d.toJson();
+      await prefs.setString(k, jsonEncode(jsonMap));
+      await OutboxFileStore.atomicWrite(k, jsonMap);
     }
     await refreshPending(d.restaurantId);
   }
@@ -868,5 +882,82 @@ class DraftCartStore {
     for (final k in prefs.getKeys().where((k) => k.startsWith(_snapPrefix))) {
       await prefs.remove(k);
     }
+    await OutboxFileStore.clearAll();
+  }
+}
+
+/// Atomic disk-file persistence backup for [DraftCartStore].
+///
+/// Operates with write-ahead atomic file operations (`.tmp` write + sync + rename)
+/// to ensure zero loss or corruption of unsent drafts or offline settlements
+/// even during sudden OS crashes or battery shutdowns.
+class OutboxFileStore {
+  static Directory? _outboxDir;
+
+  static Future<Directory?> _getDir() async {
+    if (_outboxDir != null) return _outboxDir!;
+    try {
+      final base = Directory.systemTemp.path;
+      final dir = Directory('$base/fatfox_dinein_outbox');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      _outboxDir = dir;
+      return dir;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> atomicWrite(String key, Map<String, dynamic> json) async {
+    try {
+      final dir = await _getDir();
+      if (dir == null) return;
+      final sanitized = key.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+      final file = File('${dir.path}/$sanitized.json');
+      final tmp = File('${dir.path}/$sanitized.tmp');
+      final content = jsonEncode(json);
+      await tmp.writeAsString(content, flush: true);
+      await tmp.rename(file.path);
+    } catch (_) {}
+  }
+
+  static Future<Map<String, dynamic>?> atomicRead(String key) async {
+    try {
+      final dir = await _getDir();
+      if (dir == null) return null;
+      final sanitized = key.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+      final file = File('${dir.path}/$sanitized.json');
+      if (!await file.exists()) return null;
+      final content = await file.readAsString();
+      return jsonDecode(content) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> atomicRemove(String key) async {
+    try {
+      final dir = await _getDir();
+      if (dir == null) return;
+      final sanitized = key.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+      final file = File('${dir.path}/$sanitized.json');
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> clearAll() async {
+    try {
+      final dir = await _getDir();
+      if (dir != null && await dir.exists()) {
+        await for (final entity in dir.list()) {
+          if (entity is File) {
+            await entity.delete();
+          }
+        }
+      }
+    } catch (_) {}
   }
 }

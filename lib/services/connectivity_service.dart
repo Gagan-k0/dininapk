@@ -19,7 +19,9 @@ class ConnectivityService with ChangeNotifier {
   static final ConnectivityService instance = ConnectivityService._();
 
   static const String storageKey = 'waiter_sync_off';
-  static const Duration probeEvery = Duration(seconds: 20);
+  static const Duration probeFastInterval = Duration(seconds: 10);
+  static const Duration probeSecondaryInterval = Duration(seconds: 15);
+  static const Duration probeMaxInterval = Duration(seconds: 30);
 
   /// Set once at startup (main.dart) — a background request whose outcome
   /// flows back through [reportReachable] / [reportNetworkFailure].
@@ -32,6 +34,7 @@ class ConnectivityService with ChangeNotifier {
   bool _manualOff = false;
   bool _noSignal = false;
   Timer? _probeTimer;
+  int _probeAttempts = 0;
 
   SyncState get state => _manualOff
       ? SyncState.offlineManual
@@ -58,17 +61,26 @@ class ConnectivityService with ChangeNotifier {
     if (_manualOff) {
       _stopProbe();
     } else if (_noSignal) {
-      _startProbe();
-      unawaited(_runProbe()); // turning Sync on should answer "is it back?" now
+      triggerImmediateProbe();
     }
     notifyListeners();
     if (isOnline) onBackOnline?.call();
+  }
+
+  /// Trigger an immediate 0s probe attempt and reset backoff schedule to fast 10s phase.
+  void triggerImmediateProbe() {
+    if (_manualOff) return;
+    _probeAttempts = 0;
+    _stopProbe();
+    _scheduleNextProbe();
+    unawaited(_runProbe());
   }
 
   /// The server answered (any verdict, even a refusal).
   void reportReachable() {
     if (!_noSignal) return;
     _noSignal = false;
+    _probeAttempts = 0;
     _stopProbe();
     notifyListeners();
     if (isOnline) onBackOnline?.call();
@@ -76,14 +88,36 @@ class ConnectivityService with ChangeNotifier {
 
   /// A request never got a verdict (DNS, socket, timeout).
   void reportNetworkFailure() {
-    if (_noSignal) return;
+    final wasNoSignal = _noSignal;
     _noSignal = true;
-    if (!_manualOff) _startProbe();
+    if (!_manualOff) {
+      if (!wasNoSignal) {
+        // First network failure: trigger instant probe and start fast 10s schedule
+        triggerImmediateProbe();
+      } else if (_probeTimer == null) {
+        _scheduleNextProbe();
+      }
+    }
     notifyListeners();
   }
 
-  void _startProbe() {
-    _probeTimer ??= Timer.periodic(probeEvery, (_) => _runProbe());
+  void _scheduleNextProbe() {
+    _probeTimer?.cancel();
+    final Duration currentInterval;
+    if (_probeAttempts < 6) {
+      currentInterval = probeFastInterval; // 10s for first 1 min (6 * 10s)
+    } else if (_probeAttempts < 10) {
+      currentInterval = probeSecondaryInterval; // 15s for next minute
+    } else {
+      currentInterval = probeMaxInterval; // 30s cap for prolonged outages
+    }
+
+    _probeTimer = Timer(currentInterval, () async {
+      await _runProbe();
+      if (_noSignal && !_manualOff) {
+        _scheduleNextProbe();
+      }
+    });
   }
 
   void _stopProbe() {
@@ -96,6 +130,7 @@ class ConnectivityService with ChangeNotifier {
     final p = probe;
     if (p == null || _probing || _manualOff) return;
     _probing = true;
+    _probeAttempts++;
     try {
       await p();
     } catch (_) {
@@ -109,6 +144,7 @@ class ConnectivityService with ChangeNotifier {
   void clearSignal() {
     if (!_noSignal) return;
     _noSignal = false;
+    _probeAttempts = 0;
     _stopProbe();
     notifyListeners();
   }

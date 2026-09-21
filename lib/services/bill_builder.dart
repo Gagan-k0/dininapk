@@ -142,14 +142,21 @@ class BillBuilder {
       } else if (variantRaw is Map) {
         variant = (variantRaw['valuename'] ?? variantRaw['name'])?.toString();
       }
+      if ((variant == null || variant.isEmpty) && m['variant_name'] != null) {
+        variant = m['variant_name']?.toString();
+      }
       final addons = <String>[];
-      final addonData = m['addonData'];
+      final addonData = m['addonData'] ?? m['addons'];
       if (addonData is List) {
         for (final a in addonData) {
           if (a is Map) {
             final v = a['value'];
-            final label = v is Map ? (v['valuename'] ?? v['name']) : (a['valuename'] ?? a['name']);
-            if (label != null) addons.add(label.toString());
+            final label = v is Map
+                ? (v['valuename'] ?? v['name'] ?? v['displayname'])
+                : (a['valuename'] ?? a['name'] ?? a['displayname'] ?? a['addon_name']);
+            if (label != null && label.toString().trim().isNotEmpty) {
+              addons.add(label.toString().trim());
+            }
           }
         }
       }

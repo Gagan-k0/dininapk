@@ -165,7 +165,7 @@ class SyncStatusChip extends StatelessWidget {
                           ? 'Off — nothing is sent. KOT, bill and settle still '
                                 'print, and go up when Sync is back on.'
                           : noSignal
-                          ? 'On — server unreachable, retrying every 20s.'
+                          ? 'On — server unreachable, retrying every 10s (adaptive backoff).'
                           : 'On — connected.',
                     ),
                     value: !net.syncOff,
