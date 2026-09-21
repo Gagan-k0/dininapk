@@ -9,6 +9,7 @@ import '../../services/api_service.dart';
 import '../../widgets/payment_mode_sheet.dart';
 import '../../widgets/subscription_banner.dart';
 import '../../widgets/sync_status_chip.dart';
+import '../../services/connectivity_service.dart';
 import '../../utils/async_guard.dart';
 
 class DineInTableScreen extends StatefulWidget {
@@ -395,44 +396,85 @@ class _DineInTableScreenState extends State<DineInTableScreen> {
 
   Widget _buildStaleBanner(TableProvider prov) {
     final expired = prov.sessionExpired;
-    return Material(
-      color: expired ? const Color(0xFFFEE2E2) : const Color(0xFFFEF3C7),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Row(
-          children: [
-            Icon(
-              expired ? Icons.lock_outline : Icons.cloud_off,
-              size: 18,
-              color: expired
-                  ? const Color(0xFFB91C1C)
-                  : const Color(0xFF92400E),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                expired
-                    ? 'Session expired — log in again to keep working.'
-                    : "Couldn't refresh the floor — showing what was loaded "
-                          "${prov.lastSyncedLabel.isEmpty ? 'earlier' : prov.lastSyncedLabel}. "
-                          "${prov.errorMessage}",
-                style: TextStyle(
-                  fontSize: 12,
-                  color: expired
-                      ? const Color(0xFFB91C1C)
-                      : const Color(0xFF92400E),
-                ),
-              ),
-            ),
-            TextButton(
-              onPressed: expired ? () => _relogin() : () => prov.refresh(),
-              child: Text(
-                expired ? 'LOG IN' : 'RETRY',
-                style: const TextStyle(fontSize: 12),
-              ),
-            ),
-          ],
+    final timeLabel =
+        prov.lastSyncedLabel.isEmpty ? 'earlier' : prov.lastSyncedLabel;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: expired ? const Color(0xFFFEF2F2) : const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: expired ? const Color(0xFFFCA5A5) : const Color(0xFFFDE68A),
         ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: expired ? const Color(0xFFFEE2E2) : const Color(0xFFFEF3C7),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              expired ? Icons.lock_outline : Icons.wifi_off_rounded,
+              size: 18,
+              color: expired ? const Color(0xFFDC2626) : const Color(0xFFD97706),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  expired
+                      ? 'Session expired — log in again'
+                      : "Couldn't refresh floor — showing data loaded $timeLabel",
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: expired ? const Color(0xFF991B1B) : const Color(0xFF92400E),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  expired
+                      ? 'Re-authentication required to sync floor tables.'
+                      : (prov.errorMessage?.isNotEmpty == true
+                          ? prov.errorMessage!
+                          : 'Server unreachable (backend.fatfox.testfox.in). Auto-retrying every 10s...'),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: expired ? const Color(0xFFB91C1C) : const Color(0xFFB45309),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.tonal(
+            style: FilledButton.styleFrom(
+              backgroundColor: expired ? const Color(0xFFFEE2E2) : const Color(0xFFFEF3C7),
+              foregroundColor: expired ? const Color(0xFF991B1B) : const Color(0xFF92400E),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: expired
+                ? () => _relogin()
+                : () {
+                    ConnectivityService.instance.triggerImmediateProbe();
+                    prov.refresh();
+                  },
+            child: Text(
+              expired ? 'LOG IN' : 'RETRY NOW',
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
       ),
     );
   }

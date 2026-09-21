@@ -2326,5 +2326,111 @@ void main() {
       expect(result.error, contains('Open the table'));
       expect(printer.bills, isEmpty);
     });
+
+    test('offline print bill followed by settle prints bill paper exactly once', () async {
+      await openWithOrder();
+      goOffline();
+      await pos.addItemToCart(item);
+      await pos.sendKotOrder();
+
+      expect(pos.isBillPrinted, isFalse);
+      expect(printer.bills, isEmpty);
+
+      final printResult = await pos.printBill();
+      expect(printResult.error, isNull);
+      expect(pos.isBillPrinted, isTrue);
+      expect(printer.bills, hasLength(1));
+
+      final settleSuccess = await pos.settleAndPrintBill(paymentType: 'CASH');
+      expect(settleSuccess, isTrue);
+      expect(printer.bills, hasLength(1), reason: 'Bill paper must not print a second time on settle when already printed');
+    });
+
+    test('offline settle directly without print bill prints bill paper exactly once', () async {
+      await openWithOrder();
+      goOffline();
+      await pos.addItemToCart(item);
+      await pos.sendKotOrder();
+
+      expect(pos.isBillPrinted, isFalse);
+      expect(printer.bills, isEmpty);
+
+      final settleSuccess = await pos.settleAndPrintBill(paymentType: 'CASH');
+      expect(settleSuccess, isTrue);
+      expect(printer.bills, hasLength(1), reason: 'Settle directly must print bill paper exactly once');
+    });
+
+    test('offline variants and add-ons are preserved in draft, printing, and online sync payload', () async {
+      await openWithOrder();
+      goOffline();
+
+      final customItem = MenuItem(
+        id: soup,
+        categoryId: 'cat1',
+        name: 'Special Soup',
+        displayName: 'Special Soup',
+        attribute: 'VEG',
+        price: 100,
+        customisable: true,
+        variants: [
+          MenuVariant(id: 'v_large', name: 'Large', price: 150),
+        ],
+      );
+
+      final addonsJson = [
+        {
+          'addon_id': 'g_cheese',
+          'addonvalue_id': 'opt_cheese',
+          'addon_price': 30.0,
+          'value': {'_id': 'opt_cheese', 'valuename': 'Extra Cheese', 'price': 30.0},
+        }
+      ];
+
+      await pos.addItemToCart(
+        customItem,
+        variantId: 'v_large',
+        addons: addonsJson,
+        quantity: 2,
+        description: 'Extra hot',
+      );
+
+      // 1. Verify DraftLine contents
+      final draft = (await store.load('r1', tableId))!;
+      expect(draft.lines, hasLength(1));
+      final line = draft.lines.single;
+      expect(line.variantId, 'v_large');
+      expect(line.variantName, 'Large');
+      expect(line.addons, hasLength(1));
+      expect(line.unitPrice, 180.0); // 150 variant + 30 addon
+
+      // 2. Verify KOT printer line item mapping
+      final kotLines = pos.printCartLines;
+      expect(kotLines.last.selectedVariant?.name, 'Large');
+      expect(kotLines.last.selectedAddons, hasLength(1));
+      expect(kotLines.last.selectedAddons.first.valueName, 'Extra Cheese');
+
+      // 3. Verify Offline Bill printing mapping
+      final kotSuccess = await pos.sendKotOrder();
+      expect(kotSuccess, isTrue);
+      final printRes = await pos.printBill();
+      expect(printRes.error, isNull);
+      expect(printer.bills, hasLength(1));
+      final bill = printer.bills.single;
+      expect(bill.lines.last.variant, 'Large');
+      expect(bill.lines.last.addons, contains('Extra Cheese'));
+
+      // 4. Verify Online Sync payload contains variant_id and addons
+      goOnline();
+      await pos.flushAllDrafts();
+      expect(server.count('/offline-sync'), 1);
+      final syncReq = server.last('/offline-sync');
+      final body = jsonDecode(syncReq.body) as Map<String, dynamic>;
+      final syncLines = body['lines'] as List;
+      expect(syncLines, hasLength(1));
+      final syncedLine = syncLines.first as Map<String, dynamic>;
+      expect(syncedLine['variant_id'], 'v_large');
+      expect(syncedLine['addons'], hasLength(1));
+      expect(syncedLine['addons'][0]['addonvalue_id'], 'opt_cheese');
+    });
   });
 }

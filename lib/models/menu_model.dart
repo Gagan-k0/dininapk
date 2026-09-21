@@ -419,12 +419,26 @@ class MenuItem {
         status == null || status == 1 || status == '1';
 
     final varList = <MenuVariant>[];
-    if (json['variants'] is List) {
-      for (var v in (json['variants'] as List)) {
-        if (v is Map<String, dynamic> && isActive(v['status'])) {
-          varList.add(MenuVariant.fromJson(v));
+    void parseVariantEntry(dynamic v) {
+      if (v is Map) {
+        final map = Map<String, dynamic>.from(v);
+        if (isActive(map['status'])) {
+          varList.add(MenuVariant.fromJson(map));
         }
       }
+    }
+
+    final rawVariants = json['variants'] ??
+        json['variant'] ??
+        json['variant_id'] ??
+        json['variant_data'] ??
+        json['variantData'];
+    if (rawVariants is List) {
+      for (var v in rawVariants) {
+        parseVariantEntry(v);
+      }
+    } else if (rawVariants is Map) {
+      parseVariantEntry(rawVariants);
     }
 
     final addList = <MenuAddon>[];

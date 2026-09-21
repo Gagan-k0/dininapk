@@ -266,7 +266,6 @@ class ApiClient {
       if (encoded != null) req.body = encoded;
       final streamed = await _http.send(req).timeout(timeout ?? defaultTimeout);
       response = await http.Response.fromStream(streamed);
-      net.reportReachable();
     } on TimeoutException {
       net.reportNetworkFailure();
       throw ApiException(
@@ -287,6 +286,13 @@ class ApiClient {
     );
 
     Map<String, dynamic> raw;
+    final contentType = response.headers.entries
+        .firstWhere((e) => e.key.toLowerCase() == 'content-type', orElse: () => const MapEntry('', ''))
+        .value
+        .toLowerCase();
+    final isHtmlCaptive = response.statusCode == 200 &&
+        (contentType.contains('text/html') ||
+            response.body.trim().toLowerCase().startsWith('<html'));
     try {
       final decoded = response.body.isEmpty ? {} : jsonDecode(response.body);
       raw = decoded is Map
@@ -294,7 +300,16 @@ class ApiClient {
           : {'data': decoded};
     } catch (_) {
       raw = {};
+      if (isHtmlCaptive) {
+        net.reportNetworkFailure();
+        throw const ApiException(
+          'Captive portal or network redirect detected. Re-connect Wi-Fi.',
+          code: 0,
+          isNetwork: true,
+        );
+      }
     }
+    net.reportReachable();
     final env = ApiEnvelope.parse(raw);
 
     final authFailed =
@@ -368,5 +383,14 @@ String friendlyError(
 ]) {
   if (e is ApiException) return e.message.isNotEmpty ? e.message : fallback;
   final s = e.toString().replaceAll('Exception: ', '').trim();
+  if (s.contains('Failed host lookup') ||
+      s.contains('SocketException') ||
+      s.contains('Network is unreachable') ||
+      s.contains('No address associated with hostname') ||
+      s.contains('ClientException') ||
+      s.contains('Connection refused') ||
+      s.contains('TimeoutException')) {
+    return 'Server unreachable (${ApiConfig.cleanBaseUrl})';
+  }
   return s.isEmpty ? fallback : s;
 }
