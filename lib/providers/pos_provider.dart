@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show SocketException;
 
 import 'package:flutter/foundation.dart';
 
@@ -2343,6 +2344,9 @@ class PosProvider with ChangeNotifier {
     // cart read just now (a send already returns one). This also proves the
     // server is reachable before anything prints.
     _isBusy = true;
+    // The KOT toast shows these; none may linger from an earlier action.
+    _errorMessage = null;
+    printError = null;
     notifyListeners();
     // One lock for the whole send + print; released however it ends.
     try {
@@ -2490,7 +2494,8 @@ class PosProvider with ChangeNotifier {
       await _printKotTickets(kotItems, offline: true);
     } catch (e) {
       // Nothing reached the paper, so there is nothing to seal or replay.
-      printError = friendlyError(e);
+      // friendlyError would call an unreachable LAN printer "Server unreachable".
+      printError = 'Printer error: ${e is SocketException || e is TimeoutException ? 'KOT printer not reachable. Check it is on and on this Wi-Fi.' : friendlyError(e)}';
       debugPrint('[Fatfox POS] Offline KOT print error: $e');
       return false;
     }

@@ -2451,7 +2451,9 @@ class _CartBottomSheet extends StatelessWidget {
                             final String msg;
                             if (!success) {
                               bg = const Color(0xFFDC2626);
-                              msg = pos.errorMessage ?? 'KOT failed';
+                              // An offline KOT that could not print reports
+                              // through printError (nothing was sent).
+                              msg = pos.errorMessage ?? printNote ?? 'KOT failed';
                             } else if (printNote == null) {
                               bg = const Color(0xFF16A34A);
                               msg = 'KOT sent + printed ✓';
