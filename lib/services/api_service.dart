@@ -741,6 +741,40 @@ class ApiService {
   }
 
   // ============================================================
+  // Orders (settled) — transaction reports / CSV export
+  // ============================================================
+
+  /// GET /restaurant/order?from=YYYY-MM-DD&to=YYYY-MM-DD&service_type=dinein
+  /// Returns settled orders for the current restaurant within the date range.
+  Future<List<Map<String, dynamic>>> getOrders({
+    String? from,
+    String? to,
+  }) async {
+    final env = await _client.get(ApiConfig.orderList, query: {
+      if (from != null) 'fromDate': from,
+      if (to != null) 'toDate': to,
+    });
+    final rawData = env.data;
+    List rawList = [];
+    if (rawData is Map && rawData['docs'] is List) {
+      rawList = rawData['docs'];
+    } else if (rawData is List) {
+      rawList = rawData;
+    }
+
+    final restId = await _authService.getRestaurantId();
+    final orders = <Map<String, dynamic>>[];
+    for (final rawItem in rawList) {
+      if (rawItem is! Map) continue;
+      final o = Map<String, dynamic>.from(rawItem);
+      final oRest = o['restaurant_id']?.toString() ?? '';
+      if (restId != null && restId.isNotEmpty && oRest != restId) continue;
+      orders.add(o);
+    }
+    return orders;
+  }
+
+  // ============================================================
   // Reservations & live orders (best-effort feeds)
   // ============================================================
 

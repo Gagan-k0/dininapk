@@ -36,6 +36,12 @@ class KotGroup {
 /// * Discard = `DELETE deletecart/{id}` (empties cart, no Order — admin Discard).
 class PosProvider with ChangeNotifier {
   final ApiService _apiService;
+
+  /// Public access for screens that need the [ApiService] (e.g. reports).
+  ApiService get apiService => _apiService;
+
+  /// Public access to offline storage (e.g. for offline transaction reports).
+  DraftCartStore get drafts => _drafts;
   final ThermalPrinterService _printer;
   final MenuCacheService _menuCache;
   final AuthService _authService;
