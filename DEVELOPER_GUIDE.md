@@ -77,3 +77,28 @@ screen and marks it stale; it must not look like an empty restaurant.
 ## Demo login
 
 `admin@example.com` / `mypassword` → local UI only (no API). Real restaurant credentials required for KOT/settle/tables.
+
+## Release signing
+
+Release APKs must all be signed with **one shared key**. Each machine's debug key is different, so an APK built on another machine cannot install over the app on a tablet: Android refuses the update, and uninstalling first **deletes unsynced offline bills, drafts and printer settings**.
+
+One-time setup (whoever owns releases):
+
+```bash
+keytool -genkey -v -keystore ~/fatfox-waiter-release.jks -keyalg RSA \
+  -keysize 2048 -validity 10000 -alias fatfox-waiter
+```
+
+Create `android/key.properties` (git-ignored, never commit it or the `.jks`):
+
+```properties
+storeFile=/absolute/path/to/fatfox-waiter-release.jks
+storePassword=...
+keyAlias=fatfox-waiter
+keyPassword=...
+```
+
+Share the `.jks` and passwords with other release builders through a password manager, not chat or git. Without `key.properties` the build still works, but it prints a warning and signs with the local debug key.
+
+**Switching a tablet to the release key** needs one last uninstall. Before uninstalling, open the app online and wait until the Sync chip shows nothing pending. Otherwise unsynced offline bills are lost.
+
