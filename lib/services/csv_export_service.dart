@@ -1,7 +1,9 @@
 import 'dart:io';
 
-import 'package:flutter/material.dart' show DateUtils, debugPrint;
+import 'package:flutter/material.dart' show DateUtils, debugPrint, visibleForTesting;
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 /// Generates a CSV file from settled order data and saves it to the device.
 ///
@@ -123,17 +125,57 @@ class CsvExportService {
   /// `FatFox_Transactions_21-Sep-2026_to_22-Sep-2026_saved_17-43-05.csv`
   /// (one date when the range is a single day), so reports sort and are
   /// found by the day they cover, and a second save never overwrites one.
+  ///
+  /// Android 10 and older refuse that write without the storage permission
+  /// (asked only then — newer Android never needs it). If it is still
+  /// refused, the file goes to this app's own folder on shared storage
+  /// (Android/data/…/files/FatFox/Transactions), which needs no permission.
+  /// [displayFolder] names wherever it actually landed.
   static Future<File> saveCsv(
     String csv, {
     required DateTime from,
     required DateTime to,
   }) async {
-    final dir = Directory('/storage/emulated/0/$folder');
-    await dir.create(recursive: true);
-    final file = File('${dir.path}/${fileName(from, to, DateTime.now())}');
-    await file.writeAsString(csv, flush: true);
+    final name = fileName(from, to, DateTime.now());
+    final shared = Directory('$_sharedRoot/$folder');
+    var file = await tryWrite(shared, name, csv);
+    if (file == null && await Permission.storage.request().isGranted) {
+      file = await tryWrite(shared, name, csv);
+    }
+    if (file == null) {
+      final own = await getExternalStorageDirectory();
+      if (own != null) {
+        file = await tryWrite(Directory('${own.path}/FatFox/Transactions'), name, csv);
+      }
+    }
+    if (file == null) {
+      throw FileSystemException('Could not save the CSV', shared.path);
+    }
     debugPrint('[Fatfox CSV] Saved ${file.path} (${csv.length} bytes)');
     return file;
+  }
+
+  static const String _sharedRoot = '/storage/emulated/0';
+
+  /// Writes [csv] as [name] in [dir]; null when the folder refuses it.
+  @visibleForTesting
+  static Future<File?> tryWrite(Directory dir, String name, String csv) async {
+    try {
+      await dir.create(recursive: true);
+      final file = File('${dir.path}/$name');
+      await file.writeAsString(csv, flush: true);
+      return file;
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  /// [file]'s folder as the Files app shows it (relative to shared storage).
+  static String displayFolder(File file) {
+    final dir = file.parent.path;
+    return dir.startsWith('$_sharedRoot/')
+        ? dir.substring(_sharedRoot.length + 1)
+        : dir;
   }
 
   static String fileName(DateTime from, DateTime to, DateTime savedAt) {

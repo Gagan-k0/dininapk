@@ -116,6 +116,13 @@ class FakePrinter extends ThermalPrinterService {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  OutboxFileStore.useDirectoryForTesting(
+    Directory.systemTemp.createTempSync('outbox_test_'),
+  );
+
+  // Settlements are read back from the outbox's disk copies when prefs lack
+  // them, and those files outlive a prefs reset (and the test run).
+  setUp(OutboxFileStore.clearAll);
 
   group('draft rules', () {
     test('identical taps merge like the server; different add-ons do not', () {

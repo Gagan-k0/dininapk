@@ -228,6 +228,7 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
   /// also how it is sent to WhatsApp / email / Drive or saved elsewhere).
   Future<void> _showSaved(File file, List<List<String>> rows) {
     final name = file.uri.pathSegments.last;
+    final folder = CsvExportService.displayFolder(file);
     return showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -244,7 +245,7 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
             children: [
               const TextSpan(text: 'Folder\n', style: TextStyle(color: Colors.grey)),
               TextSpan(
-                text: '${CsvExportService.folder}\n\n',
+                text: '$folder\n\n',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const TextSpan(text: 'File\n', style: TextStyle(color: Colors.grey)),
@@ -253,8 +254,12 @@ class _TransactionReportScreenState extends State<TransactionReportScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               TextSpan(
-                text: 'Find it in the Files app under '
-                    '${CsvExportService.folder.replaceAll('/', ' › ')}.',
+                // The app's own fallback folder is hidden from the Files app
+                // on Android 11+; Share is the way out from there.
+                text: folder.startsWith('Download/')
+                    ? 'Find it in the Files app under '
+                        '${folder.replaceAll('/', ' › ')}.'
+                    : 'Use Share to send it or save it to another folder.',
                 style: TextStyle(color: Colors.grey.shade700),
               ),
             ],

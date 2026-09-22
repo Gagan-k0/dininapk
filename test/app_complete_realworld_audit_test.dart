@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
 
@@ -25,6 +26,9 @@ const testItem2Id = '64d000000000000000000002';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  OutboxFileStore.useDirectoryForTesting(
+    Directory.systemTemp.createTempSync('outbox_test_'),
+  );
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
