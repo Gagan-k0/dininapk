@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:dineinapk/services/csv_export_service.dart';
 import 'package:dineinapk/services/draft_cart_store.dart';
@@ -165,6 +166,31 @@ void main() {
     expect(
       CsvExportService.fileName(DateTime(2026, 9, 15), to, saved),
       'FatFox_Transactions_15-Sep-2026_to_21-Sep-2026_saved_17-43-05.csv',
+    );
+  });
+
+  test('a folder that refuses the write yields null, not a throw', () async {
+    final blocked = File('${Directory.systemTemp.path}/fatfox_csv_blocker')
+      ..writeAsStringSync('x'); // a FILE where the folder should be
+    final file = await CsvExportService.tryWrite(
+      Directory('${blocked.path}/sub'), 'a.csv', 'x');
+    expect(file, isNull);
+    blocked.deleteSync();
+
+    final ok = await CsvExportService.tryWrite(
+      Directory('${Directory.systemTemp.path}/fatfox_csv_ok'), 'a.csv', 'x');
+    expect(ok!.readAsStringSync(), 'x');
+  });
+
+  test('folder is shown relative to shared storage', () {
+    expect(
+      CsvExportService.displayFolder(
+          File('/storage/emulated/0/Download/FatFox/Transactions/a.csv')),
+      'Download/FatFox/Transactions',
+    );
+    expect(
+      CsvExportService.displayFolder(File('/data/x/files/FatFox/a.csv')),
+      '/data/x/files/FatFox',
     );
   });
 }
