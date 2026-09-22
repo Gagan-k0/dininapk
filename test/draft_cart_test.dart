@@ -149,6 +149,42 @@ void main() {
       expect(TableDraft.fromJson(jsonDecode(jsonEncode(d.toJson()))).createdAt, at);
     });
 
+    test('each offline print adds the server lines it showed, latest quantity wins', () {
+      final d = TableDraft.start('r1', tableId, cartA)
+          .add(line('a'))
+          .sealPrinted('KOT_PRINT', {'l0': 1})
+          .sealPrinted('PRINTED', {'l0': 2, 'l9': 1});
+      expect(d.printedServerLines, {'l0': 2, 'l9': 1});
+      final back = TableDraft.fromJson(jsonDecode(jsonEncode(d.toJson())));
+      expect(back.printedServerLines, {'l0': 2, 'l9': 1});
+      final blanket = d.copyWith(blanketReplay: true);
+      expect(TableDraft.fromJson(jsonDecode(jsonEncode(blanket.toJson()))).printedServerLines, isNull,
+          reason: 'a blanket row stays blanket across a restart');
+      expect(blanket.sealPrinted('KOT_PRINT', {'l3': 1}).printedServerLines, isNull,
+          reason: 'still blanket while its replay waits');
+      expect(blanket.copyWith(clearOps: true).sealPrinted('KOT_PRINT', {'l3': 1}).printedServerLines,
+          {'l3': 1}, reason: 'the next ticket, after that replay, names its lines again');
+    });
+
+    test('a line still opening the order is sealed with the ticket it was on', () {
+      final d = TableDraft.start('r1', tableId, null).copyWith(creatingLine: line('a'));
+      expect(d.creatingPrinted, isFalse);
+      expect(d.sealPrinted('KOT_PRINT').creatingPrinted, isTrue);
+    });
+
+    test('a print queued by an older build keeps the blanket replay', () {
+      final old = TableDraft.start('r1', tableId, cartA).add(line('a')).sealPrinted('KOT_PRINT').toJson()
+        ..remove('printedServerLines');
+      final legacy = TableDraft.fromJson(old);
+      // Null = send no printed_lines: the server marks every line, as when printed.
+      expect(legacy.printedServerLines, isNull);
+      expect(legacy.sealPrinted('PRINTED', {'l0': 1}).printedServerLines, isNull);
+      final noPrint = TableDraft.start('r1', tableId, cartA).add(line('a')).toJson()
+        ..remove('printedServerLines');
+      expect(TableDraft.fromJson(noPrint).printedServerLines, isEmpty,
+          reason: 'nothing printed yet: start tracking now');
+    });
+
     test('a draft is never read for another restaurant', () async {
       SharedPreferences.setMockInitialValues({});
       final store = DraftCartStore();
@@ -1082,6 +1118,78 @@ void main() {
       expect(steps().last.headers['Idempotency-Key'], next.key);
       expect(jsonDecode(steps()[1].body)['table_status'], 'KOT_PRINT');
       expect(await store.load('r1', tableId), isNull);
+    });
+
+    test('the replay names only the server lines the ticket showed', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      expect((await store.load('r1', tableId))!.printedServerLines, {'l0': 1});
+      await pos.addItemToCart(item); // after the ticket
+
+      goOnline();
+      expect(await pos.flushAllDrafts(), 1);
+      final printedBatch = jsonDecode(steps()[0].body) as Map;
+      final status = jsonDecode(steps()[1].body) as Map;
+      final later = jsonDecode(steps()[2].body) as Map;
+      // A line another device added meanwhile is not named, so its own KOT
+      // still reaches the kitchen; the offline lines land already marked.
+      expect(status['printed_lines'], [
+        {'_id': 'l0', 'quantity': 1},
+      ]);
+      expect(printedBatch['printed'], isTrue);
+      expect(later.containsKey('printed'), isFalse, reason: 'not on the ticket');
+      expect(printedBatch['cart_id'], cartA);
+      expect(later['cart_id'], cartA);
+    });
+
+    test('a printed item that opened the order is named by its new server id', () async {
+      const other = '64b000000000000000000007';
+      server.cart = []; // the table has no order yet
+      await pos.loadTableAndMenu(other, 'area1');
+      goOffline();
+      await pos.addItemToCart(item);
+      expect(await pos.sendKotOrder(), isTrue);
+
+      goOnline();
+      await pos.flushAllDrafts();
+      expect(server.count('/createcart'), 1);
+      // createcart cannot mark a line sent, so the replay must name it.
+      expect(jsonDecode(server.last('/offline-status').body)['printed_lines'], [
+        {'_id': 'l1', 'quantity': 1},
+      ]);
+    });
+
+    test('a printed batch whose key first landed unsent falls back to the blanket replay', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      goOnline();
+      // The server already holds this key as unsent rows the tablet cannot name.
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? envelope({'sync_result': 'duplicate', 'printed': false})
+          : null;
+      expect(await pos.flushAllDrafts(), 1);
+      final status = jsonDecode(server.last('/offline-status').body) as Map;
+      expect(status.containsKey('printed_lines'), isFalse,
+          reason: 'mark every line rather than leave printed food unsent');
+    });
+
+    test('a printed batch that was simply resent keeps naming its lines', () async {
+      await openWithOrder();
+      await pos.addItemToCart(item);
+      goOffline();
+      await pos.sendKotOrder();
+      goOnline();
+      server.failOn = (r) => r.url.path.endsWith('/offline-sync')
+          ? envelope({'sync_result': 'duplicate', 'printed': true})
+          : null;
+      await pos.flushAllDrafts();
+      expect(jsonDecode(server.last('/offline-status').body)['printed_lines'], [
+        {'_id': 'l0', 'quantity': 1},
+      ]);
     });
 
     test('the replay never queues KOT: the kitchen is not fired twice', () async {

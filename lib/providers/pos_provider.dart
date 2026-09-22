@@ -1780,6 +1780,7 @@ class PosProvider with ChangeNotifier {
           // Persist before sending, so a lost answer is recognised next time.
           d = d.copyWith(
             creatingLine: first,
+            creatingPrinted: fromPrinted,
             lines: fromPrinted ? d.lines : d.lines.sublist(1),
             printedLines: fromPrinted ? d.printedLines.sublist(1) : d.printedLines,
           );
@@ -1799,15 +1800,16 @@ class PosProvider with ChangeNotifier {
             }
             rethrow;
           }
-          liveId = _cartIdOf(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true));
+          final opened = await _apiService.getCartItemsByTableId(tid, background: background, fresh: true);
+          liveId = _cartIdOf(opened);
           if (liveId.isEmpty) {
             throw const ApiException('Could not open the order. Try again.');
           }
-          d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+          d = _creatingLanded(d, opened, liveId);
           await _saveDraft(d);
         } else if (pending != null &&
-            _cartHasLine(await _apiService.getCartItemsByTableId(tid, background: background, fresh: true), pending)) {
-          d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+            _cartHasLine(live, pending)) {
+          d = _creatingLanded(d, live, liveId);
           await _saveDraft(d);
         } else {
           return await _markConflict(
@@ -1829,15 +1831,17 @@ class PosProvider with ChangeNotifier {
       // Order matters: the printed batch, then its status, then whatever was
       // added after the print (which that status must not touch).
       if (d.printedLines.isNotEmpty) {
-        await _apiService.offlineSync(
+        final env = await _apiService.offlineSync(
           tableId: tid,
           idempotencyKey: d.printedKey ?? d.key,
           lines: d.printedLines.map((l) => l.toSyncJson()).toList(),
           capturedAt: d.createdAt,
+          cartId: d.baselineCartId,
+          printed: true,
           background: background,
         );
         sent = true;
-        d = d.copyWith(printedLines: const []);
+        d = _afterPrintedSync(d, env);
         await _saveDraft(d);
       }
       if (d.pendingOps.isNotEmpty) {
@@ -1856,6 +1860,7 @@ class PosProvider with ChangeNotifier {
           idempotencyKey: d.key,
           lines: d.lines.map((l) => l.toSyncJson()).toList(),
           capturedAt: d.createdAt,
+          cartId: d.baselineCartId,
           background: background,
         );
       }
@@ -1987,6 +1992,7 @@ class PosProvider with ChangeNotifier {
           tableStatus: status,
           idempotencyKey: _statusKey(d, status),
           capturedAt: d.createdAt,
+          printedLines: d.printedServerLines,
           background: background,
         );
       } on ApiException catch (e) {
@@ -2055,10 +2061,14 @@ class PosProvider with ChangeNotifier {
 
   /// Did an earlier, unanswered createcart for [l] reach the server? The
   /// pending line is locked, so its quantity can only match exactly.
-  bool _cartHasLine(List<Map<String, dynamic>> carts, DraftLine l) {
+  bool _cartHasLine(List<Map<String, dynamic>> carts, DraftLine l) =>
+      _cartLineIdFor(carts, l) != null;
+
+  /// The server id of the unsent line matching [l], or null.
+  String? _cartLineIdFor(List<Map<String, dynamic>> carts, DraftLine l) {
     final lines = carts.isEmpty ? null : carts.first['cartMenuData'];
-    if (lines is! List) return false;
-    return lines.whereType<Map>().any((raw) {
+    if (lines is! List) return null;
+    final hit = lines.whereType<Map>().firstWhere((raw) {
       final m = Map<String, dynamic>.from(raw);
       if (isKotLine(m) || m['cancel_status'] == 1) return false;
       final server = DraftLine(
@@ -2076,7 +2086,37 @@ class PosProvider with ChangeNotifier {
         isExtra: m['is_extra_addon'] == true,
       );
       return server.sameItemAs(l) && server.quantity == l.quantity;
-    });
+    }, orElse: () => const {});
+    return hit['_id']?.toString();
+  }
+
+  /// The locked [TableDraft.creatingLine] reached [carts]: unlock it, and if
+  /// it was on an offline ticket, record its server id for the replay.
+  TableDraft _creatingLanded(
+    TableDraft d,
+    List<Map<String, dynamic>> carts,
+    String liveId,
+  ) {
+    final c = d.creatingLine;
+    if (d.creatingPrinted && c != null) {
+      final id = _cartLineIdFor(carts, c);
+      // Not told apart: the replay cannot name it, so it marks every line.
+      d = id == null
+          ? d.copyWith(blanketReplay: true)
+          : d.withServerLines({id: c.quantity});
+    }
+    return d.copyWith(clearCreating: true, baselineCartId: liveId);
+  }
+
+  /// A printed batch answered `duplicate` for a key that first landed as
+  /// unsent rows (a lost answer, then an offline print): the tablet cannot
+  /// name those rows, so the replay falls back to the blanket.
+  static TableDraft _afterPrintedSync(TableDraft d, ApiEnvelope env) {
+    final data = env.data;
+    final unmarked = data is Map &&
+        data['sync_result'] == 'duplicate' &&
+        data['printed'] != true;
+    return d.copyWith(printedLines: const [], blanketReplay: unmarked);
   }
 
   /// Returns the table's cart after the sync. `offline-sync` on api-server main
@@ -2510,7 +2550,14 @@ class PosProvider with ChangeNotifier {
     final tid = resolvedTableId;
     if (_restaurantId.isEmpty || tid.isEmpty) return;
     final d = _openDraft ?? TableDraft.start(_restaurantId, tid, cartId);
-    await _saveDraft(d.sealPrinted(status).copyWith(billNumber: billNumber));
+    final shown = {
+      for (final l in _serverLines)
+        if (l['_id'] != null)
+          l['_id'].toString(): int.tryParse(l['quantity']?.toString() ?? '') ?? 1,
+    };
+    await _saveDraft(
+      d.sealPrinted(status, shown).copyWith(billNumber: billNumber),
+    );
   }
 
   // ============================================================
@@ -3266,6 +3313,7 @@ class PosProvider with ChangeNotifier {
         // Persisted before sending, so a lost answer is recognised next time.
         d = d.copyWith(
           creatingLine: first,
+          creatingPrinted: fromPrinted,
           lines: fromPrinted ? d.lines : d.lines.sublist(1),
           printedLines: fromPrinted ? d.printedLines.sublist(1) : d.printedLines,
         );
@@ -3286,18 +3334,21 @@ class PosProvider with ChangeNotifier {
           }
           rethrow;
         }
-        liveId = _cartIdOf(
-          await _apiService.getCartItemsByTableId(tid, background: background, fresh: true),
+        final opened = await _apiService.getCartItemsByTableId(
+          tid,
+          background: background,
+          fresh: true,
         );
+        liveId = _cartIdOf(opened);
         if (liveId.isEmpty) return false; // answered, but no order: try again
-        d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+        d = _creatingLanded(d, opened, liveId);
         await onProgress(d);
       } else if (d.creatingLine != null) {
         if (!_cartHasLine(live, d.creatingLine!)) {
           await _holdSettlement(onProgress, d);
           return false;
         }
-        d = d.copyWith(clearCreating: true, baselineCartId: liveId);
+        d = _creatingLanded(d, live, liveId);
         await onProgress(d);
       } else if (d.baselineCartId != liveId) {
         // An order is open on this table that is not the one this sitting was
@@ -3310,14 +3361,16 @@ class PosProvider with ChangeNotifier {
       // Order matters: the printed batch, then its status, then whatever was
       // added after the print (which that status must not touch).
       if (d.printedLines.isNotEmpty) {
-        await _apiService.offlineSync(
+        final env = await _apiService.offlineSync(
           tableId: tid,
           idempotencyKey: d.printedKey ?? d.key,
           lines: d.printedLines.map((l) => l.toSyncJson()).toList(),
           capturedAt: d.createdAt,
+          cartId: d.baselineCartId,
+          printed: true,
           background: background,
         );
-        d = d.copyWith(printedLines: const []);
+        d = _afterPrintedSync(d, env);
         await onProgress(d);
       }
 
@@ -3332,6 +3385,7 @@ class PosProvider with ChangeNotifier {
             tableStatus: status,
             idempotencyKey: _statusKey(d, status),
             capturedAt: d.createdAt,
+            printedLines: d.printedServerLines,
             background: background,
           );
         }
@@ -3347,6 +3401,7 @@ class PosProvider with ChangeNotifier {
           idempotencyKey: d.key,
           lines: d.lines.map((l) => l.toSyncJson()).toList(),
           capturedAt: d.createdAt,
+          cartId: d.baselineCartId,
           background: background,
         );
         d = d.copyWith(lines: const []);

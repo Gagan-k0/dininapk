@@ -176,6 +176,18 @@ class TableDraft {
   final List<DraftLine> printedLines;
   final String? printedKey;
 
+  /// Server lines that were on an offline ticket, id → quantity shown. The
+  /// status replay marks only these sent (plus [printedLines], which upload
+  /// already marked), so a line another device added meanwhile still reaches
+  /// the kitchen. Null = the tablet cannot name every printed row (a row from
+  /// an older build, a lost answer, an unmatched line): the replay stays
+  /// blanket, as it was.
+  final Map<String, int>? printedServerLines;
+
+  /// [creatingLine] was on an offline ticket: once found on the server, its
+  /// id joins [printedServerLines] (createcart cannot mark it sent).
+  final bool creatingPrinted;
+
   /// `setcartstatus` values for a print that already happened on paper,
   /// replayed in [opOrder] once the server has [printedLines]. 'KOT' is never
   /// queued: only that status builds the kitchen-display notification, so
@@ -208,6 +220,8 @@ class TableDraft {
     this.lines = const [],
     this.printedLines = const [],
     this.printedKey,
+    this.printedServerLines = const {},
+    this.creatingPrinted = false,
     this.pendingOps = const [],
     this.lastError,
     this.conflict = false,
@@ -249,6 +263,9 @@ class TableDraft {
     List<DraftLine>? lines,
     List<DraftLine>? printedLines,
     String? printedKey,
+    Map<String, int>? printedServerLines,
+    bool blanketReplay = false,
+    bool? creatingPrinted,
     List<String>? pendingOps,
     bool clearOps = false,
     String? lastError,
@@ -267,6 +284,10 @@ class TableDraft {
     lines: lines ?? this.lines,
     printedLines: printedLines ?? this.printedLines,
     printedKey: printedKey ?? this.printedKey,
+    printedServerLines: blanketReplay
+        ? null
+        : (printedServerLines ?? this.printedServerLines),
+    creatingPrinted: clearCreating ? false : (creatingPrinted ?? this.creatingPrinted),
     pendingOps: clearOps ? const [] : (pendingOps ?? this.pendingOps),
     lastError: clearError ? null : (lastError ?? this.lastError),
     conflict: conflict ?? this.conflict,
@@ -278,14 +299,32 @@ class TableDraft {
   /// Freezes what an offline print just put on paper: those lines read as
   /// printed and keep the key they were collected under, [status] is queued
   /// for replay, and anything added next waits under a NEW key so a later
-  /// blanket status update cannot mark it printed too.
-  TableDraft sealPrinted(String status) => copyWith(
+  /// blanket status update cannot mark it printed too. [serverLines] are the
+  /// server lines the same ticket showed (id → quantity). A [creatingLine]
+  /// was on the ticket too.
+  TableDraft sealPrinted(String status, [Map<String, int> serverLines = const {}]) => copyWith(
     key: DeviceIdService.randomHex(),
     printedKey: printedLines.isEmpty ? key : printedKey,
     printedLines: [...printedLines, ...lines],
+    // With no replay still waiting, a blanket fallback has done its job: this
+    // ticket starts naming its lines again.
+    printedServerLines: (pendingOps.isEmpty
+            ? copyWith(printedServerLines: const {})
+            : this)
+        .withServerLines(serverLines)
+        .printedServerLines,
+    creatingPrinted: creatingPrinted || creatingLine != null,
     lines: const [],
     pendingOps: pendingOps.contains(status) ? pendingOps : [...pendingOps, status],
   );
+
+  /// Also marks [lines] as on a ticket; the latest quantity shown wins. A
+  /// no-op on a blanket row.
+  TableDraft withServerLines(Map<String, int> lines) {
+    final had = printedServerLines;
+    if (had == null || lines.isEmpty) return this;
+    return copyWith(printedServerLines: {...had, ...lines});
+  }
 
   /// Adds [line], merging into an identical line like the server would.
   TableDraft add(DraftLine line) {
@@ -319,6 +358,8 @@ class TableDraft {
     'lines': lines.map((l) => l.toJson()).toList(),
     'printedLines': printedLines.map((l) => l.toJson()).toList(),
     'printedKey': printedKey,
+    'printedServerLines': printedServerLines,
+    'creatingPrinted': creatingPrinted,
     'pendingOps': pendingOps,
     'lastError': lastError,
     'conflict': conflict,
@@ -344,6 +385,16 @@ class TableDraft {
         .map((l) => DraftLine.fromJson(Map<String, dynamic>.from(l)))
         .toList(),
     printedKey: j['printedKey']?.toString(),
+    // Null for rows queued before this field: the replay then stays blanket,
+    // as it was when they were printed.
+    // Absent on rows saved by an older build. Only one with a print still to
+    // replay needs the blanket (null); any other starts tracking now.
+    printedServerLines: j.containsKey('printedServerLines')
+        ? (j['printedServerLines'] as Map?)?.map(
+            (k, v) => MapEntry(k.toString(), int.tryParse(v.toString()) ?? 1),
+          )
+        : ((j['pendingOps'] as List? ?? const []).isEmpty ? const {} : null),
+    creatingPrinted: j['creatingPrinted'] == true,
     pendingOps: (j['pendingOps'] as List? ?? const [])
         .map((o) => o.toString())
         .where(opOrder.contains)
