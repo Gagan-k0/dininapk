@@ -486,6 +486,8 @@ class ApiService {
     required String idempotencyKey,
     required List<Map<String, dynamic>> lines,
     DateTime? capturedAt,
+    String? cartId,
+    bool printed = false,
     bool background = false,
   }) {
     return _client.post(
@@ -493,6 +495,12 @@ class ApiService {
       body: {
         'table_id': tableId,
         'lines': lines,
+        // The order these were taken for: the server refuses `no_cart` rather
+        // than add them to a party seated since.
+        if (cartId != null && cartId.isNotEmpty) 'cart_id': cartId,
+        // Already on an offline KOT: they land marked sent, never merged into
+        // another device's unsent line.
+        if (printed) 'printed': true,
         // Server accepts sales captured before grace end from a locked restaurant.
         if (capturedAt != null) 'captured_at': capturedAt.toUtc().toIso8601String(),
       },
@@ -513,6 +521,7 @@ class ApiService {
     required String tableStatus,
     required String idempotencyKey,
     required DateTime capturedAt,
+    Map<String, int>? printedLines,
     bool background = false,
   }) {
     return _client.post(
@@ -521,6 +530,16 @@ class ApiService {
         'cartId': cartId,
         'table_status': tableStatus,
         'captured_at': capturedAt.toUtc().toIso8601String(),
+        // Only these server lines, at these quantities, were on the ticket.
+        // Null, past the server's 500 cap or a quantity it would refuse =
+        // mark every line, as before (a refusal would hold the status forever).
+        if (printedLines != null &&
+            printedLines.length <= 500 &&
+            printedLines.values.every((q) => q >= 1 && q <= 999))
+          'printed_lines': [
+            for (final e in printedLines.entries)
+              {'_id': e.key, 'quantity': e.value},
+          ],
       },
       extraHeaders: {'Idempotency-Key': idempotencyKey},
       background: background,
