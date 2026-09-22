@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'device_id_service.dart';
@@ -636,17 +637,34 @@ class DraftCartStore {
       ValueNotifier(const []);
 
   /// Every settlement stored for [rid], oldest capture first.
+  ///
+  /// These are money already taken, so SharedPreferences is not trusted
+  /// alone: a row it lost or can no longer decode comes back from its disk
+  /// copy ([OutboxFileStore]) and is written back.
   Future<List<OfflineSettlement>> allSettlements(String rid) async {
     if (rid.isEmpty) return const [];
     final prefs = await SharedPreferences.getInstance();
-    final out = <OfflineSettlement>[];
-    for (final k in prefs.getKeys().where(
-      (k) => k.startsWith('$_settlePrefix${rid}_'),
-    )) {
+    final prefix = '$_settlePrefix${rid}_';
+    final byKey = <String, OfflineSettlement>{};
+    for (final k in prefs.getKeys().where((k) => k.startsWith(prefix))) {
       final s = _decodeSettlement(prefs.getString(k));
-      if (s != null && s.restaurantId == rid) out.add(s);
+      if (s != null && s.restaurantId == rid) byKey[k] = s;
     }
-    out.sort((a, b) => a.capturedAt.compareTo(b.capturedAt));
+    for (final file in await OutboxFileStore.keys(prefix)) {
+      if (byKey.containsKey(file)) continue;
+      final json = await OutboxFileStore.atomicRead(file);
+      if (json == null) continue;
+      try {
+        final s = OfflineSettlement.fromJson(json);
+        // The row's own key, not the (sanitised) file name.
+        final k = _settleKey(s.restaurantId, s.tableId, s.key);
+        if (s.restaurantId != rid || byKey.containsKey(k)) continue;
+        byKey[k] = s;
+        await prefs.setString(k, jsonEncode(json));
+      } catch (_) {}
+    }
+    final out = byKey.values.toList()
+      ..sort((a, b) => a.capturedAt.compareTo(b.capturedAt));
     return out;
   }
 
@@ -756,6 +774,8 @@ class DraftCartStore {
   Future<void> delete(String rid, String tid) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_draftKey(rid, tid));
+    // Or a later corrupt read would "recover" these already-settled items.
+    await OutboxFileStore.atomicRemove(_draftKey(rid, tid));
     await refreshPending(rid);
   }
 
@@ -877,12 +897,13 @@ class DraftCartStore {
     }
   }
 
+  /// Logout. Only snapshots go: the outbox's disk copies back up unsent
+  /// drafts and offline settlements, which are sales and survive logout.
   static Future<void> clearSnapshots() async {
     final prefs = await SharedPreferences.getInstance();
     for (final k in prefs.getKeys().where((k) => k.startsWith(_snapPrefix))) {
       await prefs.remove(k);
     }
-    await OutboxFileStore.clearAll();
   }
 }
 
@@ -891,21 +912,64 @@ class DraftCartStore {
 /// Operates with write-ahead atomic file operations (`.tmp` write + sync + rename)
 /// to ensure zero loss or corruption of unsent drafts or offline settlements
 /// even during sudden OS crashes or battery shutdowns.
+///
+/// Lives in the app's documents directory: the temp/cache directory it used
+/// to use is the one Android clears under storage pressure. Files left there
+/// by older builds are moved over once.
 class OutboxFileStore {
-  static Directory? _outboxDir;
+  static const String _name = 'fatfox_dinein_outbox';
 
-  static Future<Directory?> _getDir() async {
-    if (_outboxDir != null) return _outboxDir!;
+  // One lookup (and one migration) however many callers race at start-up.
+  static Future<Directory?>? _dir;
+  static Future<Directory?> _getDir() => _dir ??= _openDir();
+
+  /// Tests get their own folder: files outlive a prefs reset and a test run,
+  /// and test files run in parallel.
+  @visibleForTesting
+  static void useDirectoryForTesting(Directory dir) => _dir = Future.value(dir);
+
+  static Future<Directory?> _openDir() async {
     try {
-      final base = Directory.systemTemp.path;
-      final dir = Directory('$base/fatfox_dinein_outbox');
+      final legacy = Directory('${Directory.systemTemp.path}/$_name');
+      Directory dir;
+      try {
+        dir = Directory('${(await getApplicationDocumentsDirectory()).path}/$_name');
+      } catch (_) {
+        dir = legacy; // no platform channel (unit tests)
+      }
       if (!await dir.exists()) {
         await dir.create(recursive: true);
       }
-      _outboxDir = dir;
+      if (dir.path != legacy.path && await legacy.exists()) {
+        await for (final f in legacy.list()) {
+          if (f is! File || !f.path.endsWith('.json')) continue;
+          final to = File('${dir.path}/${f.uri.pathSegments.last}');
+          if (await to.exists()) continue;
+          // Copy then rename: a crash mid-copy must not leave a torn file
+          // that hides the original once the old folder is gone.
+          await (await f.copy('${to.path}.tmp')).rename(to.path);
+        }
+        await legacy.delete(recursive: true);
+      }
       return dir;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Keys of every stored file whose key starts with [prefix]. Keys written
+  /// by [DraftCartStore] are already filename-safe, so a name is its key.
+  static Future<List<String>> keys(String prefix) async {
+    try {
+      final dir = await _getDir();
+      if (dir == null) return const [];
+      return [
+        await for (final f in dir.list())
+          if (f is File && f.path.endsWith('.json'))
+            f.uri.pathSegments.last.replaceFirst(RegExp(r'\.json$'), ''),
+      ].where((k) => k.startsWith(prefix)).toList();
+    } catch (_) {
+      return const [];
     }
   }
 
