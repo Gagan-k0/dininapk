@@ -1834,6 +1834,16 @@ class _CartBottomSheet extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
+          // Not sent yet: removable in one tap (offline too). A line already on
+          // a KOT keeps its cancel-with-reason button instead.
+          if (item['is_draft'] == true && !isKot)
+            IconButton(
+              icon: const Icon(Icons.close, size: 18, color: Color(0xFFDC2626)),
+              tooltip: 'Remove item',
+              onPressed: pos.isBusy
+                  ? null
+                  : () => _runCartWrite(context, pos, () => pos.removeCartItem(cartmenuId)),
+            ),
           // Item name
           Expanded(
             flex: 4,
